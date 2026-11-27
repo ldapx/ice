@@ -1,0 +1,14 @@
+{
+  "format": "openvlsi-project",
+  "schema_version": 1,
+  "identity": "project-project",
+  "name": "project",
+  "grid": 1,
+  "units": {
+    "nanometers_per_unit": 1,
+    "denominator": 1
+  },
+  "package_dependencies": [],
+  "layers": [],
+  "simulation_scripts": []
+}

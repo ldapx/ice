@@ -1,6 +1,6 @@
 # Simulation
 
-ICE provides analog and digital simulation through `icelib::SimulationRunner`.
+OpenVLSI provides analog and digital simulation through `openvlsilib::SimulationRunner`.
 The default `AutoSimulator` dispatches to `NgspiceSimulator` for SPICE analyses
 and to `IcarusVerilogSimulator` for SystemVerilog digital tests. Both adapters
 return the same normalized `SimulationResult` shape.
@@ -43,11 +43,11 @@ be picked directly; the resulting `v(node)` signal is appended to the list and
 the editor returns to the Simulation tab.
 
 A simulation may point at a drawn schematic, a text SPICE schematic, or a
-SystemVerilog source cell. For SPICE schematics the ICE PDK package supplies the
-model preamble (`.option`, `.include`, `.lib`) and OSDI initialization. ICE
+SystemVerilog source cell. For SPICE schematics the OpenVLSI PDK package supplies the
+model preamble (`.option`, `.include`, `.lib`) and OSDI initialization. OpenVLSI
 applies these before the schematic netlist and loads OSDI models explicitly
 through libngspice; a global `~/.spiceinit` or `PDK_ROOT`/`PDK` environment is
-not used for ICE simulations. Text source is used directly as the circuit
+not used for OpenVLSI simulations. Text source is used directly as the circuit
 netlist, with analysis-control directives (`.tran`, `.dc`, `.ac`, `.op`,
 `.noise`, `.tf`) and `.end` removed because the simulation properties supply the
 analysis. For text
@@ -59,22 +59,22 @@ picker.
 ## Digital HDL simulation
 
 SystemVerilog cells use the `iverilog` simulator and the `digital` analysis.
-When such a cell is selected in the Simulation tab, ICE selects those defaults
+When such a cell is selected in the Simulation tab, OpenVLSI selects those defaults
 automatically. Use **Add SystemVerilog Testbench…** in the Simulation panel
 **+** menu to create the testbench source and its simulation together; the
 simulation editor then opens a **Testbench** tab for editing that source. The
 source is compiled with Icarus Verilog 13 (`-g2012`).
 
 A simulation cell may reference modules defined in other project
-SystemVerilog cells. ICE follows module references and concatenates the
+SystemVerilog cells. OpenVLSI follows module references and concatenates the
 selected cell with the source cells it recursively instantiates, so a
 `<design>_tb` cell can instantiate a separate `<design>` cell without copying
 the design source into the testbench file.
 
-If the source already contains `$dumpfile` and `$dumpvars`, ICE runs its inferred
-top module directly. Otherwise ICE generates a wrapper top module that
+If the source already contains `$dumpfile` and `$dumpvars`, OpenVLSI runs its inferred
+top module directly. Otherwise OpenVLSI generates a wrapper top module that
 instantiates the inferred design top, dumps all signals to a temporary VCD, and
-compiles with `ice_vcd_top` as the top. A testbench named `<name>_tb` is the
+compiles with `openvlsi_vcd_top` as the top. A testbench named `<name>_tb` is the
 usual source cell. The wrapper allows a plain design block to be simulated too.
 
 The VCD parser converts dump times to seconds using the file's `$timescale`.
@@ -87,7 +87,7 @@ such as `clk`. When no capture list is set, all VCD traces are returned.
 ## Mixed-signal simulation
 
 A drawn schematic that instantiates SystemVerilog blocks is simulated with the
-`mixed` simulator. ICE parses each block's ports, generates a symbol with
+`mixed` simulator. OpenVLSI parses each block's ports, generates a symbol with
 matching pins, and records the analog net attached to every input and output.
 Use `schematic_add_hdl_instance` (MCP) or `schematic-add-hdl-instance` (CLI) to
 create the instance, then wire it like any other symbol.
@@ -127,7 +127,7 @@ waveform is not simulated over an unnecessarily long interval.
 signals. `simulation_run` also reports `analog_signals`, `digital_signals`,
 applied PDK setup, graph definitions, hints, and suggested follow-up calls.
 
-After a successful run, ICE fills an empty **Signals to capture** list and
+After a successful run, OpenVLSI fills an empty **Signals to capture** list and
 empty graph Y selections from the first traces. This happens in the GUI, the
 CLI, and MCP so a first `simulation-run` produces a usable stored graph. The
 graph toolbar **Load VCD** action performs the same population from an external
@@ -208,15 +208,15 @@ same dialog. The **Results** tab lists one row per variant.
 From the CLI:
 
 ```sh
-ice-cli simulation-configure <project> <simulation> --analysis ac \
+openvlsi-cli simulation-configure <project> <simulation> --analysis ac \
   --ac-points 20 --ac-start 1 --ac-stop 1e8 --signals out,in
-ice-cli simulation-corner-defaults <project> <simulation>
-ice-cli simulation-corner-add <project> <simulation> ff --section ff \
+openvlsi-cli simulation-corner-defaults <project> <simulation>
+openvlsi-cli simulation-corner-add <project> <simulation> ff --section ff \
   --temperature 85 --supply V1=1.1
-ice-cli simulation-sweep-add <project> <simulation> temperature 27 85
-ice-cli simulation-monte-carlo <project> <simulation> --samples 50 \
+openvlsi-cli simulation-sweep-add <project> <simulation> temperature 27 85
+openvlsi-cli simulation-monte-carlo <project> <simulation> --samples 50 \
   --temperature-sigma 5 --supply-sigma-percent 5 --supply-nominal 1.8
-ice-cli simulation-experiment <project> <simulation>
+openvlsi-cli simulation-experiment <project> <simulation>
 ```
 
 MCP exposes the same configuration through `simulation_update` and runs it
@@ -243,17 +243,17 @@ Add a measurement from the GUI experiment dialog, with
 Results are stored on the run and returned by `simulation_run`/`simulation_result`:
 
 ```sh
-ice-cli simulation-measure-add <project> <simulation> gain gain \
+openvlsi-cli simulation-measure-add <project> <simulation> gain gain \
   --signal out --input in
-ice-cli simulation-measure-add <project> <simulation> settling settling_time \
+openvlsi-cli simulation-measure-add <project> <simulation> settling settling_time \
   --signal out --tolerance 0.02
-ice-cli simulation-measure <project> <simulation>
+openvlsi-cli simulation-measure <project> <simulation>
 ```
 
 For a one-off check without changing the simulation:
 
 ```sh
-ice-cli simulation-measure <project> <simulation> --metric slew_rate --signal out
+openvlsi-cli simulation-measure <project> <simulation> --metric slew_rate --signal out
 ```
 
 ## Stored runs
@@ -266,7 +266,7 @@ later. By default, stored runs live under the project build directory:
 build/simulations/<simulation-id>-<simulation-name>/runs/
 ```
 
-Each run is a JSON object with `format: "ice-simulation-result"`, run metadata,
+Each run is a JSON object with `format: "openvlsi-simulation-result"`, run metadata,
 the request/netlist, time samples, traces, and graph metadata. Runs are written
 atomically and include failed, cancelled, and timed-out terminal states.
 
@@ -275,17 +275,17 @@ read by the simulation script tooling.
 
 `simulation_result`/`simulation_signals` include per-trace min/max/amplitude,
 mean, RMS, first/last values, and point counts. `simulation_measure` (MCP) and
-`ice-cli simulation-measure` add zero crossings, rising crossings, period,
+`openvlsi-cli simulation-measure` add zero crossings, rising crossings, period,
 frequency, and settling time. These are the lightweight checks to use before
 claiming that an oscillator or transient has met its specification.
 
 ## Python metrics API
 
-`icepy_sim` is a pure-Python API for loading runs and computing metrics. It is
-also exposed as `icepy.sim` when the optional nanobind extension is built.
+`openvlsipy_sim` is a pure-Python API for loading runs and computing metrics. It is
+also exposed as `openvlsipy.sim` when the optional nanobind extension is built.
 
 ```python
-from icepy import sim
+from openvlsipy import sim
 
 runs = sim.load_latest_many(
     "/path/to/project",
@@ -311,7 +311,7 @@ raw threshold crossings.
 ## Simulation scripts
 
 Simulation scripts are Python files under `scripts/` and are stored as
-project-level metadata in `project.icepro`. A script can query every simulation
+project-level metadata in `project.ovpro`. A script can query every simulation
 and run in the project, return Markdown, and add graphs that the GUI renders.
 
 ```python
@@ -336,43 +336,43 @@ scripts must define `build_script(ctx)`.
 ## CLI
 
 ```text
-ice-cli simulate <project> <schematic> [stop] [step] [timeout-ms] [signals] [output.json]
-ice-cli simulate-netlist <netlist-file> [stop] [step] [timeout-ms] [signals] [output.json]
-ice-cli simulation-add <project> <name> <schematic> [analysis] [stop] [step] [signals...]
-ice-cli simulation-configure <project> <simulation> [analysis options]
-ice-cli simulation-run <project> <simulation> [timeout-ms] [output.json]
-ice-cli simulation-experiment <project> <simulation> [timeout-ms] [--no-store] [--output file]
-ice-cli simulation-remove <project> <simulation>
-ice-cli simulation-corner-defaults <project> <simulation>
-ice-cli simulation-corner-add <project> <simulation> <name> [--section s] [--temperature c] [--supply n=v]...
-ice-cli simulation-corner-list <project> <simulation>
-ice-cli simulation-corner-remove <project> <simulation> <name>
-ice-cli simulation-sweep-add <project> <simulation> <parameter> <value...>
-ice-cli simulation-sweep-list <project> <simulation>
-ice-cli simulation-sweep-remove <project> <simulation> <parameter>
-ice-cli simulation-monte-carlo <project> <simulation> [--samples n] [--temperature-sigma c] ...
-ice-cli simulation-measure-add <project> <simulation> <name> <metric> [--signal s] [--input s] ...
-ice-cli simulation-measure-list <project> <simulation>
-ice-cli simulation-measure-remove <project> <simulation> <name>
-ice-cli simulation-trace <project> <simulation> [signals] [max-points]
-ice-cli simulation-measure <project> <simulation> [signal] [threshold] \
+openvlsi-cli simulate <project> <schematic> [stop] [step] [timeout-ms] [signals] [output.json]
+openvlsi-cli simulate-netlist <netlist-file> [stop] [step] [timeout-ms] [signals] [output.json]
+openvlsi-cli simulation-add <project> <name> <schematic> [analysis] [stop] [step] [signals...]
+openvlsi-cli simulation-configure <project> <simulation> [analysis options]
+openvlsi-cli simulation-run <project> <simulation> [timeout-ms] [output.json]
+openvlsi-cli simulation-experiment <project> <simulation> [timeout-ms] [--no-store] [--output file]
+openvlsi-cli simulation-remove <project> <simulation>
+openvlsi-cli simulation-corner-defaults <project> <simulation>
+openvlsi-cli simulation-corner-add <project> <simulation> <name> [--section s] [--temperature c] [--supply n=v]...
+openvlsi-cli simulation-corner-list <project> <simulation>
+openvlsi-cli simulation-corner-remove <project> <simulation> <name>
+openvlsi-cli simulation-sweep-add <project> <simulation> <parameter> <value...>
+openvlsi-cli simulation-sweep-list <project> <simulation>
+openvlsi-cli simulation-sweep-remove <project> <simulation> <parameter>
+openvlsi-cli simulation-monte-carlo <project> <simulation> [--samples n] [--temperature-sigma c] ...
+openvlsi-cli simulation-measure-add <project> <simulation> <name> <metric> [--signal s] [--input s] ...
+openvlsi-cli simulation-measure-list <project> <simulation>
+openvlsi-cli simulation-measure-remove <project> <simulation> <name>
+openvlsi-cli simulation-trace <project> <simulation> [signals] [max-points]
+openvlsi-cli simulation-measure <project> <simulation> [signal] [threshold] \
   [--metric gain|bandwidth|phase_margin|slew_rate|settling_time|power] \
   [--signal s] [--input s] [--voltage v] [--tolerance v]
-ice-cli simulation-graph-add <project> <simulation> <name> [x-axis] [y-signals]
-ice-cli simulation-graph-list <project> <simulation>
-ice-cli simulation-graph-update <project> <simulation> <graph> [name] [x-axis] [y-signals] \
+openvlsi-cli simulation-graph-add <project> <simulation> <name> [x-axis] [y-signals]
+openvlsi-cli simulation-graph-list <project> <simulation>
+openvlsi-cli simulation-graph-update <project> <simulation> <graph> [name] [x-axis] [y-signals] \
   [--view linear|db|phase] [--fft on|off] [--fft-window w] [--fft-points n] \
   [--derived name=expr] [--overlay run-id[=label]]
-ice-cli simulation-graph-derive <project> <simulation> <graph> <name> <expression>
-ice-cli simulation-graph-overlay <project> <simulation> <graph> <run-id> [label]
-ice-cli simulation-graph-marker-add <project> <simulation> <graph> <label> <x> [--y v] [--signal s]
-ice-cli simulation-runs <project> [simulation]
-ice-cli simulation-graph-limits <project> <simulation> <graph> [x-min] [x-max] [y-min] [y-max]
-ice-cli simulation-graph-delete <project> <simulation> <graph>
-ice-cli script-add <project> <name> [source-file]
-ice-cli script-read <project> <script>
-ice-cli script-write <project> <script> <source-file|->
-ice-cli script-run <project> <script> [timeout-ms]
+openvlsi-cli simulation-graph-derive <project> <simulation> <graph> <name> <expression>
+openvlsi-cli simulation-graph-overlay <project> <simulation> <graph> <run-id> [label]
+openvlsi-cli simulation-graph-marker-add <project> <simulation> <graph> <label> <x> [--y v] [--signal s]
+openvlsi-cli simulation-runs <project> [simulation]
+openvlsi-cli simulation-graph-limits <project> <simulation> <graph> [x-min] [x-max] [y-min] [y-max]
+openvlsi-cli simulation-graph-delete <project> <simulation> <graph>
+openvlsi-cli script-add <project> <name> [source-file]
+openvlsi-cli script-read <project> <script>
+openvlsi-cli script-write <project> <script> <source-file|->
+openvlsi-cli script-run <project> <script> [timeout-ms]
 ```
 
 When no output path is supplied, the run is stored under the project build
@@ -390,7 +390,7 @@ its newest stored run into the graph tabs; if no simulation-specific run exists,
 it falls back to the newest run for the simulation's schematic. The GUI also
 watches `build/simulations` and refreshes the active plots when new runs appear.
 
-Text schematics accept ordinary ngspice element cards and comments. ICE owns the
+Text schematics accept ordinary ngspice element cards and comments. OpenVLSI owns the
 analysis directive, so `.tran`, `.dc`, `.ac`, `.op`, `.noise`, `.tf`, and `.end`
 are ignored from the text source; the current simulation properties provide the
 analysis. Capture node voltages as `v(node)` (or just `node`) and device vectors
@@ -400,7 +400,7 @@ as `i(v1)` or `@l1[i]`. Unsupported requested vectors are reported in the run's
 SystemVerilog source is compiled and run in the project directory when one is
 known, so relative `` `include `` paths resolve against the project root. The
 simulator has a 10 second `vvp` timeout; if a testbench does not call `$finish`,
-ICE keeps the partial VCD produced before termination and reports a timeout
+OpenVLSI keeps the partial VCD produced before termination and reports a timeout
 warning. `simulation-add` on a SystemVerilog cell defaults to the `iverilog`
 simulator and `digital` analysis, so the same `simulation-run` workflow used for
 SPICE works without extra flags.

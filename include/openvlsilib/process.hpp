@@ -1,0 +1,68 @@
+#pragma once
+
+#include <atomic>
+#include <cstdint>
+#include <filesystem>
+#include <functional>
+#include <map>
+#include <string>
+#include <vector>
+
+namespace openvlsi {
+
+// Cooperative cancellation shared between the caller and a running process.
+// Callers may cancel from another thread while runProcess is blocked.
+class ProcessCancellation {
+  public:
+    void cancel() noexcept;
+    bool cancelled() const noexcept;
+
+  private:
+    std::atomic_bool cancelled_ = false;
+};
+
+struct ProcessOptions {
+    // argv[0] is the executable. No shell interpolation is performed.
+    std::vector<std::string> arguments;
+    std::filesystem::path workingDirectory;
+    // Variables added to or replacing the parent environment.
+    std::map<std::string, std::string> environment;
+    // Full merged stdout/stderr log. Empty keeps the output in memory only.
+    std::filesystem::path logPath;
+    // Upper bound for ProcessResult::logTail, counted in bytes.
+    std::size_t logTailBytes = 64 * 1024;
+    // Zero disables the timeout.
+    int timeoutSeconds = 0;
+};
+
+struct ProcessResult {
+    bool started = false;
+    bool cancelled = false;
+    bool timedOut = false;
+    int exitCode = -1;
+    // Terminal signal number on POSIX; zero when the process exited normally.
+    int signal = 0;
+    int pid = 0;
+    std::string error;
+    std::string logTail;
+    std::filesystem::path logPath;
+    std::uint64_t durationMilliseconds = 0;
+
+    bool succeeded() const {
+        return started && !cancelled && !timedOut && exitCode == 0 && signal == 0 && error.empty();
+    }
+};
+
+using ProcessOutputCallback = std::function<void(const std::string &)>;
+using ProcessStartedCallback = std::function<void(int pid)>;
+
+// Runs one external process with merged stdout/stderr, bounded tail capture,
+// optional full log file, timeout, and cooperative cancellation.
+//
+// The child runs in its own process group on POSIX and in a kill-on-close Job
+// Object on Windows, so cancellation terminates the whole tool process tree.
+// Set ProcessOptions::environment to override inherited variables.
+ProcessResult runProcess(const ProcessOptions &options, const ProcessCancellation *cancellation = nullptr,
+                         const ProcessOutputCallback &onOutput = {}, const ProcessStartedCallback &onStarted = {});
+
+} // namespace openvlsi

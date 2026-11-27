@@ -1,0 +1,5810 @@
+#include "implementation_ui.hpp"
+
+#include "openvlsilib/hdl.hpp"
+#include "openvlsilib/interchange.hpp"
+#include "openvlsilib/packages.hpp"
+#include "openvlsilib/pdk.hpp"
+#include "openvlsilib/verification.hpp"
+#include "icons.hpp"
+#include "layout_canvas.hpp"
+#include "layout_render.hpp"
+#include "text_document_editor.hpp"
+#include "ui_colors.hpp"
+#include "ui_helpers.hpp"
+
+#include <QAction>
+#include <QApplication>
+#include <QBrush>
+#include <QCheckBox>
+#include <QColor>
+#include <QComboBox>
+#include <QContextMenuEvent>
+#include <QCoreApplication>
+#include <QDesktopServices>
+#include <QDialog>
+#include <QDialogButtonBox>
+#include <QDoubleSpinBox>
+#include <QEvent>
+#include <QFile>
+#include <QFileDialog>
+#include <QFileInfo>
+#include <QFontDatabase>
+#include <QFormLayout>
+#include <QGraphicsRectItem>
+#include <QGraphicsScene>
+#include <QGraphicsSvgItem>
+#include <QGraphicsTextItem>
+#include <QGraphicsView>
+#include <QGridLayout>
+#include <QHBoxLayout>
+#include <QHeaderView>
+#include <QIcon>
+#include <QInputDialog>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QJsonParseError>
+#include <QLabel>
+#include <QLineEdit>
+#include <QLineF>
+#include <QListWidget>
+#include <QMenu>
+#include <QMessageBox>
+#include <QMouseEvent>
+#include <QPainter>
+#include <QPalette>
+#include <QPlainTextEdit>
+#include <QPointer>
+#include <QProcess>
+#include <QPushButton>
+#include <QRegularExpression>
+#include <QResizeEvent>
+#include <QScrollArea>
+#include <QScrollBar>
+#include <QShowEvent>
+#include <QSignalBlocker>
+#include <QSpinBox>
+#include <QSplitter>
+#include <QStackedWidget>
+#include <QStandardPaths>
+#include <QSvgRenderer>
+#include <QTabBar>
+#include <QTabWidget>
+#include <QTableWidget>
+#include <QTableWidgetItem>
+#include <QTemporaryDir>
+#include <QTextCursor>
+#include <QTimer>
+#include <QToolBar>
+#include <QTreeWidget>
+#include <QTreeWidgetItem>
+#include <QUrl>
+#include <QVBoxLayout>
+#include <QWheelEvent>
+
+#include <algorithm>
+#include <cctype>
+#include <cmath>
+#include <exception>
+#include <filesystem>
+#include <fstream>
+#include <limits>
+#include <map>
+#include <regex>
+#include <set>
+#include <sstream>
+
+namespace {
+
+bool isDigitalTestbenchCell(const openvlsi::Project &project, openvlsi::ObjectId cellId) {
+    if (cellId == 0)
+        return false;
+    return std::any_of(project.simulations.begin(), project.simulations.end(), [&](const auto &entry) {
+        const auto &simulation = entry.second;
+        return simulation.schematic == cellId &&
+               (simulation.simulator == "iverilog" || simulation.analysis == "digital");
+    });
+}
+
+QString stageTitle(openvlsi::ImplementationStage stage) {
+    switch (stage) {
+    case openvlsi::ImplementationStage::created:
+        return QStringLiteral("HDL");
+    case openvlsi::ImplementationStage::elaboration:
+        return QStringLiteral("Elaboration");
+    case openvlsi::ImplementationStage::synthesis:
+        return QStringLiteral("Synthesis");
+    case openvlsi::ImplementationStage::floorplan:
+        return QStringLiteral("Floorplan");
+    case openvlsi::ImplementationStage::placement:
+        return QStringLiteral("Placement");
+    case openvlsi::ImplementationStage::cts:
+        return QStringLiteral("CTS");
+    case openvlsi::ImplementationStage::routing:
+        return QStringLiteral("Routing");
+    case openvlsi::ImplementationStage::final:
+        return QStringLiteral("Final");
+    }
+    return QStringLiteral("Implementation");
+}
+
+QString statusText(openvlsi::ImplementationStageStatus status) {
+    switch (status) {
+    case openvlsi::ImplementationStageStatus::pending:
+        return QStringLiteral("Pending");
+    case openvlsi::ImplementationStageStatus::running:
+        return QStringLiteral("Running");
+    case openvlsi::ImplementationStageStatus::succeeded:
+        return QStringLiteral("Succeeded");
+    case openvlsi::ImplementationStageStatus::failed:
+        return QStringLiteral("Failed");
+    case openvlsi::ImplementationStageStatus::skipped:
+        return QStringLiteral("Skipped");
+    case openvlsi::ImplementationStageStatus::cancelled:
+        return QStringLiteral("Cancelled");
+    }
+    return QStringLiteral("Pending");
+}
+
+QString statusColor(openvlsi::ImplementationStageStatus status) {
+    switch (status) {
+    case openvlsi::ImplementationStageStatus::running:
+        return QStringLiteral("#2563eb");
+    case openvlsi::ImplementationStageStatus::succeeded:
+        return QStringLiteral("#15803d");
+    case openvlsi::ImplementationStageStatus::failed:
+        return QStringLiteral("#b91c1c");
+    case openvlsi::ImplementationStageStatus::cancelled:
+        return QStringLiteral("#a16207");
+    case openvlsi::ImplementationStageStatus::skipped:
+        return QStringLiteral("#6b7280");
+    case openvlsi::ImplementationStageStatus::pending:
+        return QStringLiteral("#4b5563");
+    }
+    return QStringLiteral("#4b5563");
+}
+
+QString runStatusText(openvlsi::ImplementationStatus status) {
+    switch (status) {
+    case openvlsi::ImplementationStatus::pending:
+        return QStringLiteral("Pending");
+    case openvlsi::ImplementationStatus::running:
+        return QStringLiteral("Running");
+    case openvlsi::ImplementationStatus::succeeded:
+        return QStringLiteral("Succeeded");
+    case openvlsi::ImplementationStatus::failed:
+        return QStringLiteral("Failed");
+    case openvlsi::ImplementationStatus::cancelled:
+        return QStringLiteral("Cancelled");
+    }
+    return QStringLiteral("Pending");
+}
+
+QString runStatusColor(openvlsi::ImplementationStatus status) {
+    switch (status) {
+    case openvlsi::ImplementationStatus::running:
+        return QStringLiteral("#2563eb");
+    case openvlsi::ImplementationStatus::succeeded:
+        return QStringLiteral("#15803d");
+    case openvlsi::ImplementationStatus::failed:
+        return QStringLiteral("#b91c1c");
+    case openvlsi::ImplementationStatus::cancelled:
+        return QStringLiteral("#a16207");
+    case openvlsi::ImplementationStatus::pending:
+        return QStringLiteral("#4b5563");
+    }
+    return QStringLiteral("#4b5563");
+}
+
+std::string stageDefPath(openvlsi::ImplementationStage stage) {
+    switch (stage) {
+    case openvlsi::ImplementationStage::floorplan:
+        return "def/2_floorplan.def";
+    case openvlsi::ImplementationStage::placement:
+        return "def/3_place.def";
+    case openvlsi::ImplementationStage::cts:
+        return "def/4_cts.def";
+    case openvlsi::ImplementationStage::routing:
+        return "def/5_route.def";
+    case openvlsi::ImplementationStage::final:
+        return "def/6_final.def";
+    default:
+        return {};
+    }
+}
+
+std::string stageSdcPath(openvlsi::ImplementationStage stage) {
+    switch (stage) {
+    case openvlsi::ImplementationStage::floorplan:
+        return "final/2_floorplan.sdc";
+    case openvlsi::ImplementationStage::placement:
+        return "final/3_place.sdc";
+    case openvlsi::ImplementationStage::cts:
+        return "final/4_cts.sdc";
+    case openvlsi::ImplementationStage::routing:
+        return "final/5_route.sdc";
+    case openvlsi::ImplementationStage::final:
+        return "final/6_final.sdc";
+    default:
+        return {};
+    }
+}
+
+std::string stageOdbPath(openvlsi::ImplementationStage stage) {
+    switch (stage) {
+    case openvlsi::ImplementationStage::floorplan:
+        return "db/2_floorplan.odb";
+    case openvlsi::ImplementationStage::placement:
+        return "db/3_place.odb";
+    case openvlsi::ImplementationStage::cts:
+        return "db/4_cts.odb";
+    case openvlsi::ImplementationStage::routing:
+        return "db/5_route.odb";
+    case openvlsi::ImplementationStage::final:
+        return "db/6_final.odb";
+    default:
+        return {};
+    }
+}
+
+constexpr double kMicronToProjectUnit = 1000.0;
+
+QString lowerName(QString name) { return name.toLower(); }
+
+openvlsi::ObjectId previewLayerId(const openvlsi::Project *project, const QString &name, int number) {
+    if (!project)
+        return 0;
+    for (const auto &[id, layer] : project->layers) {
+        if (number > 0 && layer.number == number)
+            return id;
+        if (!name.isEmpty() && lowerName(QString::fromStdString(layer.name)) == lowerName(name))
+            return id;
+    }
+    return 0;
+}
+
+openvlsi::LayoutPreviewLayer parsePreviewLayer(const QJsonObject &object, const openvlsi::Project *project) {
+    openvlsi::LayoutPreviewLayer layer;
+    const auto name = object.value(QStringLiteral("layer")).toString();
+    const auto number = object.value(QStringLiteral("layer_number")).toInt();
+    layer.number = number;
+    layer.datatype = object.value(QStringLiteral("layer_datatype")).toInt();
+    layer.name = name;
+    layer.id = previewLayerId(project, name, number);
+    return layer;
+}
+
+openvlsi::Rect parsePreviewRect(const QJsonObject &object) {
+    openvlsi::Rect rect;
+    rect.x = object.value(QStringLiteral("x")).toDouble() * kMicronToProjectUnit;
+    rect.y = object.value(QStringLiteral("y")).toDouble() * kMicronToProjectUnit;
+    rect.width = object.value(QStringLiteral("width")).toDouble() * kMicronToProjectUnit;
+    rect.height = object.value(QStringLiteral("height")).toDouble() * kMicronToProjectUnit;
+    return rect;
+}
+
+std::optional<openvlsi::LayoutPreviewHeatMap> parsePreviewHeatMap(const QJsonValue &value) {
+    if (!value.isObject())
+        return std::nullopt;
+    const auto object = value.toObject();
+    openvlsi::LayoutPreviewHeatMap heatmap;
+    const auto bounds = object.value(QStringLiteral("bounds")).toObject();
+    const auto rect = parsePreviewRect(bounds);
+    heatmap.bounds = QRectF(rect.x, rect.y, rect.width, rect.height);
+    heatmap.columns = object.value(QStringLiteral("columns")).toInt();
+    heatmap.rows = object.value(QStringLiteral("rows")).toInt();
+    heatmap.minimum = object.value(QStringLiteral("minimum")).toDouble();
+    heatmap.maximum = object.value(QStringLiteral("maximum")).toDouble();
+    const auto values = object.value(QStringLiteral("values")).toArray();
+    heatmap.values.reserve(static_cast<std::size_t>(values.size()));
+    for (const auto &entry : values)
+        heatmap.values.push_back(entry.toDouble());
+    if (heatmap.columns <= 0 || heatmap.rows <= 0 ||
+        heatmap.values.size() != static_cast<std::size_t>(heatmap.columns) * static_cast<std::size_t>(heatmap.rows))
+        return std::nullopt;
+    return heatmap;
+}
+
+std::optional<openvlsi::LayoutPreviewHeatMap> parseHeatMapCsv(const std::filesystem::path &path) {
+    std::ifstream input(path);
+    if (!input.is_open())
+        return std::nullopt;
+    struct Bin {
+        double x0 = 0.0;
+        double y0 = 0.0;
+        double x1 = 0.0;
+        double y1 = 0.0;
+        double value = 0.0;
+    };
+    std::vector<Bin> bins;
+    std::set<double> xs;
+    std::set<double> ys;
+    std::string line;
+    while (std::getline(input, line)) {
+        if (line.empty() || line.front() == 'x')
+            continue;
+        std::stringstream stream(line);
+        std::string field;
+        std::vector<double> values;
+        while (std::getline(stream, field, ',')) {
+            try {
+                values.push_back(std::stod(field));
+            } catch (const std::exception &) {
+                values.clear();
+                break;
+            }
+        }
+        if (values.size() < 5)
+            continue;
+        bins.push_back({values[0], values[1], values[2], values[3], values[4]});
+        xs.insert(values[0]);
+        ys.insert(values[1]);
+    }
+    if (bins.empty() || xs.empty() || ys.empty())
+        return std::nullopt;
+    openvlsi::LayoutPreviewHeatMap heatmap;
+    heatmap.columns = static_cast<int>(xs.size());
+    heatmap.rows = static_cast<int>(ys.size());
+    const auto x0 = *xs.begin();
+    const auto y0 = *ys.begin();
+    double x1 = x0;
+    double y1 = y0;
+    for (const auto &bin : bins) {
+        x1 = std::max(x1, bin.x1);
+        y1 = std::max(y1, bin.y1);
+    }
+    heatmap.bounds = QRectF(x0 * kMicronToProjectUnit, y0 * kMicronToProjectUnit, (x1 - x0) * kMicronToProjectUnit,
+                            (y1 - y0) * kMicronToProjectUnit);
+    heatmap.values.assign(static_cast<std::size_t>(heatmap.columns) * heatmap.rows, 0.0);
+    heatmap.minimum = std::numeric_limits<double>::max();
+    heatmap.maximum = std::numeric_limits<double>::lowest();
+    const std::vector<double> xValues(xs.begin(), xs.end());
+    const std::vector<double> yValues(ys.begin(), ys.end());
+    for (const auto &bin : bins) {
+        const auto column =
+            static_cast<int>(std::lower_bound(xValues.begin(), xValues.end(), bin.x0) - xValues.begin());
+        const auto row = static_cast<int>(std::lower_bound(yValues.begin(), yValues.end(), bin.y0) - yValues.begin());
+        if (column < 0 || column >= heatmap.columns || row < 0 || row >= heatmap.rows)
+            continue;
+        const auto index = static_cast<std::size_t>(row) * heatmap.columns + column;
+        heatmap.values[index] = bin.value;
+        heatmap.minimum = std::min(heatmap.minimum, bin.value);
+        heatmap.maximum = std::max(heatmap.maximum, bin.value);
+    }
+    if (heatmap.maximum <= heatmap.minimum)
+        return std::nullopt;
+    return heatmap;
+}
+
+std::vector<openvlsi::LayoutPreviewMarker> parseDrcMarkers(const std::filesystem::path &path) {
+    std::vector<openvlsi::LayoutPreviewMarker> markers;
+    std::ifstream input(path);
+    if (!input.is_open())
+        return markers;
+    const std::regex violationType(R"(^\s*violation type:\s*(.+)$)");
+    const std::regex sources(R"(^\s*srcs:\s*(.+)$)");
+    const std::regex comment(R"(^\s*comment:\s*(.+)$)");
+    const std::regex bboxLayer(
+        R"(^\s*bbox =\s*\(\s*([^,]+),\s*([^\)]+)\)\s*-\s*\(\s*([^,]+),\s*([^\)]+)\)\s*on Layer\s*(.+)$)");
+    std::string line;
+    std::string currentType;
+    std::string currentSources;
+    std::string currentComment;
+    while (std::getline(input, line)) {
+        std::smatch match;
+        if (std::regex_match(line, match, violationType)) {
+            currentType = match[1].str();
+            currentSources.clear();
+            currentComment.clear();
+            continue;
+        }
+        if (std::regex_match(line, match, sources)) {
+            currentSources = match[1].str();
+            continue;
+        }
+        if (std::regex_match(line, match, comment)) {
+            currentComment = match[1].str();
+            continue;
+        }
+        if (!std::regex_match(line, match, bboxLayer))
+            continue;
+        try {
+            const auto scale = kMicronToProjectUnit;
+            const auto x0 = std::stod(match[1].str()) * scale;
+            const auto y0 = std::stod(match[2].str()) * scale;
+            const auto x1 = std::stod(match[3].str()) * scale;
+            const auto y1 = std::stod(match[4].str()) * scale;
+            openvlsi::LayoutPreviewMarker marker;
+            marker.type = QString::fromStdString(currentType);
+            marker.layer = QString::fromStdString(match[5].str());
+            marker.rectangle = QRectF(QPointF(x0, y0), QPointF(x1, y1)).normalized();
+            marker.sources = QString::fromStdString(currentSources);
+            marker.comment = QString::fromStdString(currentComment);
+            markers.push_back(std::move(marker));
+        } catch (const std::exception &) {
+        }
+    }
+    return markers;
+}
+
+struct DefPreviewExtras {
+    double unitsPerMicron = 1000.0;
+    std::vector<openvlsi::LayoutPreviewRow> rows;
+};
+
+bool parseNumber(const std::string &text, double &value) {
+    try {
+        std::size_t consumed = 0;
+        value = std::stod(text, &consumed);
+        return consumed == text.size();
+    } catch (const std::exception &) {
+        return false;
+    }
+}
+
+DefPreviewExtras parseDefPreviewExtras(const std::filesystem::path &path) {
+    DefPreviewExtras extras;
+    std::ifstream input(path);
+    if (!input.is_open())
+        return extras;
+    struct RawRow {
+        std::string site;
+        double x = 0.0;
+        double y = 0.0;
+        double width = 0.0;
+        double height = 0.0;
+    };
+    std::vector<RawRow> rawRows;
+    openvlsi::Rect die;
+    bool haveDie = false;
+    bool inRows = false;
+    std::string line;
+    while (std::getline(input, line)) {
+        std::istringstream stream(line);
+        std::string keyword;
+        stream >> keyword;
+        if (!stream)
+            continue;
+        if (keyword == "UNITS") {
+            std::string distance;
+            std::string microns;
+            double units = 0.0;
+            stream >> distance >> microns >> units;
+            if (distance == "DISTANCE" && microns == "MICRONS" && units > 0.0)
+                extras.unitsPerMicron = units;
+            continue;
+        }
+        if (keyword == "DIEAREA") {
+            std::vector<double> values;
+            std::string token;
+            while (stream >> token) {
+                double value = 0.0;
+                if (token == "(" || token == ")" || token == ";" || !parseNumber(token, value))
+                    continue;
+                values.push_back(value);
+            }
+            if (values.size() >= 4) {
+                die = {static_cast<openvlsi::Coordinate>(std::llround(std::min(values[0], values[2]))),
+                       static_cast<openvlsi::Coordinate>(std::llround(std::min(values[1], values[3]))),
+                       static_cast<openvlsi::Coordinate>(std::llround(std::abs(values[2] - values[0]))),
+                       static_cast<openvlsi::Coordinate>(std::llround(std::abs(values[3] - values[1])))};
+                haveDie = true;
+            }
+            continue;
+        }
+        if (keyword == "ROWS") {
+            inRows = true;
+            continue;
+        }
+        if (keyword == "ROW") {
+            RawRow row;
+            std::string name;
+            std::string orientation;
+            std::string doKeyword;
+            std::string byKeyword;
+            std::string stepKeyword;
+            int count = 0;
+            int rowsPerRow = 0;
+            double stepX = 0.0;
+            double stepY = 0.0;
+            stream >> name >> row.site >> row.x >> row.y >> orientation >> doKeyword >> count >> byKeyword >>
+                rowsPerRow >> stepKeyword >> stepX >> stepY;
+            if (!stream || row.site.empty())
+                continue;
+            row.width = static_cast<double>(count) * stepX;
+            row.height = stepY;
+            rawRows.push_back(std::move(row));
+            continue;
+        }
+        if (!inRows)
+            continue;
+        if (keyword == "END")
+            break;
+        if (keyword != "-")
+            continue;
+        RawRow row;
+        std::string orientation;
+        stream >> row.site >> row.x >> row.y >> orientation;
+        if (!stream || row.site.empty())
+            continue;
+        rawRows.push_back(std::move(row));
+    }
+    if (rawRows.empty())
+        return extras;
+    const auto scale = [&](double value) {
+        return static_cast<openvlsi::Coordinate>(std::llround(value * 1000.0 / extras.unitsPerMicron));
+    };
+    std::vector<openvlsi::Coordinate> rowY;
+    rowY.reserve(rawRows.size());
+    for (const auto &row : rawRows)
+        rowY.push_back(scale(row.y));
+    std::sort(rowY.begin(), rowY.end());
+    rowY.erase(std::unique(rowY.begin(), rowY.end()), rowY.end());
+    openvlsi::Coordinate pitch = 0;
+    for (std::size_t index = 1; index < rowY.size(); ++index) {
+        const auto delta = rowY[index] - rowY[index - 1];
+        if (delta > 0 && (pitch == 0 || delta < pitch))
+            pitch = delta;
+    }
+    if (pitch <= 0)
+        pitch = 1000;
+    openvlsi::Coordinate dieRight = 0;
+    if (haveDie)
+        dieRight = scale(die.x + die.width);
+    for (const auto &row : rawRows) {
+        const auto x = scale(row.x);
+        const auto y = scale(row.y);
+        const auto width =
+            row.width > 0.0 ? scale(row.width) : (haveDie ? std::max<openvlsi::Coordinate>(1, dieRight - x) : pitch);
+        const auto height = row.height > 0.0 ? scale(row.height) : pitch;
+        openvlsi::LayoutPreviewRow preview;
+        preview.rectangle = QRectF(x, y, width, height);
+        preview.site = QString::fromStdString(row.site);
+        extras.rows.push_back(std::move(preview));
+    }
+    return extras;
+}
+
+bool isKnownPreviewLayer(const openvlsi::Project *project, const std::string &name) {
+    if (!project || name.empty())
+        return false;
+    for (const auto &[_, layer] : project->layers) {
+        if (lowerName(QString::fromStdString(layer.name)) == lowerName(QString::fromStdString(name)))
+            return true;
+    }
+    return false;
+}
+
+std::vector<openvlsi::LayoutPreviewGuide> parseRouteGuides(const std::filesystem::path &path, double unitsPerMicron,
+                                                      const openvlsi::Project *project) {
+    std::vector<openvlsi::LayoutPreviewGuide> guides;
+    std::ifstream input(path);
+    if (!input.is_open())
+        return guides;
+    if (unitsPerMicron <= 0.0)
+        unitsPerMicron = 1000.0;
+    const auto scale = [&](double value) {
+        return static_cast<openvlsi::Coordinate>(std::llround(value * 1000.0 / unitsPerMicron));
+    };
+    std::string currentNet;
+    std::string currentLayer;
+    std::string line;
+    while (std::getline(input, line)) {
+        std::string cleaned = line;
+        std::replace(cleaned.begin(), cleaned.end(), '(', ' ');
+        std::replace(cleaned.begin(), cleaned.end(), ')', ' ');
+        std::istringstream stream(cleaned);
+        std::vector<std::string> tokens;
+        std::string token;
+        while (stream >> token)
+            tokens.push_back(token);
+        if (tokens.empty())
+            continue;
+        std::vector<double> numbers;
+        std::size_t firstNumber = tokens.size();
+        for (std::size_t index = 0; index < tokens.size(); ++index) {
+            double value = 0.0;
+            if (!parseNumber(tokens[index], value))
+                continue;
+            if (firstNumber == tokens.size())
+                firstNumber = index;
+            numbers.push_back(value);
+        }
+        if (numbers.size() >= 4 && firstNumber <= 2) {
+            std::vector<std::string> prefix(tokens.begin(), tokens.begin() + static_cast<std::ptrdiff_t>(firstNumber));
+            std::vector<std::string> suffix(tokens.begin() + static_cast<std::ptrdiff_t>(firstNumber + 4),
+                                            tokens.end());
+            if (!suffix.empty())
+                currentLayer = suffix.front();
+            if (!prefix.empty()) {
+                if (prefix.size() >= 2) {
+                    currentNet = prefix.front();
+                    currentLayer = prefix.back();
+                } else if (isKnownPreviewLayer(project, prefix.front())) {
+                    currentLayer = prefix.front();
+                } else {
+                    currentNet = prefix.front();
+                }
+            }
+            const auto x0 = scale(numbers[0]);
+            const auto y0 = scale(numbers[1]);
+            const auto x1 = scale(numbers[2]);
+            const auto y1 = scale(numbers[3]);
+            openvlsi::LayoutPreviewGuide guide;
+            guide.net = QString::fromStdString(currentNet);
+            guide.layer = QString::fromStdString(currentLayer);
+            guide.rectangle = QRectF(QPointF(x0, y0), QPointF(x1, y1)).normalized();
+            if (guide.rectangle.isValid() && guide.rectangle.width() > 0.0 && guide.rectangle.height() > 0.0)
+                guides.push_back(std::move(guide));
+            continue;
+        }
+        if (numbers.empty()) {
+            currentNet = tokens.front();
+            currentLayer.clear();
+        }
+    }
+    return guides;
+}
+
+std::shared_ptr<openvlsi::LayoutPreviewModel> parseOdbPreview(const QByteArray &json, const openvlsi::Project *project,
+                                                         QString &error) {
+    QJsonParseError parseError;
+    const auto document = QJsonDocument::fromJson(json, &parseError);
+    if (document.isNull() || !document.isObject()) {
+        error = QStringLiteral("OpenDB preview returned invalid JSON: %1").arg(parseError.errorString());
+        return nullptr;
+    }
+    const auto root = document.object();
+    auto model = std::make_shared<openvlsi::LayoutPreviewModel>();
+    model->truncated = root.value(QStringLiteral("truncated")).toBool();
+    const auto bounds = parsePreviewRect(root.value(QStringLiteral("bounds")).toObject());
+    model->bounds = QRectF(bounds.x, bounds.y, bounds.width, bounds.height);
+    bool validBounds = model->bounds.isValid() && model->bounds.width() > 0.0 && model->bounds.height() > 0.0;
+
+    for (const auto &entry : root.value(QStringLiteral("shapes")).toArray()) {
+        const auto object = entry.toObject();
+        openvlsi::LayoutPreviewShape shape;
+        shape.layer = parsePreviewLayer(object, project);
+        const auto kind = object.value(QStringLiteral("kind")).toString();
+        if (kind == QStringLiteral("text"))
+            shape.kind = openvlsi::LayoutPreviewShape::Kind::text;
+        else if (kind == QStringLiteral("path"))
+            shape.kind = openvlsi::LayoutPreviewShape::Kind::path;
+        else
+            shape.kind = openvlsi::LayoutPreviewShape::Kind::polygon;
+        shape.width = object.value(QStringLiteral("width")).toDouble();
+        shape.text = object.value(QStringLiteral("text")).toString();
+        shape.net = object.value(QStringLiteral("net")).toString();
+        shape.netId = object.value(QStringLiteral("net_id")).toInt();
+        shape.special = object.value(QStringLiteral("special")).toBool();
+        for (const auto &pointValue : object.value(QStringLiteral("points")).toArray()) {
+            const auto point = pointValue.toArray();
+            if (point.size() < 2)
+                continue;
+            const QPointF mapped(point[0].toDouble() * kMicronToProjectUnit,
+                                 point[1].toDouble() * kMicronToProjectUnit);
+            if (shape.kind == openvlsi::LayoutPreviewShape::Kind::path)
+                shape.centerline.push_back(mapped);
+            else
+                shape.polygon << mapped;
+        }
+        if (shape.kind == openvlsi::LayoutPreviewShape::Kind::polygon && shape.polygon.size() >= 3) {
+            model->shapes.push_back(std::move(shape));
+            if (!validBounds)
+                model->bounds = model->bounds.united(shape.polygon.boundingRect());
+        } else if (shape.kind == openvlsi::LayoutPreviewShape::Kind::path && shape.centerline.size() >= 2) {
+            model->shapes.push_back(std::move(shape));
+        }
+    }
+
+    for (const auto &entry : root.value(QStringLiteral("ports")).toArray()) {
+        const auto object = entry.toObject();
+        openvlsi::LayoutPreviewPort port;
+        port.layer = parsePreviewLayer(object, project);
+        const auto rectangle = parsePreviewRect(object.value(QStringLiteral("rectangle")).toObject());
+        port.rectangle = QRectF(rectangle.x, rectangle.y, rectangle.width, rectangle.height);
+        port.label = object.value(QStringLiteral("name")).toString();
+        port.net = object.value(QStringLiteral("net")).toString();
+        port.netId = object.value(QStringLiteral("net_id")).toInt();
+        if (port.rectangle.isValid()) {
+            model->ports.push_back(std::move(port));
+            if (!validBounds)
+                model->bounds = model->bounds.united(model->ports.back().rectangle);
+        }
+    }
+
+    for (const auto &entry : root.value(QStringLiteral("instances")).toArray()) {
+        const auto object = entry.toObject();
+        openvlsi::LayoutPreviewPlannedDevice device;
+        const auto rectangle = parsePreviewRect(object.value(QStringLiteral("rectangle")).toObject());
+        device.rectangle = QRectF(rectangle.x, rectangle.y, rectangle.width, rectangle.height);
+        device.name = object.value(QStringLiteral("name")).toString();
+        device.id = object.value(QStringLiteral("id")).toInt();
+        device.master = object.value(QStringLiteral("master")).toString();
+        device.category = object.value(QStringLiteral("category")).toString();
+        device.module = object.value(QStringLiteral("module")).toString();
+        device.orientation = object.value(QStringLiteral("orientation")).toString();
+        if (device.rectangle.isValid()) {
+            model->plannedDevices.push_back(std::move(device));
+            if (!validBounds)
+                model->bounds = model->bounds.united(model->plannedDevices.back().rectangle);
+        }
+    }
+
+    for (const auto &entry : root.value(QStringLiteral("nets")).toArray()) {
+        const auto object = entry.toObject();
+        openvlsi::LayoutPreviewNet net;
+        net.id = object.value(QStringLiteral("id")).toInt();
+        net.name = object.value(QStringLiteral("name")).toString();
+        net.type = object.value(QStringLiteral("type")).toString();
+        net.special = object.value(QStringLiteral("special")).toBool();
+        net.termCount = static_cast<quint64>(object.value(QStringLiteral("term_count")).toDouble());
+        for (const auto &term : object.value(QStringLiteral("terms")).toArray())
+            net.terms.push_back(term.toString());
+        model->nets.push_back(std::move(net));
+    }
+
+    for (const auto &entry : root.value(QStringLiteral("modules")).toArray()) {
+        const auto object = entry.toObject();
+        openvlsi::LayoutPreviewModule module;
+        module.id = object.value(QStringLiteral("id")).toInt();
+        module.name = object.value(QStringLiteral("name")).toString();
+        module.parentId = object.value(QStringLiteral("parent_id")).toInt();
+        module.instanceCount = static_cast<quint64>(object.value(QStringLiteral("instance_count")).toDouble());
+        model->modules.push_back(std::move(module));
+    }
+
+    for (const auto &entry : root.value(QStringLiteral("guides")).toArray()) {
+        const auto object = entry.toObject();
+        openvlsi::LayoutPreviewGuide guide;
+        guide.net = object.value(QStringLiteral("net")).toString();
+        guide.layer = object.value(QStringLiteral("layer")).toString();
+        guide.congested = object.value(QStringLiteral("congested")).toBool();
+        const auto rectangle = parsePreviewRect(object.value(QStringLiteral("rectangle")).toObject());
+        guide.rectangle = QRectF(rectangle.x, rectangle.y, rectangle.width, rectangle.height);
+        if (guide.rectangle.isValid())
+            model->guides.push_back(std::move(guide));
+    }
+    for (const auto &entry : root.value(QStringLiteral("rows")).toArray()) {
+        const auto object = entry.toObject();
+        openvlsi::LayoutPreviewRow row;
+        row.site = object.value(QStringLiteral("site")).toString();
+        const auto rectangle = parsePreviewRect(object.value(QStringLiteral("rectangle")).toObject());
+        row.rectangle = QRectF(rectangle.x, rectangle.y, rectangle.width, rectangle.height);
+        if (row.rectangle.isValid())
+            model->rows.push_back(std::move(row));
+    }
+    for (const auto &entry : root.value(QStringLiteral("blockages")).toArray()) {
+        const auto object = entry.toObject();
+        openvlsi::LayoutPreviewBlockage blockage;
+        blockage.type = object.value(QStringLiteral("type")).toString();
+        const auto rectangle = parsePreviewRect(object.value(QStringLiteral("rectangle")).toObject());
+        blockage.rectangle = QRectF(rectangle.x, rectangle.y, rectangle.width, rectangle.height);
+        if (blockage.rectangle.isValid())
+            model->blockages.push_back(std::move(blockage));
+    }
+
+    model->placementDensity = parsePreviewHeatMap(root.value(QStringLiteral("placement_density")));
+    model->routingCongestion = parsePreviewHeatMap(root.value(QStringLiteral("routing_congestion")));
+    if (model->empty() && model->plannedDevices.empty() && model->ports.empty()) {
+        error = QStringLiteral("OpenDB preview contains no geometry.");
+        return nullptr;
+    }
+    return model;
+}
+
+} // namespace
+
+// Read-only, zoomable canvas used by the physical phase tabs. It renders
+// either an ODB-backed preview model or the legacy DEF import fallback.
+class ImplementationPreviewCanvas : public QGraphicsView {
+  public:
+    struct LayerEntry {
+        QString key;
+        QString label;
+        int number = 0;
+        QColor color;
+        bool visible = true;
+    };
+
+    enum class Tool { none, ruler, label };
+    enum class SelectionKind { none, instance, port, shape, marker };
+
+    struct Selection {
+        SelectionKind kind = SelectionKind::none;
+        int index = -1;
+        QString name;
+        QString master;
+        QString category;
+        QString module;
+        QString net;
+        QString layer;
+        QString type;
+        QString sources;
+        QString comment;
+        int netId = 0;
+        bool special = false;
+        QRectF rectangle;
+        QPolygonF polygon;
+        std::vector<QPointF> centerline;
+        qreal width = 0.0;
+
+        bool valid() const { return kind != SelectionKind::none; }
+    };
+
+    struct HeatMapOptions {
+        bool logScale = false;
+        bool reverse = false;
+        bool showLegend = true;
+        int alpha = 140;
+        std::optional<double> minimum;
+        std::optional<double> maximum;
+    };
+
+    explicit ImplementationPreviewCanvas(QWidget *parent = nullptr) : QGraphicsView(parent) {
+        setScene(new QGraphicsScene(this));
+        setRenderHint(QPainter::Antialiasing, true);
+        setDragMode(QGraphicsView::ScrollHandDrag);
+        setTransformationAnchor(QGraphicsView::AnchorUnderMouse);
+        setResizeAnchor(QGraphicsView::AnchorViewCenter);
+        setBackgroundBrush(palette().color(QPalette::Base));
+    }
+
+    void setPreview(const std::shared_ptr<openvlsi::Project> &project, openvlsi::ObjectId cell, const QString &message,
+                    const std::shared_ptr<openvlsi::LayoutPreviewModel> &model = {},
+                    const openvlsi::Project *styleProject = nullptr) {
+        const bool hadSelection = selection_.valid();
+        selection_ = {};
+        project_ = project;
+        cell_ = cell;
+        message_ = message;
+        model_ = model;
+        styleProject_ = styleProject ? styleProject : project.get();
+        rebuild();
+        if (hadSelection && selectionCallback_)
+            selectionCallback_(selection_);
+    }
+
+    void setHeatMap(openvlsi::LayoutHeatMapKind kind) {
+        customHeatMap_.reset();
+        if (heatMapKind_ == kind)
+            return;
+        heatMapKind_ = kind;
+        // Overlay changes should not discard the user's zoom and pan.
+        rebuild(false);
+    }
+
+    void setCustomHeatMap(std::optional<openvlsi::LayoutPreviewHeatMap> heatmap) {
+        customHeatMap_ = std::move(heatmap);
+        heatMapKind_ = openvlsi::LayoutHeatMapKind::none;
+        rebuild(false);
+    }
+    bool hasCustomHeatMap() const { return customHeatMap_.has_value(); }
+
+    std::vector<LayerEntry> layers() const { return layers_; }
+
+    void setLayerVisible(const QString &key, bool visible) {
+        if (key.isEmpty())
+            return;
+        if (visible)
+            hiddenLayers_.erase(key);
+        else
+            hiddenLayers_.insert(key);
+        rebuild(false);
+    }
+
+    void setInstanceCategoryVisible(const QString &category, bool visible) {
+        if (category.isEmpty())
+            return;
+        if (visible)
+            hiddenInstanceCategories_.erase(category);
+        else
+            hiddenInstanceCategories_.insert(category);
+        rebuild(false);
+    }
+
+    void setNetTypeVisible(const QString &type, bool visible) {
+        if (type.isEmpty())
+            return;
+        if (visible)
+            hiddenNetTypes_.erase(type);
+        else
+            hiddenNetTypes_.insert(type);
+        rebuild(false);
+    }
+
+    void setShowSpecialNets(bool visible) {
+        if (showSpecialNets_ == visible)
+            return;
+        showSpecialNets_ = visible;
+        rebuild(false);
+    }
+
+    void setShowPorts(bool visible) {
+        if (showPorts_ == visible)
+            return;
+        showPorts_ = visible;
+        rebuild(false);
+    }
+
+    void setShowGuides(bool visible) {
+        if (showGuides_ == visible)
+            return;
+        showGuides_ = visible;
+        rebuild(false);
+    }
+    void setShowRows(bool visible) {
+        if (showRows_ == visible)
+            return;
+        showRows_ = visible;
+        rebuild(false);
+    }
+    void setShowBlockages(bool visible) {
+        if (showBlockages_ == visible)
+            return;
+        showBlockages_ = visible;
+        rebuild(false);
+    }
+
+    void setHeatMapOptions(const HeatMapOptions &options) {
+        heatMapOptions_ = options;
+        rebuild(false);
+    }
+    HeatMapOptions heatMapOptions() const { return heatMapOptions_; }
+
+    void setSelectionCallback(std::function<void(const Selection &)> callback) {
+        selectionCallback_ = std::move(callback);
+    }
+    Selection selection() const { return selection_; }
+
+    void clearSelection() {
+        if (!selection_.valid())
+            return;
+        selection_ = {};
+        if (selectionCallback_)
+            selectionCallback_(selection_);
+        rebuild(false);
+    }
+
+    void setFocusNet(const QString &net) {
+        if (focusNet_ == net)
+            return;
+        focusNet_ = net;
+        rebuild(false);
+    }
+    QString focusNet() const { return focusNet_; }
+    void clearFocusNet() { setFocusNet({}); }
+
+    void selectMarker(int index) {
+        if (!activeModel_ || index < 0 || index >= static_cast<int>(activeModel_->markers.size()))
+            return;
+        selection_ = selectionForMarker(*activeModel_, index);
+        if (selectionCallback_)
+            selectionCallback_(selection_);
+        rebuild(false);
+        zoomToSelection();
+    }
+
+    bool selectByName(const QString &name) {
+        if (!activeModel_ || name.isEmpty())
+            return false;
+        for (int index = 0; index < static_cast<int>(activeModel_->plannedDevices.size()); ++index) {
+            const auto &device = activeModel_->plannedDevices[static_cast<std::size_t>(index)];
+            if (device.name != name)
+                continue;
+            selection_ = {};
+            selection_.kind = SelectionKind::instance;
+            selection_.index = index;
+            selection_.name = device.name;
+            selection_.master = device.master;
+            selection_.category = device.category.isEmpty() ? QStringLiteral("other") : device.category;
+            selection_.module = device.module;
+            selection_.rectangle = device.rectangle;
+            if (selectionCallback_)
+                selectionCallback_(selection_);
+            rebuild(false);
+            zoomToSelection();
+            return true;
+        }
+        for (int index = 0; index < static_cast<int>(activeModel_->ports.size()); ++index) {
+            const auto &port = activeModel_->ports[static_cast<std::size_t>(index)];
+            if (port.label != name && port.net != name)
+                continue;
+            selection_ = {};
+            selection_.kind = SelectionKind::port;
+            selection_.index = index;
+            selection_.name = port.label;
+            selection_.net = port.net;
+            selection_.netId = port.netId;
+            selection_.layer = port.layer.name;
+            selection_.rectangle = port.rectangle;
+            if (selectionCallback_)
+                selectionCallback_(selection_);
+            rebuild(false);
+            zoomToSelection();
+            return true;
+        }
+        for (int index = 0; index < static_cast<int>(activeModel_->shapes.size()); ++index) {
+            const auto &shape = activeModel_->shapes[static_cast<std::size_t>(index)];
+            if (shape.net != name)
+                continue;
+            selection_ = {};
+            selection_.kind = SelectionKind::shape;
+            selection_.index = index;
+            selection_.name = shape.net;
+            selection_.net = shape.net;
+            selection_.netId = shape.netId;
+            selection_.special = shape.special;
+            selection_.layer = shape.layer.name;
+            selection_.polygon = shape.polygon;
+            selection_.centerline = shape.centerline;
+            selection_.width = shape.width;
+            if (selectionCallback_)
+                selectionCallback_(selection_);
+            rebuild(false);
+            zoomToSelection();
+            return true;
+        }
+        return false;
+    }
+
+    std::vector<Selection> markers() const { return markerSelections_; }
+
+    void setTool(Tool tool) { tool_ = tool; }
+    Tool tool() const { return tool_; }
+
+    void clearAnnotations() {
+        rulers_.clear();
+        labels_.clear();
+        rebuild(false);
+    }
+
+    void setStatusCallback(std::function<void(const QPointF &, const QString &)> callback) {
+        statusCallback_ = std::move(callback);
+    }
+
+    void fitView() {
+        fitOnResize_ = true;
+        fitToScene();
+    }
+
+    void zoomIn() {
+        fitOnResize_ = false;
+        scale(1.25, 1.25);
+    }
+
+    void zoomOut() {
+        fitOnResize_ = false;
+        scale(1.0 / 1.25, 1.0 / 1.25);
+    }
+
+    void zoomToSelection() {
+        const auto rect = selectionSceneRect();
+        if (!rect.isValid())
+            return;
+        fitOnResize_ = false;
+        fitInView(rect.adjusted(-20.0, -20.0, 20.0, 20.0), Qt::KeepAspectRatio);
+    }
+
+    void saveImage(const QString &path) {
+        if (path.isEmpty())
+            return;
+        grab().save(path);
+    }
+
+    std::map<QString, int> instanceCategories() const {
+        std::map<QString, int> counts;
+        if (!activeModel_)
+            return counts;
+        for (const auto &device : activeModel_->plannedDevices) {
+            const auto category = device.category.isEmpty() ? QStringLiteral("other") : device.category;
+            ++counts[category];
+        }
+        return counts;
+    }
+
+    std::map<QString, int> netTypes() const {
+        std::map<QString, int> counts;
+        if (!activeModel_)
+            return counts;
+        for (const auto &net : activeModel_->nets) {
+            const auto type = net.type.isEmpty() ? QStringLiteral("signal") : net.type.toLower();
+            ++counts[type];
+        }
+        return counts;
+    }
+
+    std::vector<openvlsi::LayoutPreviewNet> nets() const {
+        return activeModel_ ? activeModel_->nets : std::vector<openvlsi::LayoutPreviewNet>{};
+    }
+
+    std::vector<openvlsi::LayoutPreviewModule> modules() const {
+        return activeModel_ ? activeModel_->modules : std::vector<openvlsi::LayoutPreviewModule>{};
+    }
+
+    std::vector<openvlsi::LayoutPreviewMarker> drcMarkers() const {
+        return activeModel_ ? activeModel_->markers : std::vector<openvlsi::LayoutPreviewMarker>{};
+    }
+
+    bool instanceCategoryVisible(const QString &category) const {
+        return hiddenInstanceCategories_.find(category) == hiddenInstanceCategories_.end();
+    }
+    bool netTypeVisible(const QString &type) const { return hiddenNetTypes_.find(type) == hiddenNetTypes_.end(); }
+    bool showSpecialNets() const { return showSpecialNets_; }
+    bool showPorts() const { return showPorts_; }
+    bool showGuides() const { return showGuides_; }
+    bool showRows() const { return showRows_; }
+    bool showBlockages() const { return showBlockages_; }
+    bool hasGuides() const { return activeModel_ && !activeModel_->guides.empty(); }
+    bool hasRows() const { return activeModel_ && !activeModel_->rows.empty(); }
+    bool hasBlockages() const { return activeModel_ && !activeModel_->blockages.empty(); }
+
+    std::optional<openvlsi::LayoutPreviewHeatMap> currentHeatMap() const {
+        if (customHeatMap_)
+            return customHeatMap_;
+        if (!activeModel_)
+            return std::nullopt;
+        if (heatMapKind_ == openvlsi::LayoutHeatMapKind::placement_density && activeModel_->placementDensity)
+            return *activeModel_->placementDensity;
+        if (heatMapKind_ == openvlsi::LayoutHeatMapKind::routing_congestion && activeModel_->routingCongestion)
+            return *activeModel_->routingCongestion;
+        return std::nullopt;
+    }
+
+  protected:
+    void resizeEvent(QResizeEvent *event) override {
+        QGraphicsView::resizeEvent(event);
+        if (fitOnResize_)
+            fitToScene();
+    }
+
+    void wheelEvent(QWheelEvent *event) override {
+        const auto factor = event->angleDelta().y() > 0 ? 1.18 : (1.0 / 1.18);
+        scale(factor, factor);
+        fitOnResize_ = false;
+        event->accept();
+    }
+
+    void mouseDoubleClickEvent(QMouseEvent *event) override {
+        fitOnResize_ = true;
+        fitToScene();
+        QGraphicsView::mouseDoubleClickEvent(event);
+    }
+
+    void mousePressEvent(QMouseEvent *event) override {
+        if (event->button() == Qt::MiddleButton) {
+            panning_ = true;
+            fitOnResize_ = false;
+            panStart_ = event->pos();
+            panStartHorizontal_ = horizontalScrollBar()->value();
+            panStartVertical_ = verticalScrollBar()->value();
+            panPreviousCursor_ = cursor();
+            setCursor(Qt::ClosedHandCursor);
+            event->accept();
+            return;
+        }
+        if (event->button() != Qt::LeftButton) {
+            QGraphicsView::mousePressEvent(event);
+            return;
+        }
+        const auto point = viewToModel(event->pos());
+        if (tool_ == Tool::ruler) {
+            rulerBuilding_ = true;
+            rulerStart_ = point;
+            event->accept();
+            return;
+        }
+        if (tool_ == Tool::label) {
+            bool accepted = false;
+            const auto text = QInputDialog::getText(this, QStringLiteral("Add label"), QStringLiteral("Label:"),
+                                                    QLineEdit::Normal, {}, &accepted);
+            if (accepted && !text.isEmpty()) {
+                labels_.emplace_back(point, text);
+                rebuild(false);
+            }
+            event->accept();
+            return;
+        }
+        selection_ = hitTest(point);
+        if (selectionCallback_)
+            selectionCallback_(selection_);
+        rebuild(false);
+        event->accept();
+    }
+
+    void mouseMoveEvent(QMouseEvent *event) override {
+        if (panning_) {
+            const auto delta = event->pos() - panStart_;
+            horizontalScrollBar()->setValue(panStartHorizontal_ - delta.x());
+            verticalScrollBar()->setValue(panStartVertical_ - delta.y());
+            event->accept();
+            return;
+        }
+        const auto point = viewToModel(event->pos());
+        if (statusCallback_)
+            statusCallback_(point, tool_ == Tool::ruler ? QStringLiteral("Ruler: click and drag") : QString());
+        QGraphicsView::mouseMoveEvent(event);
+    }
+
+    void mouseReleaseEvent(QMouseEvent *event) override {
+        if (event->button() == Qt::MiddleButton && panning_) {
+            panning_ = false;
+            setCursor(panPreviousCursor_);
+            event->accept();
+            return;
+        }
+        if (tool_ == Tool::ruler && rulerBuilding_ && event->button() == Qt::LeftButton) {
+            const auto end = viewToModel(event->pos());
+            if (QLineF(rulerStart_, end).length() > 0.5)
+                rulers_.emplace_back(rulerStart_, end);
+            rulerBuilding_ = false;
+            rebuild(false);
+            event->accept();
+            return;
+        }
+        QGraphicsView::mouseReleaseEvent(event);
+    }
+
+    void contextMenuEvent(QContextMenuEvent *event) override {
+        const auto point = viewToModel(event->pos());
+        selection_ = hitTest(point);
+        if (selectionCallback_)
+            selectionCallback_(selection_);
+        rebuild(false);
+        QMenu menu(this);
+        auto *inspect = menu.addAction(QStringLiteral("Inspect"));
+        inspect->setEnabled(selection_.valid());
+        auto *focus = menu.addAction(QStringLiteral("Focus net"));
+        focus->setEnabled(!selection_.net.isEmpty());
+        auto *clearFocus = menu.addAction(QStringLiteral("Clear focused net"));
+        clearFocus->setEnabled(!focusNet_.isEmpty());
+        auto *zoom = menu.addAction(QStringLiteral("Zoom to selection"));
+        zoom->setEnabled(selection_.valid());
+        menu.addSeparator();
+        auto *clear = menu.addAction(QStringLiteral("Clear selection"));
+        clear->setEnabled(selection_.valid());
+        const auto *chosen = menu.exec(event->globalPos());
+        if (chosen == focus)
+            setFocusNet(selection_.net);
+        else if (chosen == clearFocus)
+            clearFocusNet();
+        else if (chosen == zoom)
+            zoomToSelection();
+        else if (chosen == clear) {
+            selection_ = {};
+            if (selectionCallback_)
+                selectionCallback_(selection_);
+            rebuild(false);
+        }
+        event->accept();
+    }
+
+    void leaveEvent(QEvent *event) override {
+        if (statusCallback_)
+            statusCallback_({}, {});
+        QGraphicsView::leaveEvent(event);
+    }
+
+    void paintEvent(QPaintEvent *event) override {
+        QGraphicsView::paintEvent(event);
+        QPainter painter(viewport());
+        painter.setRenderHint(QPainter::Antialiasing, true);
+        drawScaleIndicator(painter);
+        drawHeatMapLegend(painter);
+    }
+
+  private:
+    static QString formatScaleLength(qreal length) {
+        if (length >= 1000000.0)
+            return QStringLiteral("%1 mm").arg(length / 1000000.0, 0, 'g', 4);
+        if (length >= 1000.0)
+            return QStringLiteral("%1 um").arg(length / 1000.0, 0, 'g', 4);
+        if (length >= 1.0)
+            return QStringLiteral("%1 nm").arg(length, 0, 'g', 4);
+        return QStringLiteral("%1 pm").arg(length * 1000.0, 0, 'g', 4);
+    }
+
+    void drawScaleIndicator(QPainter &painter) const {
+        const auto scale = std::abs(transform().m11());
+        if (scale <= 0.0)
+            return;
+        constexpr qreal targetPixels = 100.0;
+        const qreal rawLength = targetPixels / scale;
+        const qreal magnitude = std::pow(10.0, std::floor(std::log10(rawLength)));
+        const qreal normalized = rawLength / magnitude;
+        const qreal factor = normalized <= 1.0 ? 1.0 : normalized <= 2.0 ? 2.0 : normalized <= 5.0 ? 5.0 : 10.0;
+        const qreal length = magnitude * factor;
+        const qreal pixels = length * scale;
+
+        const qreal left = 14.0;
+        const qreal bottom = viewport()->height() - 16.0;
+        const auto color = openvlsi::uiColor(openvlsi::UiColor::Axis1);
+        QPen pen(color);
+        pen.setWidthF(2.0);
+        painter.setPen(pen);
+        painter.drawLine(QPointF(left, bottom), QPointF(left + pixels, bottom));
+        painter.drawLine(QPointF(left, bottom - 5.0), QPointF(left, bottom + 1.0));
+        painter.drawLine(QPointF(left + pixels, bottom - 5.0), QPointF(left + pixels, bottom + 1.0));
+        painter.setPen(color);
+        painter.drawText(QPointF(left, bottom - 8.0), formatScaleLength(length));
+    }
+
+    void drawHeatMapLegend(QPainter &painter) const {
+        if (!heatMapOptions_.showLegend)
+            return;
+        const auto heatmap = currentHeatMap();
+        if (!heatmap)
+            return;
+        const auto minimum = heatMapOptions_.minimum.value_or(heatmap->minimum);
+        const auto maximum = heatMapOptions_.maximum.value_or(heatmap->maximum);
+        if (maximum <= minimum)
+            return;
+        constexpr int width = 180;
+        constexpr int height = 12;
+        const int left = viewport()->width() - width - 18;
+        const int top = 18;
+        for (int x = 0; x < width; ++x) {
+            const auto value = minimum + (maximum - minimum) * static_cast<double>(x) / (width - 1);
+            painter.fillRect(left + x, top, 1, height, heatMapColor(value, minimum, maximum));
+        }
+        painter.setPen(QPen(QColor(120, 120, 120), 1));
+        painter.drawRect(left, top, width, height);
+        painter.setPen(palette().color(QPalette::Text));
+        painter.drawText(left, top + height + 14, QString::number(minimum, 'g', 4));
+        painter.drawText(left + width - 55, top + height + 14, QString::number(maximum, 'g', 4));
+    }
+    static QPointF scenePoint(QPointF point) { return QPointF(point.x(), -point.y()); }
+    static QRectF sceneRect(QRectF rectangle) {
+        return QRectF(rectangle.left(), -(rectangle.top() + rectangle.height()), rectangle.width(), rectangle.height());
+    }
+    static QPolygonF scenePolygon(const QPolygonF &polygon) {
+        QPolygonF result;
+        result.reserve(polygon.size());
+        for (const auto &point : polygon)
+            result << scenePoint(point);
+        return result;
+    }
+
+    QPointF viewToModel(QPoint position) const {
+        const auto scene = mapToScene(position);
+        return QPointF(scene.x(), -scene.y());
+    }
+
+    static qreal distanceToSegment(const QPointF &point, const QPointF &start, const QPointF &end) {
+        const QPointF segment(end.x() - start.x(), end.y() - start.y());
+        const qreal lengthSquared = segment.x() * segment.x() + segment.y() * segment.y();
+        if (lengthSquared <= 0.0)
+            return QLineF(point, start).length();
+        const QPointF delta(point.x() - start.x(), point.y() - start.y());
+        const qreal t = std::clamp((delta.x() * segment.x() + delta.y() * segment.y()) / lengthSquared, 0.0, 1.0);
+        return QLineF(point, start + t * segment).length();
+    }
+
+    Selection selectionForMarker(const openvlsi::LayoutPreviewModel &model, int index) const {
+        Selection selection;
+        if (index < 0 || index >= static_cast<int>(model.markers.size()))
+            return selection;
+        const auto &marker = model.markers[static_cast<std::size_t>(index)];
+        selection.kind = SelectionKind::marker;
+        selection.index = index;
+        selection.name = marker.type;
+        selection.type = marker.type;
+        selection.layer = marker.layer;
+        selection.sources = marker.sources;
+        selection.comment = marker.comment;
+        selection.rectangle = marker.rectangle;
+        return selection;
+    }
+
+    Selection hitTest(const QPointF &point) const {
+        Selection result;
+        if (!activeModel_)
+            return result;
+        const auto layerVisible = [&](const openvlsi::LayoutPreviewLayer &layer) {
+            return hiddenLayers_.find(openvlsi::layoutPreviewLayerKey(layer)) == hiddenLayers_.end();
+        };
+        const auto netVisible = [&](int net_id, bool special) {
+            if (special && !showSpecialNets_)
+                return false;
+            for (const auto &net : activeModel_->nets) {
+                if (net.id != net_id)
+                    continue;
+                return hiddenNetTypes_.find(net.type.toLower()) == hiddenNetTypes_.end();
+            }
+            return true;
+        };
+
+        for (int index = static_cast<int>(activeModel_->markers.size()) - 1; index >= 0; --index) {
+            if (activeModel_->markers[static_cast<std::size_t>(index)].rectangle.contains(point))
+                return selectionForMarker(*activeModel_, index);
+        }
+
+        qreal bestArea = std::numeric_limits<qreal>::max();
+        for (int index = 0; index < static_cast<int>(activeModel_->ports.size()); ++index) {
+            const auto &port = activeModel_->ports[static_cast<std::size_t>(index)];
+            if (!layerVisible(port.layer) || !netVisible(port.netId, false) || !port.rectangle.contains(point))
+                continue;
+            const auto area = port.rectangle.width() * port.rectangle.height();
+            if (area > bestArea)
+                continue;
+            bestArea = area;
+            result.kind = SelectionKind::port;
+            result.index = index;
+            result.name = port.label;
+            result.net = port.net;
+            result.netId = port.netId;
+            result.layer = port.layer.name;
+            result.rectangle = port.rectangle;
+        }
+
+        bestArea = std::numeric_limits<qreal>::max();
+        for (int index = 0; index < static_cast<int>(activeModel_->plannedDevices.size()); ++index) {
+            const auto &device = activeModel_->plannedDevices[static_cast<std::size_t>(index)];
+            const auto category = device.category.isEmpty() ? QStringLiteral("other") : device.category;
+            if (hiddenInstanceCategories_.find(category) != hiddenInstanceCategories_.end() ||
+                !device.rectangle.contains(point))
+                continue;
+            const auto area = device.rectangle.width() * device.rectangle.height();
+            if (area > bestArea)
+                continue;
+            bestArea = area;
+            result.kind = SelectionKind::instance;
+            result.index = index;
+            result.name = device.name;
+            result.master = device.master;
+            result.category = category;
+            result.module = device.module;
+            result.rectangle = device.rectangle;
+        }
+
+        qreal bestDistance = std::numeric_limits<qreal>::max();
+        for (int index = 0; index < static_cast<int>(activeModel_->shapes.size()); ++index) {
+            const auto &shape = activeModel_->shapes[static_cast<std::size_t>(index)];
+            if (!layerVisible(shape.layer) || !netVisible(shape.netId, shape.special))
+                continue;
+            if (shape.kind == openvlsi::LayoutPreviewShape::Kind::polygon) {
+                if (shape.polygon.size() < 3 || !shape.polygon.boundingRect().contains(point) ||
+                    !shape.polygon.containsPoint(point, Qt::OddEvenFill))
+                    continue;
+                result.kind = SelectionKind::shape;
+                result.index = index;
+                result.name = shape.net;
+                result.net = shape.net;
+                result.netId = shape.netId;
+                result.special = shape.special;
+                result.layer = shape.layer.name;
+                result.polygon = shape.polygon;
+                bestDistance = 0.0;
+                break;
+            }
+            if (shape.kind == openvlsi::LayoutPreviewShape::Kind::path) {
+                qreal distance = std::numeric_limits<qreal>::max();
+                for (std::size_t segment = 0; segment + 1 < shape.centerline.size(); ++segment)
+                    distance = std::min(
+                        distance, distanceToSegment(point, shape.centerline[segment], shape.centerline[segment + 1]));
+                const auto threshold = std::max<qreal>(shape.width * 0.5, 1.0);
+                if (distance > threshold || distance >= bestDistance)
+                    continue;
+                bestDistance = distance;
+                result.kind = SelectionKind::shape;
+                result.index = index;
+                result.name = shape.net;
+                result.net = shape.net;
+                result.netId = shape.netId;
+                result.special = shape.special;
+                result.layer = shape.layer.name;
+                result.centerline = shape.centerline;
+                result.width = shape.width;
+            }
+        }
+        return result;
+    }
+
+    QRectF selectionSceneRect() const {
+        QRectF rectangle = selection_.rectangle;
+        if (selection_.polygon.size() >= 3)
+            rectangle = selection_.polygon.boundingRect();
+        else if (!selection_.centerline.empty()) {
+            rectangle = QRectF(selection_.centerline.front(), QSizeF(0.0, 0.0));
+            for (const auto &point : selection_.centerline)
+                rectangle = rectangle.united(QRectF(point, QSizeF(0.0, 0.0)));
+            rectangle.adjust(-selection_.width, -selection_.width, selection_.width, selection_.width);
+        }
+        return sceneRect(rectangle);
+    }
+
+    QColor heatMapColor(double value, double minimum, double maximum) const {
+        const auto span = maximum - minimum;
+        auto normalized = span > 0.0 ? std::clamp((value - minimum) / span, 0.0, 1.0) : 0.0;
+        if (heatMapOptions_.logScale)
+            normalized =
+                span > 0.0 ? std::clamp(std::log10(1.0 + value - minimum) / std::log10(1.0 + span), 0.0, 1.0) : 0.0;
+        if (heatMapOptions_.reverse)
+            normalized = 1.0 - normalized;
+        return QColor::fromHsvF(0.66 * (1.0 - normalized), 0.78, 0.92,
+                                std::clamp(heatMapOptions_.alpha, 0, 255) / 255.0);
+    }
+
+    void addHeatMap(const openvlsi::LayoutPreviewHeatMap &heatmap) {
+        if (heatmap.columns <= 0 || heatmap.rows <= 0 || heatmap.bounds.width() <= 0.0 ||
+            heatmap.bounds.height() <= 0.0 || heatmap.maximum <= heatmap.minimum)
+            return;
+        const auto minimum = heatMapOptions_.minimum.value_or(heatmap.minimum);
+        const auto maximum = heatMapOptions_.maximum.value_or(heatmap.maximum);
+        if (maximum <= minimum)
+            return;
+        const auto bin_width = heatmap.bounds.width() / heatmap.columns;
+        const auto bin_height = heatmap.bounds.height() / heatmap.rows;
+        for (int row = 0; row < heatmap.rows; ++row) {
+            for (int column = 0; column < heatmap.columns; ++column) {
+                const auto index = static_cast<std::size_t>(row) * heatmap.columns + column;
+                if (index >= heatmap.values.size())
+                    continue;
+                const auto value = heatmap.values[index];
+                if (value < minimum)
+                    continue;
+                const auto x = heatmap.bounds.x() + column * bin_width;
+                const auto y = heatmap.bounds.y() + row * bin_height;
+                auto *item = scene()->addRect(QRectF(x, -(y + bin_height), bin_width, bin_height), Qt::NoPen,
+                                              heatMapColor(value, minimum, maximum));
+                item->setZValue(-1.0);
+            }
+        }
+    }
+
+    void addMarkers(const openvlsi::LayoutPreviewModel &model) {
+        for (int index = 0; index < static_cast<int>(model.markers.size()); ++index) {
+            const auto &marker = model.markers[static_cast<std::size_t>(index)];
+            QPen pen(QColor(220, 38, 38), 1.0);
+            pen.setCosmetic(true);
+            auto *item = scene()->addRect(sceneRect(marker.rectangle), pen, QColor(220, 38, 38, 40));
+            item->setZValue(4.0);
+        }
+    }
+
+    void addFocusNet(const openvlsi::LayoutPreviewModel &model) {
+        if (focusNet_.isEmpty())
+            return;
+        QPen pen(QColor(250, 204, 21), 1.8);
+        pen.setCosmetic(true);
+        for (const auto &shape : model.shapes) {
+            if (shape.net != focusNet_)
+                continue;
+            if (shape.kind == openvlsi::LayoutPreviewShape::Kind::polygon) {
+                auto *item = scene()->addPolygon(scenePolygon(shape.polygon), pen, QColor(250, 204, 21, 35));
+                item->setZValue(6.0);
+            } else if (shape.kind == openvlsi::LayoutPreviewShape::Kind::path && shape.centerline.size() >= 2) {
+                QPolygonF polygon;
+                for (const auto &point : shape.centerline)
+                    polygon << scenePoint(point);
+                auto *item = scene()->addPolygon(polygon, pen, QBrush(Qt::NoBrush));
+                item->setZValue(6.0);
+            }
+        }
+        for (const auto &port : model.ports) {
+            if (port.net != focusNet_)
+                continue;
+            auto *item = scene()->addRect(sceneRect(port.rectangle), pen, QColor(250, 204, 21, 45));
+            item->setZValue(6.0);
+        }
+    }
+
+    void addSelectionOverlay() {
+        if (!selection_.valid())
+            return;
+        QPen pen(QColor(37, 99, 235), 2.0);
+        pen.setCosmetic(true);
+        const auto fill = QColor(37, 99, 235, 40);
+        if (selection_.kind == SelectionKind::shape && selection_.polygon.size() >= 3) {
+            auto *item = scene()->addPolygon(scenePolygon(selection_.polygon), pen, fill);
+            item->setZValue(8.0);
+        } else if (selection_.kind == SelectionKind::shape && selection_.centerline.size() >= 2) {
+            QPolygonF polygon;
+            for (const auto &point : selection_.centerline)
+                polygon << scenePoint(point);
+            auto *item = scene()->addPolygon(polygon, pen, QBrush(Qt::NoBrush));
+            item->setZValue(8.0);
+        } else if (selection_.rectangle.isValid()) {
+            auto *item = scene()->addRect(sceneRect(selection_.rectangle), pen, fill);
+            item->setZValue(8.0);
+        }
+    }
+
+    void addAnnotations() {
+        QPen rulerPen(QColor(250, 204, 21), 1.2);
+        rulerPen.setCosmetic(true);
+        for (const auto &[start, end] : rulers_) {
+            const auto sceneStart = scenePoint(start);
+            const auto sceneEnd = scenePoint(end);
+            scene()->addLine(QLineF(sceneStart, sceneEnd), rulerPen)->setZValue(9.0);
+            auto *label =
+                scene()->addText(QStringLiteral("%1 µm").arg(QLineF(start, end).length() / 1000.0, 0, 'f', 3));
+            label->setDefaultTextColor(QColor(250, 204, 21));
+            label->setPos((sceneStart + sceneEnd) * 0.5);
+            label->setZValue(9.0);
+        }
+        for (const auto &[position, text] : labels_) {
+            auto *item = scene()->addText(text);
+            item->setDefaultTextColor(palette().color(QPalette::Text));
+            item->setPos(scenePoint(position));
+            item->setZValue(9.0);
+        }
+    }
+
+    void rebuild(bool refit = true) {
+        scene()->clear();
+        layers_.clear();
+        markerSelections_.clear();
+        activeModel_ = nullptr;
+        fallbackModel_.reset();
+        if (refit)
+            fitOnResize_ = true;
+        const openvlsi::LayoutPreviewModel *model = model_.get();
+        if (!model && project_ && cell_ != 0) {
+            const auto found = project_->layoutCells.find(cell_);
+            if (found != project_->layoutCells.end())
+                fallbackModel_ =
+                    openvlsi::buildLayoutCellPreviewModel(*project_, found->second, true, true, true, {}, {}, true, true);
+            if (fallbackModel_ && !fallbackModel_->empty())
+                model = &*fallbackModel_;
+        }
+        activeModel_ = model;
+        if (model && !model->empty()) {
+            const auto styles = styleProject_ ? layerStylesFor(*styleProject_) : openvlsi::LayoutRenderer::LayerStyleMap{};
+            std::map<QString, LayerEntry> uniqueLayers;
+            const auto collectLayer = [&](const openvlsi::LayoutPreviewLayer &layer) {
+                const auto key = openvlsi::layoutPreviewLayerKey(layer);
+                if (uniqueLayers.contains(key))
+                    return;
+                LayerEntry entry;
+                entry.key = key;
+                entry.number = layer.number;
+                entry.label = !layer.name.isEmpty() ? layer.name
+                                                    : (layer.number > 0 ? QStringLiteral("Layer %1").arg(layer.number)
+                                                                        : QStringLiteral("Unnamed layer"));
+                if (layer.id != 0) {
+                    if (const auto style = styles.find(layer.id); style != styles.end())
+                        entry.color = style->second.color;
+                }
+                if (!entry.color.isValid())
+                    entry.color = layerStyleForNumber(layer.number).color;
+                entry.visible = !hiddenLayers_.contains(key);
+                uniqueLayers.emplace(key, std::move(entry));
+            };
+            const auto collectLayerId = [&](openvlsi::ObjectId id) {
+                if (id == 0 || !styleProject_)
+                    return;
+                const auto found = styleProject_->layers.find(id);
+                if (found == styleProject_->layers.end())
+                    return;
+                openvlsi::LayoutPreviewLayer layer;
+                layer.id = id;
+                layer.number = found->second.number;
+                layer.datatype = found->second.datatype;
+                layer.name = QString::fromStdString(found->second.name);
+                collectLayer(layer);
+            };
+            for (const auto &shape : model->shapes) {
+                collectLayer(shape.layer);
+                for (const auto layer : shape.segmentLayers)
+                    collectLayerId(layer);
+                for (const auto &vias : shape.pointVias)
+                    for (const auto layer : vias)
+                        collectLayerId(layer);
+            }
+            for (const auto &port : model->ports)
+                collectLayer(port.layer);
+            for (auto &[key, entry] : uniqueLayers)
+                layers_.push_back(std::move(entry));
+            std::sort(layers_.begin(), layers_.end(), [](const auto &left, const auto &right) {
+                if (left.number != right.number)
+                    return left.number < right.number;
+                return left.label < right.label;
+            });
+
+            for (int index = 0; index < static_cast<int>(model->markers.size()); ++index)
+                markerSelections_.push_back(selectionForMarker(*model, index));
+
+            if (customHeatMap_)
+                addHeatMap(*customHeatMap_);
+            else if (heatMapKind_ == openvlsi::LayoutHeatMapKind::placement_density && model->placementDensity)
+                addHeatMap(*model->placementDensity);
+            else if (heatMapKind_ == openvlsi::LayoutHeatMapKind::routing_congestion && model->routingCongestion)
+                addHeatMap(*model->routingCongestion);
+            openvlsi::LayoutRenderer::PaintOptions options;
+            options.hiddenLayers = hiddenLayers_;
+            options.hiddenInstanceCategories = hiddenInstanceCategories_;
+            options.hiddenNetTypes = hiddenNetTypes_;
+            options.showSpecialNets = showSpecialNets_;
+            options.showPorts = showPorts_;
+            options.showGuides = showGuides_;
+            options.showRows = showRows_;
+            options.showBlockages = showBlockages_;
+            auto *item = createLayoutPreviewItem(model, styles, {}, options);
+            scene()->addItem(item);
+            addMarkers(*model);
+            addFocusNet(*model);
+            addSelectionOverlay();
+            addAnnotations();
+            scene()->setSceneRect(scene()->itemsBoundingRect());
+            if (refit)
+                fitToScene();
+            return;
+        }
+        auto *text = scene()->addText(message_.isEmpty() ? QStringLiteral("No preview available.") : message_);
+        auto font = text->font();
+        font.setPointSize(font.pointSize() + 1);
+        text->setFont(font);
+        text->setDefaultTextColor(palette().color(QPalette::Text));
+        scene()->setSceneRect(scene()->itemsBoundingRect().adjusted(-40, -40, 40, 40));
+        if (refit)
+            fitToScene();
+    }
+
+    void fitToScene() {
+        if (!scene() || scene()->sceneRect().isEmpty())
+            return;
+        fitInView(scene()->sceneRect(), Qt::KeepAspectRatio);
+    }
+
+    std::shared_ptr<openvlsi::Project> project_;
+    openvlsi::ObjectId cell_ = 0;
+    QString message_;
+    std::shared_ptr<openvlsi::LayoutPreviewModel> model_;
+    const openvlsi::Project *styleProject_ = nullptr;
+    openvlsi::LayoutHeatMapKind heatMapKind_ = openvlsi::LayoutHeatMapKind::none;
+    std::set<QString> hiddenLayers_;
+    std::set<QString> hiddenInstanceCategories_ = {QStringLiteral("fill"), QStringLiteral("endcap"),
+                                                   QStringLiteral("tap"), QStringLiteral("antenna"),
+                                                   QStringLiteral("cover")};
+    std::set<QString> hiddenNetTypes_;
+    bool showSpecialNets_ = true;
+    bool showPorts_ = true;
+    bool showGuides_ = false;
+    bool showRows_ = false;
+    bool showBlockages_ = false;
+    HeatMapOptions heatMapOptions_;
+    std::optional<openvlsi::LayoutPreviewHeatMap> customHeatMap_;
+    std::optional<openvlsi::LayoutPreviewModel> fallbackModel_;
+    const openvlsi::LayoutPreviewModel *activeModel_ = nullptr;
+    Selection selection_;
+    QString focusNet_;
+    std::vector<Selection> markerSelections_;
+    std::vector<std::pair<QPointF, QPointF>> rulers_;
+    std::vector<std::pair<QPointF, QString>> labels_;
+    Tool tool_ = Tool::none;
+    bool rulerBuilding_ = false;
+    QPointF rulerStart_;
+    std::function<void(const Selection &)> selectionCallback_;
+    std::function<void(const QPointF &, const QString &)> statusCallback_;
+    std::vector<LayerEntry> layers_;
+    bool fitOnResize_ = true;
+    bool panning_ = false;
+    QPoint panStart_;
+    int panStartHorizontal_ = 0;
+    int panStartVertical_ = 0;
+    QCursor panPreviousCursor_;
+};
+
+std::optional<std::filesystem::path> regularFile(const std::filesystem::path &path) {
+    std::error_code status;
+    if (!std::filesystem::is_regular_file(path, status) || status)
+        return std::nullopt;
+    const auto size = std::filesystem::file_size(path, status);
+    if (status || size == 0)
+        return std::nullopt;
+    return path;
+}
+
+std::optional<std::filesystem::path> runArtifact(const openvlsi::ImplementationRun &run, const QString &root,
+                                                 const std::string &suffix) {
+    const auto resolve = [&](const std::string &artifact) -> std::optional<std::filesystem::path> {
+        if (!artifact.ends_with(suffix))
+            return std::nullopt;
+        std::filesystem::path path(artifact);
+        if (path.is_relative())
+            path = std::filesystem::path(root.toStdString()) / path;
+        return regularFile(path);
+    };
+    for (const auto &[_, state] : run.stages)
+        for (const auto &artifact : state.artifacts)
+            if (auto found = resolve(artifact))
+                return found;
+    for (const auto &artifact : run.artifacts)
+        if (auto found = resolve(artifact))
+            return found;
+    return std::nullopt;
+}
+
+// Resolve a run graph from the recorded artifacts first, then from the run
+// directory. When only the DOT file exists, optionally render it to SVG with
+// Graphviz so the canvas can display it.
+std::optional<std::filesystem::path> runGraph(const openvlsi::ImplementationRun &run, const QString &root,
+                                              const std::string &kind, bool renderDot) {
+    const auto suffix = "/reports/" + kind;
+    if (auto svg = runArtifact(run, root, suffix + ".svg"))
+        return svg;
+    const auto rootPath = std::filesystem::path(root.toStdString());
+    std::vector<std::filesystem::path> runDirectories;
+    if (!run.directory.empty())
+        runDirectories.push_back(rootPath / run.directory);
+    runDirectories.push_back(rootPath / "build" / "impl" / openvlsi::implementationRunStem(run));
+    for (const auto &directory : runDirectories)
+        if (auto svg = regularFile(directory / "reports" / (kind + ".svg")))
+            return svg;
+    std::optional<std::filesystem::path> dot = runArtifact(run, root, suffix + ".dot");
+    if (!dot) {
+        for (const auto &directory : runDirectories) {
+            if (auto candidate = regularFile(directory / "reports" / (kind + ".dot"))) {
+                dot = candidate;
+                break;
+            }
+        }
+    }
+    if (!dot || !renderDot)
+        return std::nullopt;
+    auto svgPath = *dot;
+    svgPath.replace_extension(".svg");
+    if (auto existing = regularFile(svgPath))
+        return existing;
+    const auto executable = QStandardPaths::findExecutable(QStringLiteral("dot"));
+    if (executable.isEmpty())
+        return std::nullopt;
+    std::error_code sizeStatus;
+    const auto dotBytes = std::filesystem::file_size(*dot, sizeStatus);
+    const bool large = !sizeStatus && dotBytes > 1ULL * 1024ULL * 1024ULL;
+    QStringList arguments;
+    if (large)
+        arguments << QStringLiteral("-Ksfdp");
+    arguments << QStringLiteral("-Tsvg") << QString::fromStdString(dot->string()) << QStringLiteral("-o")
+              << QString::fromStdString(svgPath.string());
+    QProcess process;
+    process.setProgram(executable);
+    process.setArguments(arguments);
+    process.setProcessChannelMode(QProcess::MergedChannels);
+    process.start();
+    if (!process.waitForStarted(5000) || !process.waitForFinished(large ? 300000 : 60000))
+        return std::nullopt;
+    if (process.exitStatus() != QProcess::NormalExit || process.exitCode() != 0)
+        return std::nullopt;
+    return regularFile(svgPath);
+}
+
+// Displays a Yosys-generated SVG graph with the same zoom/pan behavior as the
+// DEF preview canvas.
+class SvgPreviewCanvas : public QGraphicsView {
+  public:
+    explicit SvgPreviewCanvas(QWidget *parent = nullptr) : QGraphicsView(parent) {
+        setScene(new QGraphicsScene(this));
+        setRenderHint(QPainter::Antialiasing, true);
+        setDragMode(QGraphicsView::ScrollHandDrag);
+        setTransformationAnchor(QGraphicsView::AnchorUnderMouse);
+        setResizeAnchor(QGraphicsView::AnchorViewCenter);
+        setBackgroundBrush(palette().color(QPalette::Base));
+    }
+
+    ~SvgPreviewCanvas() override { scene()->clear(); }
+
+    void setSvg(const std::filesystem::path &path, const QString &message) {
+        svgPath_ = path;
+        message_ = message;
+        reload();
+    }
+
+  protected:
+    void changeEvent(QEvent *event) override {
+        QGraphicsView::changeEvent(event);
+        if (event->type() == QEvent::PaletteChange || event->type() == QEvent::StyleChange) {
+            setBackgroundBrush(palette().color(QPalette::Base));
+            reload();
+        }
+    }
+
+    void resizeEvent(QResizeEvent *event) override {
+        QGraphicsView::resizeEvent(event);
+        if (fitOnResize_)
+            fitToScene();
+    }
+
+    void wheelEvent(QWheelEvent *event) override {
+        const auto factor = event->angleDelta().y() > 0 ? 1.18 : (1.0 / 1.18);
+        scale(factor, factor);
+        fitOnResize_ = false;
+        event->accept();
+    }
+
+    void mouseDoubleClickEvent(QMouseEvent *event) override {
+        fitOnResize_ = true;
+        fitToScene();
+        QGraphicsView::mouseDoubleClickEvent(event);
+    }
+
+  private:
+    QString themedSvg(QString source) const {
+        const auto text = palette().color(QPalette::Text).name(QColor::HexRgb);
+        const auto base = palette().color(QPalette::Base).name(QColor::HexRgb);
+        source.replace(QStringLiteral("fill=\"white\""), QStringLiteral("fill=\"%1\"").arg(base));
+        source.replace(QStringLiteral("fill=\"black\""), QStringLiteral("fill=\"%1\"").arg(text));
+        source.replace(QStringLiteral("stroke=\"black\""), QStringLiteral("stroke=\"%1\"").arg(text));
+        source.replace(QStringLiteral("stroke=\"white\""), QStringLiteral("stroke=\"%1\"").arg(base));
+        // Graphviz leaves text without an explicit fill. Give each text
+        // element the theme foreground so it stays readable on both palettes.
+        const QRegularExpression textElement(QStringLiteral("<text\\b([^>]*)>"));
+        QString result;
+        result.reserve(source.size() + 64);
+        int offset = 0;
+        auto matches = textElement.globalMatch(source);
+        while (matches.hasNext()) {
+            const auto match = matches.next();
+            result += source.mid(offset, match.capturedStart() - offset);
+            const auto attributes = match.captured(1);
+            if (attributes.contains(QStringLiteral("fill="))) {
+                result += match.captured(0);
+            } else {
+                result +=
+                    QStringLiteral("<text fill=\"") + text + QStringLiteral("\"") + attributes + QStringLiteral(">");
+            }
+            offset = match.capturedEnd();
+        }
+        result += source.mid(offset);
+        return result;
+    }
+
+    std::filesystem::path themedCopy(const std::filesystem::path &source) {
+        if (!themeDirectory_)
+            themeDirectory_ = std::make_unique<QTemporaryDir>();
+        if (!themeDirectory_ || !themeDirectory_->isValid())
+            return source;
+        QFile input(QString::fromStdString(source.string()));
+        if (!input.open(QIODevice::ReadOnly))
+            return source;
+        const auto themed = themedSvg(QString::fromUtf8(input.readAll()));
+        input.close();
+        const auto target = themeDirectory_->filePath(QStringLiteral("graph.svg"));
+        QFile output(target);
+        if (!output.open(QIODevice::WriteOnly | QIODevice::Truncate))
+            return source;
+        output.write(themed.toUtf8());
+        output.close();
+        return std::filesystem::path(target.toStdString());
+    }
+
+    void reload() {
+        scene()->clear();
+        fitOnResize_ = true;
+        std::error_code status;
+        if (!svgPath_.empty() && std::filesystem::is_regular_file(svgPath_, status) && !status) {
+            const auto displayPath = themedCopy(svgPath_);
+            auto *item = new QGraphicsSvgItem(QString::fromStdString(displayPath.string()));
+            if (item->renderer() && item->renderer()->isValid()) {
+                item->setFlags(QGraphicsItem::ItemClipsToShape);
+                scene()->addItem(item);
+                scene()->setSceneRect(item->boundingRect());
+                fitToScene();
+                return;
+            }
+            delete item;
+        }
+        auto *text = scene()->addText(message_.isEmpty() ? QStringLiteral("No graph available.") : message_);
+        auto font = text->font();
+        font.setPointSize(font.pointSize() + 1);
+        text->setFont(font);
+        text->setDefaultTextColor(palette().color(QPalette::Text));
+        scene()->setSceneRect(scene()->itemsBoundingRect().adjusted(-40, -40, 40, 40));
+        fitToScene();
+    }
+
+    void fitToScene() {
+        if (!scene() || scene()->sceneRect().isEmpty() || viewport()->size().isEmpty())
+            return;
+        const auto rect = scene()->sceneRect();
+        const auto viewportSize = viewport()->size();
+        const double sx = static_cast<double>(viewportSize.width()) / rect.width();
+        const double sy = static_cast<double>(viewportSize.height()) / rect.height();
+        double scaleFactor = std::min(sx, sy);
+        // Extremely tall or wide graphs become unreadably small when fitted
+        // entirely. Fit the narrow axis and let the user pan along the long one.
+        if (rect.height() > rect.width() * 3.0)
+            scaleFactor = sx;
+        else if (rect.width() > rect.height() * 3.0)
+            scaleFactor = sy;
+        scaleFactor = std::clamp(scaleFactor, 0.02, 8.0);
+        resetTransform();
+        scale(scaleFactor, scaleFactor);
+        centerOn(rect.left() + viewportSize.width() / (2.0 * scaleFactor),
+                 rect.top() + viewportSize.height() / (2.0 * scaleFactor));
+    }
+
+    std::filesystem::path svgPath_;
+    QString message_;
+    std::unique_ptr<QTemporaryDir> themeDirectory_;
+    bool fitOnResize_ = true;
+};
+
+ImplementationUiController::ImplementationUiController(QObject *parent) : parent_(parent) {}
+
+ImplementationUiController::~ImplementationUiController() {
+    for (auto *process : {process_, previewProcess_, heatMapProcess_}) {
+        if (!process)
+            continue;
+        process->disconnect();
+        process->kill();
+        process->waitForFinished(1000);
+    }
+    process_ = nullptr;
+    previewProcess_ = nullptr;
+    heatMapProcess_ = nullptr;
+}
+
+void ImplementationUiController::setProject(const openvlsi::Project *project, const QString &projectPath) {
+    if (project_ != project || projectPath_ != projectPath)
+        previewCache_.clear();
+    project_ = project;
+    projectPath_ = projectPath;
+    if (activeRunId_ == 0 || !activeRun())
+        activeRunId_ = 0;
+    if (activeRunId_ == 0 && project_ && !project_->implementationRuns.empty())
+        activeRunId_ = project_->implementationRuns.begin()->first;
+    refresh();
+}
+
+QString ImplementationUiController::projectRoot() const {
+    if (projectPath_.isEmpty())
+        return {};
+    const QFileInfo info(projectPath_);
+    return info.isDir() ? info.absoluteFilePath() : info.absolutePath();
+}
+
+bool ImplementationUiController::busy() const { return process_ && process_->state() != QProcess::NotRunning; }
+
+const openvlsi::ImplementationRun *ImplementationUiController::activeRun() const {
+    if (!project_)
+        return nullptr;
+    const auto found = project_->implementationRuns.find(activeRunId_);
+    return found == project_->implementationRuns.end() ? nullptr : &found->second;
+}
+
+void ImplementationUiController::setActiveRunId(openvlsi::ObjectId id) {
+    if (activeRunId_ == id)
+        return;
+    activeRunId_ = id;
+    if (onChanged_)
+        onChanged_();
+}
+
+void ImplementationUiController::addLogListener(
+    std::function<void(openvlsi::ImplementationStage, const QString &)> listener) {
+    logListeners_.push_back(std::move(listener));
+}
+
+void ImplementationUiController::refresh() {
+    if (onChanged_)
+        onChanged_();
+}
+
+ImplementationUiController::StagePreview ImplementationUiController::stagePreview(openvlsi::ImplementationStage stage) {
+    StagePreview result;
+    const auto *run = activeRun();
+    if (!run) {
+        result.message = QStringLiteral("Select an implementation run in the Runs panel.");
+        return result;
+    }
+    if (stage == openvlsi::ImplementationStage::created) {
+        result.message = QStringLiteral("RTL has no physical preview.");
+        return result;
+    }
+    if (stage == openvlsi::ImplementationStage::synthesis) {
+        result.message = QStringLiteral("Synthesis has no physical geometry yet.\nRun Floorplan to create a DEF "
+                                        "checkpoint.");
+        if (const auto cells = run->metrics.find("synth.cells"); cells != run->metrics.end()) {
+            result.message = QStringLiteral("Synthesized %1 cells.\nRun Floorplan to create a DEF checkpoint.")
+                                 .arg(QString::number(cells->second, 'g', 10));
+        }
+        return result;
+    }
+    const auto odbRelative = stageOdbPath(stage);
+    const auto defRelative = stageDefPath(stage);
+    if (odbRelative.empty() && defRelative.empty()) {
+        result.message = QStringLiteral("This stage has no physical checkpoint.");
+        return result;
+    }
+    const auto runRoot = std::filesystem::path(projectRoot().toStdString()) / run->directory;
+    const auto odbPath = odbRelative.empty() ? std::filesystem::path{} : runRoot / odbRelative;
+    const auto defPath = defRelative.empty() ? std::filesystem::path{} : runRoot / defRelative;
+    std::error_code status;
+    const bool odbExists = !odbPath.empty() && std::filesystem::is_regular_file(odbPath, status) && !status;
+    const bool defExists = !defPath.empty() && std::filesystem::is_regular_file(defPath, status) && !status;
+    const auto previewPath = odbExists ? odbPath : defPath;
+    const auto stamp =
+        (odbExists || defExists) ? std::filesystem::last_write_time(previewPath, status).time_since_epoch().count() : 0;
+    const auto size = (odbExists || defExists) ? std::filesystem::file_size(previewPath, status) : 0;
+    const auto drcPath = runRoot / "reports" / "route_drc.rpt";
+    const auto drcStamp = std::filesystem::is_regular_file(drcPath, status) && !status
+                              ? std::filesystem::last_write_time(drcPath, status).time_since_epoch().count()
+                              : 0;
+    const auto key = QStringLiteral("%1:%2:%3:%4:%5:%6:%7")
+                         .arg(static_cast<qulonglong>(run->id))
+                         .arg(static_cast<int>(stage))
+                         .arg(odbExists ? 1 : 0)
+                         .arg(defExists ? 1 : 0)
+                         .arg(static_cast<qlonglong>(stamp))
+                         .arg(static_cast<qulonglong>(size))
+                         .arg(static_cast<qlonglong>(drcStamp));
+    if (const auto cached = previewCache_.find(static_cast<int>(stage));
+        cached != previewCache_.end() && cached->second.key == key) {
+        return {cached->second.project, cached->second.cell, cached->second.model, cached->second.message};
+    }
+    auto cache = [&](StagePreview preview) {
+        previewCache_[static_cast<int>(stage)] = {key, preview.project, preview.cell, preview.model, preview.message};
+        return preview;
+    };
+    if (!odbExists && !defExists) {
+        result.message = QStringLiteral("No %1 ODB checkpoint yet.").arg(stageTitle(stage));
+        return cache(std::move(result));
+    }
+
+    QString odbError;
+    if (odbExists) {
+        const auto helper = helperExecutable();
+        if (!helper.isEmpty()) {
+            QProcess process;
+            process.setProcessChannelMode(QProcess::SeparateChannels);
+            process.start(helper, {QStringLiteral("odb-preview"), QString::fromStdString(odbPath.string()),
+                                   QStringLiteral("--heatmap-bins"), QStringLiteral("32")});
+            if (process.waitForStarted(5000) && process.waitForFinished(120000) &&
+                process.exitStatus() == QProcess::NormalExit && process.exitCode() == 0) {
+                result.model = parseOdbPreview(process.readAllStandardOutput(), project_, odbError);
+                if (result.model) {
+                    if (stage == openvlsi::ImplementationStage::routing || stage == openvlsi::ImplementationStage::final)
+                        result.model->markers = parseDrcMarkers(runRoot / "reports" / "route_drc.rpt");
+                    result.message.clear();
+                    return cache(std::move(result));
+                }
+            } else {
+                process.kill();
+                process.waitForFinished();
+                odbError = QString::fromStdString(process.readAllStandardError().toStdString());
+                if (odbError.isEmpty())
+                    odbError = QStringLiteral("openvlsi-openroad odb-preview did not finish.");
+            }
+        }
+    }
+    if (!defExists) {
+        result.message = odbError.isEmpty()
+                             ? QStringLiteral("Unable to read the %1 ODB checkpoint.").arg(stageTitle(stage))
+                             : odbError;
+        return cache(std::move(result));
+    }
+    const auto path = defPath;
+    const auto pdks = openvlsi::findPdks(run->config.pdk);
+    if (pdks.empty()) {
+        result.message =
+            QStringLiteral("PDK package '%1' is not installed.").arg(QString::fromStdString(run->config.pdk));
+        return cache(std::move(result));
+    }
+    try {
+        const auto package = openvlsi::PackageManager::readManifest(pdks.front().packageRoot);
+        if (!package.pdk) {
+            result.message =
+                QStringLiteral("Package '%1' does not declare a PDK.").arg(QString::fromStdString(package.name));
+            return cache(std::move(result));
+        }
+        std::vector<openvlsi::Diagnostic> diagnostics;
+        const auto platform = openvlsi::resolveImplementationPlatform(package, run->config.stack, diagnostics);
+        for (const auto &diagnostic : diagnostics) {
+            if (diagnostic.severity == openvlsi::Diagnostic::Severity::error) {
+                result.message = QString::fromStdString(diagnostic.message);
+                return cache(std::move(result));
+            }
+        }
+        openvlsi::DefImportOptions options;
+        options.techLef = platform.techLef;
+        options.cellLef = platform.cellLef;
+        options.pdk = package.pdk->id.empty() ? package.name : package.pdk->id;
+        options.stack = platform.stack.empty() ? run->config.stack : platform.stack;
+        // Layer definitions are keyed by lower-case names.
+        for (const auto &layer : package.pdk->layers) {
+            std::string name = layer.name;
+            std::transform(name.begin(), name.end(), name.begin(),
+                           [](unsigned char character) { return static_cast<char>(std::tolower(character)); });
+            options.layers[name] = {layer.number, layer.datatype};
+        }
+        options.cellName = run->name + " preview";
+        result.project = std::make_shared<openvlsi::Project>();
+        result.project->identity = run->name + " preview";
+        result.project->name = run->name + " preview";
+        result.cell = openvlsi::LayoutInterchange::importDefIntoProject(*result.project, path, options);
+        if (result.cell == 0) {
+            result.project.reset();
+            result.message = QStringLiteral("Unable to import the %1 DEF checkpoint.").arg(stageTitle(stage));
+            return cache(std::move(result));
+        }
+        const auto extras = parseDefPreviewExtras(path);
+        const auto cell = result.project->layoutCells.find(result.cell);
+        if (cell != result.project->layoutCells.end()) {
+            auto model = std::make_shared<openvlsi::LayoutPreviewModel>(
+                openvlsi::buildLayoutCellPreviewModel(*result.project, cell->second, true, true, true, {}, {}, true, true));
+            model->rows = extras.rows;
+            if (const auto guides = runRoot / "reports" / "route.guide";
+                std::filesystem::is_regular_file(guides, status) && !status) {
+                model->guides = parseRouteGuides(guides, extras.unitsPerMicron, result.project.get());
+            }
+            result.model = std::move(model);
+        }
+        return cache(std::move(result));
+    } catch (const std::exception &error) {
+        result.project.reset();
+        result.cell = 0;
+        result.message = QString::fromStdString(error.what());
+        return cache(std::move(result));
+    }
+}
+
+void ImplementationUiController::requestStagePreview(openvlsi::ImplementationStage stage, StagePreviewCallback callback) {
+    if (!callback)
+        return;
+    const auto *run = activeRun();
+    if (!run) {
+        StagePreview result;
+        result.message = QStringLiteral("Select an implementation run in the Runs panel.");
+        callback(result);
+        return;
+    }
+    const auto odbRelative = stageOdbPath(stage);
+    const auto defRelative = stageDefPath(stage);
+    const auto runRoot = std::filesystem::path(projectRoot().toStdString()) / run->directory;
+    const auto odbPath = odbRelative.empty() ? std::filesystem::path{} : runRoot / odbRelative;
+    const auto defPath = defRelative.empty() ? std::filesystem::path{} : runRoot / defRelative;
+    std::error_code status;
+    const bool odbExists = !odbPath.empty() && std::filesystem::is_regular_file(odbPath, status) && !status;
+    const bool defExists = !defPath.empty() && std::filesystem::is_regular_file(defPath, status) && !status;
+    const auto previewPath = odbExists ? odbPath : defPath;
+    const auto stamp =
+        (odbExists || defExists) ? std::filesystem::last_write_time(previewPath, status).time_since_epoch().count() : 0;
+    const auto size = (odbExists || defExists) ? std::filesystem::file_size(previewPath, status) : 0;
+    const auto drcPath = runRoot / "reports" / "route_drc.rpt";
+    const auto drcStamp = std::filesystem::is_regular_file(drcPath, status) && !status
+                              ? std::filesystem::last_write_time(drcPath, status).time_since_epoch().count()
+                              : 0;
+    const auto key = QStringLiteral("%1:%2:%3:%4:%5:%6:%7")
+                         .arg(static_cast<qulonglong>(run->id))
+                         .arg(static_cast<int>(stage))
+                         .arg(odbExists ? 1 : 0)
+                         .arg(defExists ? 1 : 0)
+                         .arg(static_cast<qlonglong>(stamp))
+                         .arg(static_cast<qulonglong>(size))
+                         .arg(static_cast<qlonglong>(drcStamp));
+    if (const auto cached = previewCache_.find(static_cast<int>(stage));
+        cached != previewCache_.end() && cached->second.key == key) {
+        callback({cached->second.project, cached->second.cell, cached->second.model, cached->second.message});
+        return;
+    }
+    const auto helper = helperExecutable();
+    if (!odbExists || helper.isEmpty()) {
+        callback(stagePreview(stage));
+        return;
+    }
+
+    if (previewProcess_) {
+        previewProcess_->disconnect();
+        previewProcess_->kill();
+        previewProcess_->deleteLater();
+        previewProcess_ = nullptr;
+    }
+    auto *process = new QProcess(parent_);
+    previewProcess_ = process;
+    process->setProperty("openvlsiHandled", false);
+    process->setProcessChannelMode(QProcess::SeparateChannels);
+    QObject::connect(process, &QProcess::errorOccurred, parent_,
+                     [this, process, callback](QProcess::ProcessError error) {
+                         if (error != QProcess::FailedToStart || process->property("openvlsiHandled").toBool())
+                             return;
+                         process->setProperty("openvlsiHandled", true);
+                         StagePreview result;
+                         result.message = QStringLiteral("Unable to start the ODB preview process.");
+                         previewProcess_ = nullptr;
+                         process->deleteLater();
+                         callback(result);
+                     });
+    QObject::connect(
+        process, qOverload<int, QProcess::ExitStatus>(&QProcess::finished), parent_,
+        [this, process, stage, key, runRoot, odbPath, drcPath, callback, defExists](int exitCode,
+                                                                                    QProcess::ExitStatus) {
+            if (process->property("openvlsiHandled").toBool())
+                return;
+            process->setProperty("openvlsiHandled", true);
+            auto result = StagePreview{};
+            QString parseError;
+            if (process->exitStatus() == QProcess::NormalExit && exitCode == 0) {
+                result.model = parseOdbPreview(process->readAllStandardOutput(), project_, parseError);
+                if (result.model) {
+                    if (stage == openvlsi::ImplementationStage::routing || stage == openvlsi::ImplementationStage::final)
+                        result.model->markers = parseDrcMarkers(drcPath);
+                    previewCache_[static_cast<int>(stage)] = {key, result.project, result.cell, result.model,
+                                                              result.message};
+                    previewProcess_ = nullptr;
+                    process->deleteLater();
+                    callback(result);
+                    return;
+                }
+            }
+            parseError = QString::fromStdString(process->readAllStandardError().toStdString()).trimmed();
+            if (parseError.isEmpty())
+                parseError = QStringLiteral("Unable to load the ODB preview.");
+            result.message = parseError;
+            previewCache_[static_cast<int>(stage)] = {key, result.project, result.cell, result.model, result.message};
+            previewProcess_ = nullptr;
+            process->deleteLater();
+            callback(result);
+            (void)defExists;
+        });
+    process->start(helper, {QStringLiteral("odb-preview"), QString::fromStdString(odbPath.string()),
+                            QStringLiteral("--heatmap-bins"), QStringLiteral("32")});
+}
+
+QString ImplementationUiController::exportHeatMap(openvlsi::ImplementationStage stage, const QString &kind, QString &error) {
+    const auto *run = activeRun();
+    if (!run) {
+        error = QStringLiteral("Select an implementation run in the Runs panel.");
+        return {};
+    }
+    const auto odbRelative = stageOdbPath(stage);
+    const auto sdcRelative = stageSdcPath(stage);
+    if (odbRelative.empty()) {
+        error = QStringLiteral("This stage has no physical checkpoint.");
+        return {};
+    }
+    const auto runRoot = std::filesystem::path(projectRoot().toStdString()) / run->directory;
+    const auto odbPath = runRoot / odbRelative;
+    const auto sdcPath = runRoot / sdcRelative;
+    std::error_code status;
+    if (!std::filesystem::is_regular_file(odbPath, status) || status) {
+        error = QStringLiteral("No %1 ODB checkpoint yet.").arg(stageTitle(stage));
+        return {};
+    }
+    const auto helper = helperExecutable();
+    if (helper.isEmpty()) {
+        error = QStringLiteral("The openvlsi-openroad helper is not available.");
+        return {};
+    }
+    const auto pdks = openvlsi::findPdks(run->config.pdk);
+    if (pdks.empty()) {
+        error = QStringLiteral("PDK package '%1' is not installed.").arg(QString::fromStdString(run->config.pdk));
+        return {};
+    }
+    QStringList arguments = {QStringLiteral("heatmap"), QStringLiteral("--input-db"),
+                             QString::fromStdString(odbPath.string()), QStringLiteral("--kind"), kind};
+    if (std::filesystem::is_regular_file(sdcPath, status) && !status)
+        arguments << QStringLiteral("--sdc") << QString::fromStdString(sdcPath.string());
+    try {
+        const auto package = openvlsi::PackageManager::readManifest(pdks.front().packageRoot);
+        if (!package.pdk) {
+            error = QStringLiteral("Package '%1' does not declare a PDK.").arg(QString::fromStdString(package.name));
+            return {};
+        }
+        std::vector<openvlsi::Diagnostic> diagnostics;
+        const auto platform = openvlsi::resolveImplementationPlatform(package, run->config.stack, diagnostics);
+        for (const auto &diagnostic : diagnostics) {
+            if (diagnostic.severity == openvlsi::Diagnostic::Severity::error) {
+                error = QString::fromStdString(diagnostic.message);
+                return {};
+            }
+        }
+        std::vector<std::filesystem::path> liberty;
+        if (const auto found = platform.liberty.find(run->config.corner); found != platform.liberty.end())
+            liberty = found->second;
+        else if (!platform.liberty.empty())
+            liberty = platform.liberty.begin()->second;
+        for (const auto &path : liberty)
+            arguments << QStringLiteral("--liberty") << QString::fromStdString(path.string());
+    } catch (const std::exception &exception) {
+        error = QString::fromStdString(exception.what());
+        return {};
+    }
+    const auto output = runRoot / "reports" / (kind.toStdString() + "-heatmap.csv");
+    arguments << QStringLiteral("--output") << QString::fromStdString(output.string()) << QStringLiteral("--log")
+              << QString::fromStdString((runRoot / "logs" / "heatmap.log").string()) << QStringLiteral("--threads")
+              << QString::number(std::max(1, run->config.threads));
+
+    QApplication::setOverrideCursor(Qt::WaitCursor);
+    QProcess process;
+    process.setProcessChannelMode(QProcess::SeparateChannels);
+    process.start(helper, arguments);
+    const bool started = process.waitForStarted(5000);
+    const bool finished = started && process.waitForFinished(300000);
+    const auto standardError = QString::fromStdString(process.readAllStandardError().toStdString()).trimmed();
+    const auto standardOutput = QString::fromStdString(process.readAllStandardOutput().toStdString()).trimmed();
+    QApplication::restoreOverrideCursor();
+    if (!finished || process.exitStatus() != QProcess::NormalExit || process.exitCode() != 0) {
+        if (!finished)
+            process.kill();
+        error = standardError;
+        if (error.isEmpty())
+            error = standardOutput.isEmpty() ? QStringLiteral("OpenROAD heat-map export failed.") : standardOutput;
+        return {};
+    }
+    if (!std::filesystem::is_regular_file(output, status) || status) {
+        error = standardError.isEmpty() ? QStringLiteral("OpenROAD did not write the heat-map CSV.") : standardError;
+        return {};
+    }
+    return QString::fromStdString(output.string());
+}
+
+void ImplementationUiController::requestExportHeatMap(openvlsi::ImplementationStage stage, const QString &kind,
+                                                      HeatMapCallback callback) {
+    if (!callback)
+        return;
+    const auto *run = activeRun();
+    if (!run) {
+        callback({}, QStringLiteral("Select an implementation run in the Runs panel."));
+        return;
+    }
+    const auto odbRelative = stageOdbPath(stage);
+    const auto sdcRelative = stageSdcPath(stage);
+    if (odbRelative.empty()) {
+        callback({}, QStringLiteral("This stage has no physical checkpoint."));
+        return;
+    }
+    const auto runRoot = std::filesystem::path(projectRoot().toStdString()) / run->directory;
+    const auto odbPath = runRoot / odbRelative;
+    const auto sdcPath = runRoot / sdcRelative;
+    std::error_code status;
+    if (!std::filesystem::is_regular_file(odbPath, status) || status) {
+        callback({}, QStringLiteral("No %1 ODB checkpoint yet.").arg(stageTitle(stage)));
+        return;
+    }
+    const auto helper = helperExecutable();
+    if (helper.isEmpty()) {
+        callback({}, QStringLiteral("The openvlsi-openroad helper is not available."));
+        return;
+    }
+    QStringList arguments = {QStringLiteral("heatmap"), QStringLiteral("--input-db"),
+                             QString::fromStdString(odbPath.string()), QStringLiteral("--kind"), kind};
+    if (std::filesystem::is_regular_file(sdcPath, status) && !status)
+        arguments << QStringLiteral("--sdc") << QString::fromStdString(sdcPath.string());
+    const auto pdks = openvlsi::findPdks(run->config.pdk);
+    if (pdks.empty()) {
+        callback({}, QStringLiteral("PDK package '%1' is not installed.").arg(QString::fromStdString(run->config.pdk)));
+        return;
+    }
+    try {
+        const auto package = openvlsi::PackageManager::readManifest(pdks.front().packageRoot);
+        if (!package.pdk) {
+            callback({},
+                     QStringLiteral("Package '%1' does not declare a PDK.").arg(QString::fromStdString(package.name)));
+            return;
+        }
+        std::vector<openvlsi::Diagnostic> diagnostics;
+        const auto platform = openvlsi::resolveImplementationPlatform(package, run->config.stack, diagnostics);
+        std::vector<std::filesystem::path> liberty;
+        if (const auto found = platform.liberty.find(run->config.corner); found != platform.liberty.end())
+            liberty = found->second;
+        else if (!platform.liberty.empty())
+            liberty = platform.liberty.begin()->second;
+        for (const auto &path : liberty)
+            arguments << QStringLiteral("--liberty") << QString::fromStdString(path.string());
+    } catch (const std::exception &exception) {
+        callback({}, QString::fromStdString(exception.what()));
+        return;
+    }
+    const auto output = runRoot / "reports" / (kind.toStdString() + "-heatmap.csv");
+    arguments << QStringLiteral("--output") << QString::fromStdString(output.string()) << QStringLiteral("--log")
+              << QString::fromStdString((runRoot / "logs" / "heatmap.log").string()) << QStringLiteral("--threads")
+              << QString::number(std::max(1, run->config.threads));
+
+    if (heatMapProcess_) {
+        heatMapProcess_->disconnect();
+        heatMapProcess_->kill();
+        heatMapProcess_->deleteLater();
+        heatMapProcess_ = nullptr;
+    }
+    auto *process = new QProcess(parent_);
+    heatMapProcess_ = process;
+    process->setProcessChannelMode(QProcess::SeparateChannels);
+    QObject::connect(process, qOverload<int, QProcess::ExitStatus>(&QProcess::finished), parent_,
+                     [this, process, output, callback](int exitCode, QProcess::ExitStatus) {
+                         const auto standardError =
+                             QString::fromStdString(process->readAllStandardError().toStdString()).trimmed();
+                         const auto standardOutput =
+                             QString::fromStdString(process->readAllStandardOutput().toStdString()).trimmed();
+                         heatMapProcess_ = nullptr;
+                         process->deleteLater();
+                         std::error_code status;
+                         if (process->exitStatus() != QProcess::NormalExit || exitCode != 0 ||
+                             !std::filesystem::is_regular_file(output, status) || status) {
+                             auto error = standardError;
+                             if (error.isEmpty())
+                                 error = standardOutput.isEmpty() ? QStringLiteral("OpenROAD heat-map export failed.")
+                                                                  : standardOutput;
+                             callback({}, error);
+                             return;
+                         }
+                         callback(QString::fromStdString(output.string()), {});
+                     });
+    process->start(helper, arguments);
+}
+
+bool ImplementationUiController::openInOpenRoadGui(openvlsi::ImplementationStage stage, QString &error) {
+    const auto *run = activeRun();
+    if (!run || projectPath_.isEmpty()) {
+        error = QStringLiteral("Select an implementation run first.");
+        return false;
+    }
+    const auto odbRelative = stageOdbPath(stage);
+    if (odbRelative.empty()) {
+        error = QStringLiteral("This stage has no ODB checkpoint.");
+        return false;
+    }
+    const auto runRoot = std::filesystem::path(projectRoot().toStdString()) / run->directory;
+    const auto odbPath = runRoot / odbRelative;
+    std::error_code status;
+    if (!std::filesystem::is_regular_file(odbPath, status) || status) {
+        error = QStringLiteral("No %1 ODB checkpoint yet.").arg(stageTitle(stage));
+        return false;
+    }
+    auto toolchain = openvlsi::discoverImplementationToolchain();
+    auto openroad = toolchain.openroad.path;
+    if (openroad.empty())
+        openroad = QStandardPaths::findExecutable(QStringLiteral("openroad")).toStdString();
+    if (openroad.empty()) {
+        error = QStringLiteral("OpenROAD was not found on PATH.");
+        return false;
+    }
+
+    const auto tclQuote = [](const std::filesystem::path &path) {
+        std::string value = path.generic_string();
+        std::string result = "\"";
+        for (const char character : value) {
+            if (character == '\\' || character == '"' || character == '$' || character == '[' || character == ']')
+                result.push_back('\\');
+            result.push_back(character);
+        }
+        result.push_back('"');
+        return result;
+    };
+
+    QString script;
+    std::vector<std::filesystem::path> liberty;
+    const auto pdks = openvlsi::findPdks(run->config.pdk);
+    if (!pdks.empty()) {
+        try {
+            const auto package = openvlsi::PackageManager::readManifest(pdks.front().packageRoot);
+            std::vector<openvlsi::Diagnostic> diagnostics;
+            const auto platform = openvlsi::resolveImplementationPlatform(package, run->config.stack, diagnostics);
+            if (const auto found = platform.liberty.find(run->config.corner); found != platform.liberty.end())
+                liberty = found->second;
+            else if (!platform.liberty.empty())
+                liberty = platform.liberty.begin()->second;
+        } catch (const std::exception &) {
+        }
+    }
+    for (const auto &path : liberty)
+        script += QStringLiteral("read_liberty %1\n").arg(QString::fromStdString(tclQuote(path)));
+    script += QStringLiteral("read_db %1\n").arg(QString::fromStdString(tclQuote(odbPath)));
+    const auto sdcRelative = stageSdcPath(stage);
+    if (!sdcRelative.empty()) {
+        const auto sdcPath = runRoot / sdcRelative;
+        if (std::filesystem::is_regular_file(sdcPath, status) && !status)
+            script += QStringLiteral("read_sdc %1\n").arg(QString::fromStdString(tclQuote(sdcPath)));
+    }
+
+    const auto scriptPath = runRoot / "logs" / "openroad-gui.tcl";
+    std::filesystem::create_directories(scriptPath.parent_path(), status);
+    std::ofstream output(scriptPath, std::ios::trunc);
+    if (!output) {
+        error = QStringLiteral("Unable to write %1.").arg(QString::fromStdString(scriptPath.string()));
+        return false;
+    }
+    output << script.toStdString();
+    output.close();
+
+    // OpenROAD evaluates the script argument as an unquoted Tcl `source`, so
+    // hand it a path relative to the run directory: run directories contain a
+    // space ("<run name> <id>").
+    QStringList arguments = {QStringLiteral("-gui"), QStringLiteral("-no_init"), QStringLiteral("-no_splash"),
+                             QStringLiteral("logs/openroad-gui.tcl")};
+    if (!QProcess::startDetached(QString::fromStdString(openroad.string()), arguments,
+                                 QString::fromStdString(runRoot.string()))) {
+        error = QStringLiteral("Unable to launch OpenROAD GUI.");
+        return false;
+    }
+    return true;
+}
+
+QString ImplementationUiController::timingReport(openvlsi::ImplementationStage stage, QString &error) {
+    const auto *run = activeRun();
+    if (!run || projectPath_.isEmpty()) {
+        error = QStringLiteral("Select an implementation run first.");
+        return {};
+    }
+    const auto odbRelative = stageOdbPath(stage);
+    if (odbRelative.empty()) {
+        error = QStringLiteral("This stage has no ODB checkpoint.");
+        return {};
+    }
+    const auto runRoot = std::filesystem::path(projectRoot().toStdString()) / run->directory;
+    const auto odbPath = runRoot / odbRelative;
+    std::error_code status;
+    if (!std::filesystem::is_regular_file(odbPath, status) || status) {
+        error = QStringLiteral("No %1 ODB checkpoint yet.").arg(stageTitle(stage));
+        return {};
+    }
+    auto openroad = openvlsi::discoverImplementationToolchain().openroad.path;
+    if (openroad.empty())
+        openroad = QStandardPaths::findExecutable(QStringLiteral("openroad")).toStdString();
+    if (openroad.empty()) {
+        error = QStringLiteral("OpenROAD was not found on PATH.");
+        return {};
+    }
+    const auto tclQuote = [](const std::filesystem::path &path) {
+        std::string value = path.generic_string();
+        std::string result = "\"";
+        for (const char character : value) {
+            if (character == '\\' || character == '"' || character == '$' || character == '[' || character == ']')
+                result.push_back('\\');
+            result.push_back(character);
+        }
+        result.push_back('"');
+        return result;
+    };
+    QString script;
+    std::vector<std::filesystem::path> liberty;
+    const auto pdks = openvlsi::findPdks(run->config.pdk);
+    if (!pdks.empty()) {
+        try {
+            const auto package = openvlsi::PackageManager::readManifest(pdks.front().packageRoot);
+            std::vector<openvlsi::Diagnostic> diagnostics;
+            const auto platform = openvlsi::resolveImplementationPlatform(package, run->config.stack, diagnostics);
+            if (const auto found = platform.liberty.find(run->config.corner); found != platform.liberty.end())
+                liberty = found->second;
+            else if (!platform.liberty.empty())
+                liberty = platform.liberty.begin()->second;
+        } catch (const std::exception &) {
+        }
+    }
+    for (const auto &path : liberty)
+        script += QStringLiteral("read_liberty %1\n").arg(QString::fromStdString(tclQuote(path)));
+    script += QStringLiteral("read_db %1\n").arg(QString::fromStdString(tclQuote(odbPath)));
+    const auto sdcRelative = stageSdcPath(stage);
+    if (!sdcRelative.empty()) {
+        const auto sdcPath = runRoot / sdcRelative;
+        if (std::filesystem::is_regular_file(sdcPath, status) && !status)
+            script += QStringLiteral("read_sdc %1\n").arg(QString::fromStdString(tclQuote(sdcPath)));
+    }
+    script += QStringLiteral("report_checks -path_delay max -format full_clock_expanded -group_count 5\n");
+    script += QStringLiteral("report_checks -path_delay min -format full_clock_expanded -group_count 5\n");
+    script += QStringLiteral("report_power\n");
+
+    const auto scriptPath = runRoot / "logs" / "timing-report.tcl";
+    std::filesystem::create_directories(scriptPath.parent_path(), status);
+    std::ofstream outputFile(scriptPath, std::ios::trunc);
+    if (!outputFile) {
+        error = QStringLiteral("Unable to write %1.").arg(QString::fromStdString(scriptPath.string()));
+        return {};
+    }
+    outputFile << script.toStdString();
+    outputFile.close();
+
+    QApplication::setOverrideCursor(Qt::WaitCursor);
+    QProcess process;
+    process.setWorkingDirectory(QString::fromStdString(runRoot.string()));
+    process.setProcessChannelMode(QProcess::MergedChannels);
+    process.start(QString::fromStdString(openroad.string()),
+                  {QStringLiteral("-no_init"), QStringLiteral("-no_splash"), QStringLiteral("-exit"),
+                   QStringLiteral("logs/timing-report.tcl")});
+    const bool started = process.waitForStarted(5000);
+    const bool finished = started && process.waitForFinished(180000);
+    QApplication::restoreOverrideCursor();
+    if (!finished || process.exitStatus() != QProcess::NormalExit || process.exitCode() != 0) {
+        if (!finished)
+            process.kill();
+        error = QString::fromStdString(process.readAllStandardOutput().toStdString()).trimmed();
+        if (error.isEmpty())
+            error = QStringLiteral("OpenROAD timing report failed.");
+        return {};
+    }
+    const auto output = QString::fromStdString(process.readAllStandardOutput().toStdString());
+    std::filesystem::remove(scriptPath, status);
+    return output;
+}
+
+bool ImplementationUiController::importLayout(openvlsi::ObjectId runId, QString &error) {
+    if (!project_ || projectPath_.isEmpty()) {
+        error = QStringLiteral("No project is open.");
+        return false;
+    }
+    const auto found = project_->implementationRuns.find(runId);
+    if (found == project_->implementationRuns.end()) {
+        error = QStringLiteral("Select an implementation run first.");
+        return false;
+    }
+    const auto cli = cliExecutable();
+    if (cli.isEmpty()) {
+        error = QStringLiteral("openvlsi-cli was not found.");
+        return false;
+    }
+    if (beforeRun_ && !beforeRun_()) {
+        error = QStringLiteral("The project could not be saved before importing.");
+        return false;
+    }
+    QProcess process;
+    process.setProcessChannelMode(QProcess::MergedChannels);
+    process.start(cli, {QStringLiteral("implementation-import"), projectPath_,
+                        QString::fromStdString(found->second.name), QStringLiteral("--replace")});
+    if (!process.waitForStarted(5000) || !process.waitForFinished(120000)) {
+        process.kill();
+        error = QStringLiteral("Implementation import did not finish.");
+        return false;
+    }
+    const auto output = QString::fromStdString(process.readAllStandardOutput().toStdString()).trimmed();
+    if (process.exitStatus() != QProcess::NormalExit || process.exitCode() != 0) {
+        error = output.isEmpty() ? QStringLiteral("Implementation import failed.") : output;
+        return false;
+    }
+    if (onProjectChanged_)
+        onProjectChanged_();
+    return true;
+}
+
+QString ImplementationUiController::cliExecutable() const {
+    const auto configured = qEnvironmentVariable("OPENVLSI_CLI");
+    if (!configured.isEmpty() && QFileInfo(configured).isExecutable())
+        return configured;
+    const auto sibling = QCoreApplication::applicationDirPath() + QStringLiteral("/openvlsi-cli");
+    if (QFileInfo(sibling).isExecutable())
+        return sibling;
+    return QStandardPaths::findExecutable(QStringLiteral("openvlsi-cli"));
+}
+
+QString ImplementationUiController::helperExecutable() const {
+    const auto configured = qEnvironmentVariable("OPENVLSI_OPENROAD_HELPER");
+    if (!configured.isEmpty() && QFileInfo(configured).isExecutable())
+        return configured;
+    const auto sibling = QCoreApplication::applicationDirPath() + QStringLiteral("/openvlsi-openroad");
+    if (QFileInfo(sibling).isExecutable())
+        return sibling;
+    const auto fromOpenvlsilib = openvlsi::findOpenRoadHelper();
+    if (fromOpenvlsilib)
+        return QString::fromStdString(fromOpenvlsilib->string());
+    return QStandardPaths::findExecutable(QStringLiteral("openvlsi-openroad"));
+}
+
+void ImplementationUiController::run(openvlsi::ImplementationStage from, openvlsi::ImplementationStage to) {
+    if (busy()) {
+        appendProcessText(QStringLiteral("[%1] An implementation run is already active.\n")
+                              .arg(QString::fromUtf8(openvlsi::implementationStageName(runningStage_))));
+        return;
+    }
+    const auto *run = activeRun();
+    if (!run || projectPath_.isEmpty()) {
+        appendProcessText(QStringLiteral("[created] No implementation run is selected.\n"));
+        return;
+    }
+    const auto cli = cliExecutable();
+    if (cli.isEmpty()) {
+        appendProcessText(
+            QStringLiteral("[created] openvlsi-cli was not found. Set OPENVLSI_CLI or install the OpenVLSI command-line tools.\n"));
+        return;
+    }
+    const QStringList arguments = {QStringLiteral("implementation-run"),
+                                   projectPath_,
+                                   QString::fromStdString(run->name),
+                                   QStringLiteral("--from"),
+                                   QString::fromUtf8(openvlsi::implementationStageName(from)),
+                                   QStringLiteral("--to"),
+                                   QString::fromUtf8(openvlsi::implementationStageName(to)),
+                                   QStringLiteral("--verbose")};
+    appendProcessText(
+        QStringLiteral("[%1] Starting %2 → %3.\n")
+            .arg(QString::fromUtf8(openvlsi::implementationStageName(from)), stageTitle(from), stageTitle(to)));
+    startCli(cli, arguments, from);
+}
+
+void ImplementationUiController::exportMapped(openvlsi::ObjectId runId, const QString &destination) {
+    if (busy()) {
+        appendProcessText(QStringLiteral("[synthesis] Another implementation process is already active.\n"));
+        return;
+    }
+    if (!project_ || projectPath_.isEmpty())
+        return;
+    const auto found = project_->implementationRuns.find(runId);
+    if (found == project_->implementationRuns.end())
+        return;
+    const auto synthesis = found->second.stages.find(openvlsi::ImplementationStage::synthesis);
+    if (synthesis == found->second.stages.end() ||
+        synthesis->second.status != openvlsi::ImplementationStageStatus::succeeded) {
+        appendProcessText(
+            QStringLiteral("[synthesis] Synthesis must complete before exporting a technology-mapped netlist.\n"));
+        return;
+    }
+    const auto cli = cliExecutable();
+    if (cli.isEmpty()) {
+        appendProcessText(
+            QStringLiteral("[synthesis] openvlsi-cli was not found. Set OPENVLSI_CLI or install the OpenVLSI command-line tools.\n"));
+        return;
+    }
+    QStringList arguments = {QStringLiteral("implementation-map"), projectPath_,
+                             QString::fromStdString(found->second.name)};
+    if (!destination.isEmpty())
+        arguments << QStringLiteral("--output") << destination;
+    arguments << QStringLiteral("--verbose");
+    if (destination.isEmpty())
+        appendProcessText(QStringLiteral("[synthesis] Mapping %1.\n").arg(QString::fromStdString(found->second.name)));
+    else
+        appendProcessText(QStringLiteral("[synthesis] Mapping %1 → %2.\n")
+                              .arg(QString::fromStdString(found->second.name), destination));
+    startCli(cli, arguments, openvlsi::ImplementationStage::synthesis);
+}
+
+void ImplementationUiController::startCli(const QString &executable, const QStringList &arguments,
+                                          openvlsi::ImplementationStage stage) {
+    if (beforeRun_ && !beforeRun_()) {
+        appendProcessText(QStringLiteral("[created] Implementation command cancelled before starting.\n"));
+        return;
+    }
+    runningStage_ = stage;
+    processBuffer_.clear();
+    process_ = new QProcess(parent_);
+    process_->setProcessChannelMode(QProcess::MergedChannels);
+    process_->setWorkingDirectory(projectRoot());
+    QObject::connect(process_, &QProcess::readyRead, parent_, [this] {
+        if (process_)
+            appendProcessText(QString::fromUtf8(process_->readAllStandardOutput()));
+    });
+    QObject::connect(process_, &QProcess::errorOccurred, parent_, [this, stage](QProcess::ProcessError error) {
+        if (error == QProcess::FailedToStart)
+            appendProcessText(QStringLiteral("[%1] Failed to start openvlsi-cli.\n")
+                                  .arg(QString::fromUtf8(openvlsi::implementationStageName(stage))));
+    });
+    QObject::connect(process_, qOverload<int, QProcess::ExitStatus>(&QProcess::finished), parent_,
+                     [this](int exitCode, QProcess::ExitStatus status) { finishRun(exitCode, status); });
+    process_->start(executable, arguments);
+    if (onChanged_)
+        onChanged_();
+}
+
+void ImplementationUiController::cancel() {
+    const auto *run = activeRun();
+    if (!run)
+        return;
+    std::string error;
+    if (openvlsi::cancelImplementationRun(*run, projectRoot().toStdString(), error))
+        appendProcessText(QStringLiteral("[%1] Cancellation requested.\n")
+                              .arg(QString::fromUtf8(openvlsi::implementationStageName(runningStage_))));
+    else
+        appendProcessText(
+            QStringLiteral("[%1] %2\n")
+                .arg(QString::fromUtf8(openvlsi::implementationStageName(runningStage_)), QString::fromStdString(error)));
+}
+
+void ImplementationUiController::appendProcessText(const QString &text) {
+    processBuffer_ += text;
+    QStringList lines = processBuffer_.split(QLatin1Char('\n'));
+    processBuffer_ = lines.takeLast();
+    for (auto &line : lines) {
+        if (line.endsWith(QLatin1Char('\r')))
+            line.chop(1);
+        bool stageChanged = false;
+        if (line.startsWith(QLatin1Char('['))) {
+            const auto close = line.indexOf(QLatin1Char(']'));
+            if (close > 1) {
+                const auto prefix = line.mid(1, close - 1).toStdString();
+                if (const auto parsed = openvlsi::parseImplementationStage(prefix); parsed && *parsed != runningStage_) {
+                    runningStage_ = *parsed;
+                    stageChanged = true;
+                }
+            }
+        }
+        for (auto &listener : logListeners_)
+            listener(runningStage_, line + QLatin1Char('\n'));
+        if (stageChanged && onChanged_)
+            onChanged_();
+    }
+}
+
+void ImplementationUiController::finishRun(int exitCode, int exitStatus) {
+    if (!processBuffer_.isEmpty()) {
+        appendProcessText(processBuffer_ + QLatin1Char('\n'));
+        processBuffer_.clear();
+    }
+    appendProcessText(QStringLiteral("[%1] openvlsi-cli finished with exit code %2%3.\n")
+                          .arg(QString::fromUtf8(openvlsi::implementationStageName(runningStage_)),
+                               QString::number(exitCode),
+                               exitStatus == QProcess::CrashExit ? QStringLiteral(" (crashed)") : QString()));
+    if (process_) {
+        process_->deleteLater();
+        process_ = nullptr;
+    }
+    runningStage_ = openvlsi::ImplementationStage::created;
+    if (onProjectChanged_)
+        onProjectChanged_();
+    if (onRunFinished_)
+        onRunFinished_(exitCode);
+    if (onChanged_)
+        onChanged_();
+}
+
+ImplementationPage::ImplementationPage(openvlsi::ImplementationStage stage, ImplementationUiController *controller,
+                                       QWidget *parent, bool embedded)
+    : QWidget(parent), stage_(stage), controller_(controller), embedded_(embedded) {
+    buildUi();
+    refresh();
+}
+
+void ImplementationPage::buildUi() {
+    auto *layout = new QVBoxLayout(this);
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->setSpacing(0);
+
+    auto *content = new QWidget;
+    auto *contentLayout = new QHBoxLayout(content);
+    contentLayout->setSpacing(6);
+
+    leftTabs_ = new QTabWidget;
+    // Keep the editor visible when the splitter is dragged right, like the
+    // Simulation tab's side panel.
+    leftTabs_->setMinimumWidth(180);
+    leftTabs_->setMaximumWidth(280);
+    if (hdlMode() || synthesisMode()) {
+        auto *explorerPage = new QWidget;
+        auto *explorerLayout = new QVBoxLayout(explorerPage);
+        explorerLayout->setContentsMargins(4, 4, 4, 4);
+        explorerLayout->setSpacing(4);
+        auto *searchRow = new QHBoxLayout;
+        hdlSearch_ = new QLineEdit;
+        hdlSearch_->setPlaceholderText(QStringLiteral("Search HDL files…"));
+        hdlSearch_->setClearButtonEnabled(true);
+        hdlSearch_->setAccessibleName(QStringLiteral("Search HDL files"));
+        searchRow->addWidget(hdlSearch_, 1);
+        if (hdlMode()) {
+            newHdlButton_ = new QPushButton;
+            newHdlButton_->setFixedWidth(28);
+            setLucideIcon(newHdlButton_, QStringLiteral("plus"), 16);
+            newHdlButton_->setToolTip(QStringLiteral("New HDL block"));
+            newHdlButton_->setAccessibleName(QStringLiteral("New HDL block"));
+            searchRow->addWidget(newHdlButton_);
+            deleteHdlButton_ = new QPushButton;
+            deleteHdlButton_->setFixedWidth(28);
+            setLucideIcon(deleteHdlButton_, QStringLiteral("trash"), 16);
+            deleteHdlButton_->setToolTip(QStringLiteral("Delete selected HDL file"));
+            deleteHdlButton_->setAccessibleName(QStringLiteral("Delete selected HDL file"));
+            deleteHdlButton_->setEnabled(false);
+            searchRow->addWidget(deleteHdlButton_);
+        } else if (synthesisMode()) {
+            elaborateButton_ = new QPushButton(QStringLiteral("Elaborate design"));
+            elaborateButton_->setToolTip(QStringLiteral("Create an HDL run and elaborate the selected design"));
+            searchRow->addWidget(elaborateButton_);
+        }
+        explorerLayout->addLayout(searchRow);
+        hdlFileList_ = new QListWidget;
+        hdlFileList_->setAlternatingRowColors(true);
+        if (synthesisMode()) {
+            auto *splitter = new QSplitter(Qt::Vertical);
+            splitter->addWidget(hdlFileList_);
+            runsTabs_ = new QTabWidget;
+            runsTabs_->setMinimumHeight(170);
+            auto *runsPage = new QWidget;
+            auto *runsLayout = new QVBoxLayout(runsPage);
+            runsLayout->setContentsMargins(4, 4, 4, 4);
+            runsLayout->setSpacing(4);
+            runSearch_ = new QLineEdit;
+            runSearch_->setPlaceholderText(QStringLiteral("Search runs…"));
+            runSearch_->setClearButtonEnabled(true);
+            runsLayout->addWidget(runSearch_);
+            runsTable_ = new QTableWidget(0, 3);
+            runsTable_->setHorizontalHeaderLabels({QStringLiteral("Run"), QStringLiteral("Stage"), QString()});
+            runsTable_->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
+            runsTable_->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
+            runsTable_->horizontalHeader()->setSectionResizeMode(2, QHeaderView::Fixed);
+            runsTable_->setColumnWidth(2, 30);
+            runsTable_->setSelectionBehavior(QAbstractItemView::SelectRows);
+            runsTable_->setSelectionMode(QAbstractItemView::SingleSelection);
+            runsTable_->setEditTriggers(QAbstractItemView::NoEditTriggers);
+            runsLayout->addWidget(runsTable_, 1);
+            synthesizeButton_ = new QPushButton(QStringLiteral("Synthesize"));
+            showGraphButton_ = new QPushButton(QStringLiteral("Show graph"));
+            exportVerilogButton_ = new QPushButton(QStringLiteral("Export .v"));
+            auto *runActions = new QGridLayout;
+            runActions->setSpacing(4);
+            runActions->addWidget(synthesizeButton_, 0, 0, 1, 2);
+            runActions->addWidget(showGraphButton_, 1, 0);
+            runActions->addWidget(exportVerilogButton_, 1, 1);
+            runsLayout->addLayout(runActions);
+            runsTabs_->addTab(runsPage, QStringLiteral("Runs"));
+            splitter->addWidget(runsTabs_);
+            splitter->setStretchFactor(0, 1);
+            splitter->setStretchFactor(1, 0);
+            explorerLayout->addWidget(splitter, 1);
+        } else {
+            explorerLayout->addWidget(hdlFileList_, 1);
+        }
+        leftTabs_->addTab(explorerPage, QStringLiteral("Explorer"));
+    } else {
+        runTree_ = new QTreeWidget;
+        runTree_->setHeaderLabels({QStringLiteral("Run / Stage"), QStringLiteral("Status"), QString()});
+        runTree_->setRootIsDecorated(true);
+        runTree_->header()->setSectionResizeMode(0, QHeaderView::Stretch);
+        runTree_->header()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
+        runTree_->header()->setSectionResizeMode(2, QHeaderView::Fixed);
+        runTree_->setColumnWidth(2, 26);
+        QWidget *runsPage = nullptr;
+        if (physicalStageMode()) {
+            runsPage = new QWidget;
+            auto *runsLayout = new QVBoxLayout(runsPage);
+            runsLayout->setContentsMargins(4, 4, 4, 4);
+            runsLayout->setSpacing(4);
+            if (embedded_) {
+                auto *runRow = new QHBoxLayout;
+                runRow->setSpacing(3);
+                runCombo_ = new QComboBox;
+                runCombo_->setMinimumContentsLength(8);
+                runCombo_->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+                runCombo_->setToolTip(QStringLiteral("Active implementation run"));
+                runCombo_->setAccessibleName(QStringLiteral("Active implementation run"));
+                runRow->addWidget(runCombo_, 1);
+
+                const auto addIconButton = [&](const QString &icon, const QString &tooltip) {
+                    auto *button = new QPushButton;
+                    button->setFixedWidth(28);
+                    button->setToolTip(tooltip);
+                    button->setAccessibleName(tooltip);
+                    setLucideIcon(button, icon, 16);
+                    runRow->addWidget(button);
+                    return button;
+                };
+                runAllButton_ =
+                    addIconButton(QStringLiteral("arrow-down"), QStringLiteral("Run floorplan through final"));
+                cancelStageButton_ = addIconButton(QStringLiteral("x"), QStringLiteral("Cancel the active process"));
+                cancelStageButton_->setEnabled(false);
+                runsLayout->addLayout(runRow);
+
+                stageHintLabel_ = new QLabel;
+                stageHintLabel_->setObjectName(QStringLiteral("physicalStageHint"));
+                stageHintLabel_->setWordWrap(true);
+                stageHintLabel_->setContentsMargins(1, 0, 1, 2);
+                auto hintFont = stageHintLabel_->font();
+                hintFont.setPointSizeF(std::max(7.0, hintFont.pointSizeF() - 1.0));
+                stageHintLabel_->setFont(hintFont);
+                runsLayout->addWidget(stageHintLabel_);
+            }
+            runsLayout->addWidget(runTree_, 1);
+            if (embedded_) {
+                auto *stageActions = new QHBoxLayout;
+                stageActions->setSpacing(4);
+                auto *openGuiButton = new QPushButton(QStringLiteral("Open in OpenROAD GUI"));
+                openGuiButton->setToolTip(QStringLiteral("Open the active stage ODB in the standalone OpenROAD GUI"));
+                stageActions->addWidget(openGuiButton, 1);
+                QObject::connect(openGuiButton, &QPushButton::clicked, this, [this] {
+                    QString error;
+                    if (!controller_->openInOpenRoadGui(stage_, error))
+                        QMessageBox::warning(this, QStringLiteral("OpenROAD GUI"), error);
+                });
+                if (stage_ == openvlsi::ImplementationStage::final) {
+                    auto *importButton = new QPushButton(QStringLiteral("Import final as device"));
+                    importButton->setToolTip(
+                        QStringLiteral("Create a reusable read-only digital device from the final GDS/OASIS stream"));
+                    stageActions->addWidget(importButton, 1);
+                    QObject::connect(importButton, &QPushButton::clicked, this, [this] {
+                        const auto id = controller_->activeRunId();
+                        if (id == 0)
+                            return;
+                        QString error;
+                        if (!controller_->importLayout(id, error))
+                            QMessageBox::warning(this, QStringLiteral("Import device"), error);
+                        else
+                            QMessageBox::information(
+                                this, QStringLiteral("Import device"),
+                                QStringLiteral("The final layout is available in Layout > Devices."));
+                    });
+                }
+                runsLayout->addLayout(stageActions);
+            }
+            if (!embedded_) {
+                auto *runActions = new QHBoxLayout;
+                runActions->setSpacing(4);
+                runAllButton_ = new QPushButton(QStringLiteral("Run all stages"));
+                runAllButton_->setToolTip(QStringLiteral("Run floorplan through final"));
+                cancelStageButton_ = new QPushButton(QStringLiteral("Cancel"));
+                cancelStageButton_->setEnabled(false);
+                runActions->addWidget(runAllButton_, 1);
+                runActions->addWidget(cancelStageButton_);
+                runsLayout->addLayout(runActions);
+            }
+            leftTabs_->addTab(runsPage, QStringLiteral("Runs"));
+
+            auto *displayPage = new QWidget;
+            auto *displayLayout = new QVBoxLayout(displayPage);
+            displayLayout->setContentsMargins(4, 4, 4, 4);
+            displayLayout->setSpacing(4);
+            auto *displayHint = new QLabel(QStringLiteral("Toggle layer visibility"));
+            displayHint->setContentsMargins(1, 0, 1, 0);
+            displayLayout->addWidget(displayHint);
+            displayTree_ = new QTreeWidget;
+            displayTree_->setHeaderHidden(true);
+            displayTree_->setAlternatingRowColors(true);
+            displayTree_->setToolTip(QStringLiteral("Visibility filters for the active stage preview"));
+            displayLayout->addWidget(displayTree_, 1);
+            leftTabs_->addTab(displayPage, QStringLiteral("Display"));
+        } else {
+            leftTabs_->addTab(runTree_, QStringLiteral("Runs"));
+        }
+        if (runsPage && embedded_)
+            leftTabs_->setCurrentWidget(runsPage);
+    }
+    // The explorer sits in a splitter so it can be retracted, matching the
+    // Simulation tab.
+    auto *contentSplit = new QSplitter(Qt::Horizontal);
+    contentSplit->addWidget(leftTabs_);
+    auto *workspace = new QWidget;
+    auto *workspaceLayout = new QHBoxLayout(workspace);
+    workspaceLayout->setContentsMargins(0, 0, 0, 0);
+    workspaceLayout->setSpacing(6);
+    contentSplit->addWidget(workspace);
+    contentSplit->setStretchFactor(0, 0);
+    contentSplit->setStretchFactor(1, 1);
+    contentSplit->setSizes({240, 1000});
+    contentLayout->addWidget(contentSplit, 1);
+
+    middleTabs_ = new QTabWidget;
+    middleTabs_->setDocumentMode(true);
+    if (hdlMode()) {
+        middleTabs_->setTabsClosable(true);
+        QObject::connect(middleTabs_, &QTabWidget::currentChanged, this, [this](int index) {
+            if (!middleTabs_ || index < 0)
+                return;
+            const auto id = static_cast<openvlsi::ObjectId>(middleTabs_->tabBar()->tabData(index).toULongLong());
+            if (id == 0)
+                return;
+            if (activeHdlCellId_ != id) {
+                flushHdlEdit();
+                activeHdlCellId_ = id;
+                hdlEditor_ = hdlEditorFor(id);
+                refreshProperties();
+            }
+        });
+        QObject::connect(middleTabs_, &QTabWidget::tabCloseRequested, this, [this](int index) {
+            if (!middleTabs_ || index < 0)
+                return;
+            const auto id = static_cast<openvlsi::ObjectId>(middleTabs_->tabBar()->tabData(index).toULongLong());
+            if (id != 0) {
+                closeHdlFile(id);
+            } else {
+                // Dismissing the empty workspace leaves it blank until the
+                // project changes, matching the previous behaviour.
+                hdlScratchDismissed_ = true;
+                closeHdlScratchEditor();
+            }
+        });
+    } else if (synthesisMode()) {
+        middleTabs_->setTabsClosable(true);
+        QObject::connect(middleTabs_, &QTabWidget::tabCloseRequested, this, [this](int index) {
+            if (!middleTabs_ || index < 0 || index >= middleTabs_->count())
+                return;
+            auto *widget = middleTabs_->widget(index);
+            if (widget)
+                closeArtifactTab(widget);
+        });
+    } else {
+        middleTabs_->setTabsClosable(true);
+        QObject::connect(middleTabs_, &QTabWidget::tabCloseRequested, this, [this](int index) {
+            if (!middleTabs_ || index < 0 || index >= middleTabs_->count())
+                return;
+            auto *widget = middleTabs_->widget(index);
+            if (widget)
+                closeArtifactTab(widget);
+        });
+        auto *previewPage = new QWidget;
+        auto *previewLayout = new QVBoxLayout(previewPage);
+        previewLayout->setContentsMargins(0, 0, 0, 0);
+        previewLayout->setSpacing(2);
+        auto *overlayRow = new QHBoxLayout;
+        overlayRow->setContentsMargins(6, 4, 6, 0);
+        overlayRow->addWidget(new QLabel(QStringLiteral("Heat map")));
+        heatMapCombo_ = new QComboBox;
+        heatMapCombo_->addItem(QStringLiteral("None"), static_cast<int>(openvlsi::LayoutHeatMapKind::none));
+        heatMapCombo_->addItem(QStringLiteral("Placement density"),
+                               static_cast<int>(openvlsi::LayoutHeatMapKind::placement_density));
+        heatMapCombo_->addItem(QStringLiteral("Routing congestion"),
+                               static_cast<int>(openvlsi::LayoutHeatMapKind::routing_congestion));
+        heatMapCombo_->addItem(QStringLiteral("Power density (export only)"), 100);
+        heatMapCombo_->addItem(QStringLiteral("Pin density (export only)"), 101);
+        heatMapCombo_->addItem(QStringLiteral("RUDY congestion (export only)"), 102);
+        heatMapCombo_->addItem(QStringLiteral("IR drop (export only)"), 103);
+        heatMapCombo_->addItem(QStringLiteral("Loaded CSV"), 200);
+        overlayRow->addWidget(heatMapCombo_);
+        auto *loadHeatMapButton = new QPushButton(QStringLiteral("Load CSV"));
+        loadHeatMapButton->setToolTip(QStringLiteral("Load an OpenROAD heat-map CSV and display it"));
+        overlayRow->addWidget(loadHeatMapButton);
+        auto *exportHeatMapButton = new QPushButton(QStringLiteral("Export CSV"));
+        exportHeatMapButton->setToolTip(
+            QStringLiteral("Write the selected OpenROAD heat map under the run reports directory."));
+        overlayRow->addWidget(exportHeatMapButton);
+        auto *heatMapSettingsButton = new QPushButton(QStringLiteral("Settings"));
+        heatMapSettingsButton->setToolTip(QStringLiteral("Configure heat-map scale, range, and legend"));
+        overlayRow->addWidget(heatMapSettingsButton);
+        overlayRow->addStretch(1);
+        previewLayout->addLayout(overlayRow);
+        previewStatusLabel_ = new QLabel;
+        previewStatusLabel_->setWordWrap(true);
+        previewStatusLabel_->setContentsMargins(6, 0, 6, 2);
+        previewStatusLabel_->setStyleSheet(QStringLiteral("color: #a16207;"));
+        previewStatusLabel_->setVisible(false);
+        previewLayout->addWidget(previewStatusLabel_);
+        QObject::connect(loadHeatMapButton, &QPushButton::clicked, this, [this] {
+            if (!previewCanvas_ || !heatMapCombo_)
+                return;
+            const auto path =
+                QFileDialog::getOpenFileName(this, QStringLiteral("Load heat map"), controller_->projectRoot(),
+                                             QStringLiteral("CSV files (*.csv);;All files (*)"));
+            if (path.isEmpty())
+                return;
+            auto heatmap = parseHeatMapCsv(path.toStdString());
+            if (!heatmap) {
+                QMessageBox::warning(this, QStringLiteral("Load heat map"),
+                                     QStringLiteral("Unable to parse a heat-map CSV with x0,y0,x1,y1,value columns."));
+                return;
+            }
+            previewCanvas_->setCustomHeatMap(std::move(heatmap));
+            heatMapCombo_->setCurrentIndex(heatMapCombo_->findData(200));
+        });
+        QObject::connect(exportHeatMapButton, &QPushButton::clicked, this, [this] {
+            if (!heatMapCombo_)
+                return;
+            const auto data = heatMapCombo_->currentData().toInt();
+            QString kind;
+            if (data == static_cast<int>(openvlsi::LayoutHeatMapKind::placement_density))
+                kind = QStringLiteral("placement");
+            else if (data == static_cast<int>(openvlsi::LayoutHeatMapKind::routing_congestion))
+                kind = QStringLiteral("routing");
+            else if (data == 100)
+                kind = QStringLiteral("power");
+            else if (data == 101)
+                kind = QStringLiteral("pin");
+            else if (data == 102)
+                kind = QStringLiteral("rudy");
+            else if (data == 103)
+                kind = QStringLiteral("irdrop");
+            if (kind.isEmpty()) {
+                QMessageBox::information(this, QStringLiteral("Export heat map"),
+                                         QStringLiteral("Select a heat map to export."));
+                return;
+            }
+            if (previewStatusLabel_) {
+                previewStatusLabel_->setText(QStringLiteral("Exporting heat map…"));
+                previewStatusLabel_->setStyleSheet(
+                    QStringLiteral("color: %1;").arg(openvlsi::uiColor(openvlsi::UiColor::Text2).name()));
+                previewStatusLabel_->setVisible(true);
+            }
+            QPointer<ImplementationPage> self(this);
+            controller_->requestExportHeatMap(stage_, kind, [self](const QString &path, const QString &error) {
+                if (!self)
+                    return;
+                if (self->previewStatusLabel_)
+                    self->previewStatusLabel_->setVisible(false);
+                if (path.isEmpty()) {
+                    QMessageBox::warning(self, QStringLiteral("Export heat map"), error);
+                    return;
+                }
+                self->refreshArtifacts();
+                QMessageBox::information(self, QStringLiteral("Export heat map"),
+                                         QStringLiteral("Wrote %1.").arg(path));
+            });
+        });
+        QObject::connect(heatMapSettingsButton, &QPushButton::clicked, this, [this] {
+            if (!previewCanvas_)
+                return;
+            QDialog dialog(this);
+            dialog.setWindowTitle(QStringLiteral("Heat-map settings"));
+            auto *layout = new QVBoxLayout(&dialog);
+            auto *form = new QFormLayout;
+            auto *logScale = new QCheckBox(QStringLiteral("Log scale"));
+            auto *reverse = new QCheckBox(QStringLiteral("Reverse scale"));
+            auto *legend = new QCheckBox(QStringLiteral("Show legend"));
+            auto *automaticRange = new QCheckBox(QStringLiteral("Automatic range"));
+            auto *minimum = new QDoubleSpinBox;
+            auto *maximum = new QDoubleSpinBox;
+            auto *alpha = new QSpinBox;
+            minimum->setRange(-1.0e9, 1.0e9);
+            maximum->setRange(-1.0e9, 1.0e9);
+            minimum->setDecimals(4);
+            maximum->setDecimals(4);
+            alpha->setRange(0, 255);
+            const auto options = previewCanvas_->heatMapOptions();
+            logScale->setChecked(options.logScale);
+            reverse->setChecked(options.reverse);
+            legend->setChecked(options.showLegend);
+            automaticRange->setChecked(!options.minimum.has_value() && !options.maximum.has_value());
+            if (const auto heatmap = previewCanvas_->currentHeatMap()) {
+                minimum->setValue(options.minimum.value_or(heatmap->minimum));
+                maximum->setValue(options.maximum.value_or(heatmap->maximum));
+            }
+            alpha->setValue(options.alpha);
+            minimum->setEnabled(!automaticRange->isChecked());
+            maximum->setEnabled(!automaticRange->isChecked());
+            QObject::connect(automaticRange, &QCheckBox::toggled, minimum, &QWidget::setDisabled);
+            QObject::connect(automaticRange, &QCheckBox::toggled, maximum, &QWidget::setDisabled);
+            form->addRow(logScale);
+            form->addRow(reverse);
+            form->addRow(legend);
+            form->addRow(automaticRange);
+            form->addRow(QStringLiteral("Minimum"), minimum);
+            form->addRow(QStringLiteral("Maximum"), maximum);
+            form->addRow(QStringLiteral("Alpha"), alpha);
+            layout->addLayout(form);
+            auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
+            QObject::connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+            QObject::connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+            layout->addWidget(buttons);
+            if (dialog.exec() != QDialog::Accepted)
+                return;
+            ImplementationPreviewCanvas::HeatMapOptions updated;
+            updated.logScale = logScale->isChecked();
+            updated.reverse = reverse->isChecked();
+            updated.showLegend = legend->isChecked();
+            updated.alpha = alpha->value();
+            if (!automaticRange->isChecked()) {
+                updated.minimum = minimum->value();
+                updated.maximum = maximum->value();
+            }
+            previewCanvas_->setHeatMapOptions(updated);
+        });
+        previewCanvas_ = new ImplementationPreviewCanvas;
+        previewLayout->addWidget(previewCanvas_, 1);
+        previewCoordinateLabel_ = new QLabel;
+        previewCoordinateLabel_->setContentsMargins(6, 0, 6, 2);
+        previewCoordinateLabel_->setStyleSheet(
+            QStringLiteral("color: %1;").arg(openvlsi::uiColor(openvlsi::UiColor::Text2).name()));
+        previewLayout->addWidget(previewCoordinateLabel_);
+
+        auto *previewToolbar = new QToolBar(QStringLiteral("Preview tools"), this);
+        previewToolbar->setMovable(false);
+        previewToolbar->setIconSize(QSize(18, 18));
+        previewToolbar->setToolButtonStyle(Qt::ToolButtonIconOnly);
+        previewToolbar->setOrientation(Qt::Vertical);
+        previewToolbar->setAccessibleName(QStringLiteral("Physical preview toolbar"));
+        const auto addPreviewTool = [previewToolbar](const QString &iconName, const QString &name) {
+            auto *action = previewToolbar->addAction(name);
+            setLucideIcon(action, iconName);
+            action->setToolTip(name);
+            action->setStatusTip(name);
+            return action;
+        };
+        auto *fitTool = addPreviewTool(QStringLiteral("scan"), QStringLiteral("Fit to view"));
+        auto *zoomInTool = addPreviewTool(QStringLiteral("plus"), QStringLiteral("Zoom in"));
+        auto *zoomOutTool = addPreviewTool(QStringLiteral("minus"), QStringLiteral("Zoom out"));
+        previewToolbar->addSeparator();
+        auto *rulerTool = addPreviewTool(QStringLiteral("ruler"), QStringLiteral("Draw a ruler"));
+        rulerTool->setCheckable(true);
+        auto *labelTool = addPreviewTool(QStringLiteral("tag"), QStringLiteral("Place a text label"));
+        labelTool->setCheckable(true);
+        auto *clearAnnotationsTool = addPreviewTool(QStringLiteral("trash"), QStringLiteral("Clear rulers and labels"));
+        previewToolbar->addSeparator();
+        auto *saveImageTool = addPreviewTool(QStringLiteral("download"), QStringLiteral("Save image"));
+        auto *findTool = addPreviewTool(QStringLiteral("microscope"), QStringLiteral("Find an instance, port, or net"));
+        auto *previewToolbarColumn = new QWidget;
+        auto *previewToolbarLayout = new QVBoxLayout(previewToolbarColumn);
+        previewToolbarLayout->setContentsMargins(0, 0, 0, 0);
+        previewToolbarLayout->addStretch(1);
+        previewToolbarLayout->addWidget(previewToolbar, 0, Qt::AlignHCenter);
+        previewToolbarLayout->addStretch(1);
+        workspaceLayout->addWidget(previewToolbarColumn, 0);
+
+        QObject::connect(fitTool, &QAction::triggered, this, [this] {
+            if (previewCanvas_)
+                previewCanvas_->fitView();
+        });
+        QObject::connect(zoomInTool, &QAction::triggered, this, [this] {
+            if (previewCanvas_)
+                previewCanvas_->zoomIn();
+        });
+        QObject::connect(zoomOutTool, &QAction::triggered, this, [this] {
+            if (previewCanvas_)
+                previewCanvas_->zoomOut();
+        });
+        QObject::connect(rulerTool, &QAction::toggled, this, [this, labelTool](bool checked) {
+            if (!previewCanvas_)
+                return;
+            if (checked && labelTool->isChecked())
+                labelTool->setChecked(false);
+            previewCanvas_->setTool(checked ? ImplementationPreviewCanvas::Tool::ruler
+                                            : ImplementationPreviewCanvas::Tool::none);
+        });
+        QObject::connect(labelTool, &QAction::toggled, this, [this, rulerTool](bool checked) {
+            if (!previewCanvas_)
+                return;
+            if (checked && rulerTool->isChecked())
+                rulerTool->setChecked(false);
+            previewCanvas_->setTool(checked ? ImplementationPreviewCanvas::Tool::label
+                                            : ImplementationPreviewCanvas::Tool::none);
+        });
+        QObject::connect(clearAnnotationsTool, &QAction::triggered, this, [this] {
+            if (previewCanvas_)
+                previewCanvas_->clearAnnotations();
+        });
+        QObject::connect(saveImageTool, &QAction::triggered, this, [this] {
+            if (!previewCanvas_)
+                return;
+            const auto path = QFileDialog::getSaveFileName(this, QStringLiteral("Save preview"),
+                                                           QStringLiteral("physical-preview.png"),
+                                                           QStringLiteral("PNG image (*.png);;All files (*)"));
+            if (!path.isEmpty())
+                previewCanvas_->saveImage(path);
+        });
+        QObject::connect(findTool, &QAction::triggered, this, [this] {
+            if (!previewCanvas_)
+                return;
+            bool accepted = false;
+            const auto name =
+                QInputDialog::getText(this, QStringLiteral("Find object"),
+                                      QStringLiteral("Instance, port, or net name:"), QLineEdit::Normal, {}, &accepted);
+            if (!accepted || name.isEmpty())
+                return;
+            if (!previewCanvas_->selectByName(name))
+                QMessageBox::information(this, QStringLiteral("Find object"),
+                                         QStringLiteral("No object named %1 was found.").arg(name));
+        });
+        previewCanvas_->setStatusCallback([this](const QPointF &point, const QString &hint) {
+            if (!previewCoordinateLabel_)
+                return;
+            if (point.isNull()) {
+                previewCoordinateLabel_->clear();
+                return;
+            }
+            QString text = QStringLiteral("x %1 µm   y %2 µm")
+                               .arg(point.x() / 1000.0, 0, 'f', 3)
+                               .arg(point.y() / 1000.0, 0, 'f', 3);
+            if (!hint.isEmpty())
+                text += QStringLiteral("   ·   ") + hint;
+            previewCoordinateLabel_->setText(text);
+        });
+        previewCanvas_->setSelectionCallback(
+            [this](const ImplementationPreviewCanvas::Selection &) { refreshInspector(); });
+        QObject::connect(heatMapCombo_, &QComboBox::currentIndexChanged, this, [this](int) {
+            if (!previewCanvas_ || !heatMapCombo_)
+                return;
+            const auto data = heatMapCombo_->currentData().toInt();
+            if (data == 200) {
+                if (!previewCanvas_->hasCustomHeatMap())
+                    previewCanvas_->setHeatMap(openvlsi::LayoutHeatMapKind::none);
+                return;
+            }
+            if (data >= 100) {
+                previewCanvas_->setHeatMap(openvlsi::LayoutHeatMapKind::none);
+                return;
+            }
+            previewCanvas_->setHeatMap(static_cast<openvlsi::LayoutHeatMapKind>(data));
+        });
+        const auto previewIndex = middleTabs_->addTab(previewPage, QStringLiteral("Preview"));
+        middleTabs_->tabBar()->setTabButton(previewIndex, QTabBar::RightSide, nullptr);
+    }
+    workspaceLayout->addWidget(middleTabs_, 1);
+
+    rightTabs_ = new QTabWidget;
+    rightTabs_->setMinimumWidth(240);
+    if (hdlMode()) {
+        auto *outlinePage = new QWidget;
+        auto *outlineLayout = new QVBoxLayout(outlinePage);
+        outlineLayout->setContentsMargins(4, 4, 4, 4);
+        outlineLayout->setSpacing(4);
+        outlineTree_ = new QTreeWidget;
+        outlineTree_->setHeaderLabels({QStringLiteral("Outline"), QStringLiteral("Line")});
+        outlineTree_->header()->setSectionResizeMode(0, QHeaderView::Stretch);
+        outlineTree_->header()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
+        outlineLayout->addWidget(outlineTree_, 1);
+        rightTabs_->addTab(outlinePage, QStringLiteral("Outline"));
+        auto *ipPage = new QWidget;
+        auto *ipLayout = new QVBoxLayout(ipPage);
+        ipLayout->setContentsMargins(4, 4, 4, 4);
+        ipLayout->setSpacing(4);
+        ipLibrariesTree_ = new QTreeWidget;
+        ipLibrariesTree_->setHeaderLabels({QStringLiteral("IP / Library"), QStringLiteral("Details")});
+        ipLibrariesTree_->header()->setSectionResizeMode(0, QHeaderView::Stretch);
+        ipLibrariesTree_->header()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
+        ipLayout->addWidget(ipLibrariesTree_, 1);
+        rightTabs_->addTab(ipPage, QStringLiteral("IP/Libraries"));
+        QObject::connect(outlineTree_, &QTreeWidget::itemActivated, this, [this](QTreeWidgetItem *item, int) {
+            if (!item)
+                return;
+            const auto line = item->data(0, Qt::UserRole).toInt();
+            if (line <= 0)
+                return;
+            if (auto *editor = hdlEditorFor(activeHdlCellId_))
+                editor->goToLine(line);
+        });
+        QObject::connect(outlineTree_, &QTreeWidget::itemDoubleClicked, this, [this](QTreeWidgetItem *item, int) {
+            if (!item)
+                return;
+            const auto line = item->data(0, Qt::UserRole).toInt();
+            if (line <= 0)
+                return;
+            if (auto *editor = hdlEditorFor(activeHdlCellId_))
+                editor->goToLine(line);
+        });
+        QObject::connect(ipLibrariesTree_, &QTreeWidget::itemActivated, this, [this](QTreeWidgetItem *item, int) {
+            if (!item)
+                return;
+            const auto id = static_cast<openvlsi::ObjectId>(item->data(0, Qt::UserRole).toULongLong());
+            if (id != 0)
+                openHdlFile(id);
+        });
+        QObject::connect(ipLibrariesTree_, &QTreeWidget::itemDoubleClicked, this, [this](QTreeWidgetItem *item, int) {
+            if (!item)
+                return;
+            const auto id = static_cast<openvlsi::ObjectId>(item->data(0, Qt::UserRole).toULongLong());
+            if (id != 0)
+                openHdlFile(id);
+        });
+    } else if (synthesisMode()) {
+        auto *artifactsPage = new QWidget;
+        auto *artifactsLayout = new QVBoxLayout(artifactsPage);
+        artifactsLayout->setContentsMargins(4, 4, 4, 4);
+        artifactsLayout->setSpacing(4);
+        artifactsList_ = new QListWidget;
+        artifactsList_->setAlternatingRowColors(true);
+        artifactsLayout->addWidget(artifactsList_, 1);
+        rightTabs_->addTab(artifactsPage, QStringLiteral("Artifacts"));
+    } else {
+        metricsTable_ = new QTableWidget(0, 2);
+        metricsTable_->setHorizontalHeaderLabels({QStringLiteral("Metric"), QStringLiteral("Value")});
+        metricsTable_->horizontalHeader()->setStretchLastSection(false);
+        metricsTable_->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
+        metricsTable_->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
+        metricsTable_->verticalHeader()->setVisible(false);
+        metricsTable_->setAlternatingRowColors(true);
+        metricsTable_->setWordWrap(false);
+        metricsTable_->setEditTriggers(QAbstractItemView::NoEditTriggers);
+        rightTabs_->addTab(metricsTable_, QStringLiteral("Metrics"));
+        inspectorTree_ = new QTreeWidget;
+        inspectorTree_->setHeaderLabels({QStringLiteral("Property"), QStringLiteral("Value")});
+        inspectorTree_->header()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
+        inspectorTree_->header()->setSectionResizeMode(1, QHeaderView::Stretch);
+        if (physicalStageMode()) {
+            auto *formPage = new QWidget;
+            auto *outer = new QVBoxLayout(formPage);
+            outer->setContentsMargins(6, 6, 6, 6);
+            outer->setSpacing(6);
+            auto *form = new QFormLayout;
+            if (floorplanMode()) {
+                utilizationSpin_ = new QDoubleSpinBox;
+                utilizationSpin_->setRange(0.01, 0.99);
+                utilizationSpin_->setSingleStep(0.05);
+                utilizationSpin_->setDecimals(2);
+                form->addRow(QStringLiteral("Utilization"), utilizationSpin_);
+                aspectRatioSpin_ = new QDoubleSpinBox;
+                aspectRatioSpin_->setRange(0.1, 10.0);
+                aspectRatioSpin_->setSingleStep(0.1);
+                aspectRatioSpin_->setDecimals(2);
+                form->addRow(QStringLiteral("Aspect ratio"), aspectRatioSpin_);
+                dieAreaCheck_ = new QCheckBox(QStringLiteral("Explicit die area"));
+                form->addRow(QString(), dieAreaCheck_);
+                dieWidthSpin_ = new QDoubleSpinBox;
+                dieWidthSpin_->setRange(0.001, 100000.0);
+                dieWidthSpin_->setDecimals(3);
+                dieWidthSpin_->setValue(100.0);
+                dieWidthSpin_->setSuffix(QStringLiteral(" µm"));
+                dieWidthSpin_->setEnabled(false);
+                form->addRow(QStringLiteral("Die width"), dieWidthSpin_);
+                dieHeightSpin_ = new QDoubleSpinBox;
+                dieHeightSpin_->setRange(0.001, 100000.0);
+                dieHeightSpin_->setDecimals(3);
+                dieHeightSpin_->setValue(100.0);
+                dieHeightSpin_->setSuffix(QStringLiteral(" µm"));
+                dieHeightSpin_->setEnabled(false);
+                form->addRow(QStringLiteral("Die height"), dieHeightSpin_);
+                dieXSpin_ = new QDoubleSpinBox;
+                dieXSpin_->setRange(-100000.0, 100000.0);
+                dieXSpin_->setDecimals(3);
+                dieXSpin_->setSuffix(QStringLiteral(" µm"));
+                dieXSpin_->setEnabled(false);
+                form->addRow(QStringLiteral("Die X"), dieXSpin_);
+                dieYSpin_ = new QDoubleSpinBox;
+                dieYSpin_->setRange(-100000.0, 100000.0);
+                dieYSpin_->setDecimals(3);
+                dieYSpin_->setSuffix(QStringLiteral(" µm"));
+                dieYSpin_->setEnabled(false);
+                form->addRow(QStringLiteral("Die Y"), dieYSpin_);
+                QObject::connect(dieAreaCheck_, &QCheckBox::toggled, this, [this](bool checked) {
+                    for (auto *spin : {dieWidthSpin_, dieHeightSpin_, dieXSpin_, dieYSpin_})
+                        if (spin)
+                            spin->setEnabled(checked);
+                });
+                coreAreaCheck_ = new QCheckBox(QStringLiteral("Explicit core area"));
+                form->addRow(QString(), coreAreaCheck_);
+                coreWidthSpin_ = new QDoubleSpinBox;
+                coreWidthSpin_->setRange(0.001, 100000.0);
+                coreWidthSpin_->setDecimals(3);
+                coreWidthSpin_->setSuffix(QStringLiteral(" µm"));
+                coreWidthSpin_->setEnabled(false);
+                form->addRow(QStringLiteral("Core width"), coreWidthSpin_);
+                coreHeightSpin_ = new QDoubleSpinBox;
+                coreHeightSpin_->setRange(0.001, 100000.0);
+                coreHeightSpin_->setDecimals(3);
+                coreHeightSpin_->setSuffix(QStringLiteral(" µm"));
+                coreHeightSpin_->setEnabled(false);
+                form->addRow(QStringLiteral("Core height"), coreHeightSpin_);
+                coreXSpin_ = new QDoubleSpinBox;
+                coreXSpin_->setRange(-100000.0, 100000.0);
+                coreXSpin_->setDecimals(3);
+                coreXSpin_->setSuffix(QStringLiteral(" µm"));
+                coreXSpin_->setEnabled(false);
+                form->addRow(QStringLiteral("Core X"), coreXSpin_);
+                coreYSpin_ = new QDoubleSpinBox;
+                coreYSpin_->setRange(-100000.0, 100000.0);
+                coreYSpin_->setDecimals(3);
+                coreYSpin_->setSuffix(QStringLiteral(" µm"));
+                coreYSpin_->setEnabled(false);
+                form->addRow(QStringLiteral("Core Y"), coreYSpin_);
+                QObject::connect(coreAreaCheck_, &QCheckBox::toggled, this, [this](bool checked) {
+                    for (auto *spin : {coreWidthSpin_, coreHeightSpin_, coreXSpin_, coreYSpin_})
+                        if (spin)
+                            spin->setEnabled(checked);
+                });
+                siteEdit_ = new QLineEdit;
+                siteEdit_->setPlaceholderText(QStringLiteral("Platform default"));
+                form->addRow(QStringLiteral("Placement site"), siteEdit_);
+                ioHorizontalEdit_ = new QLineEdit;
+                ioHorizontalEdit_->setPlaceholderText(QStringLiteral("Platform default, e.g. Metal3"));
+                form->addRow(QStringLiteral("IO horizontal"), ioHorizontalEdit_);
+                ioVerticalEdit_ = new QLineEdit;
+                ioVerticalEdit_->setPlaceholderText(QStringLiteral("Platform default, e.g. Metal2"));
+                form->addRow(QStringLiteral("IO vertical"), ioVerticalEdit_);
+            } else if (stage_ == openvlsi::ImplementationStage::placement) {
+                placementDensitySpin_ = new QDoubleSpinBox;
+                placementDensitySpin_->setRange(0.0, 1.0);
+                placementDensitySpin_->setSingleStep(0.05);
+                placementDensitySpin_->setDecimals(2);
+                placementDensitySpin_->setSpecialValueText(QStringLiteral("Platform default"));
+                form->addRow(QStringLiteral("Density"), placementDensitySpin_);
+                timingDrivenCheck_ = new QCheckBox(QStringLiteral("Timing driven"));
+                form->addRow(QString(), timingDrivenCheck_);
+                routabilityDrivenCheck_ = new QCheckBox(QStringLiteral("Routability driven"));
+                form->addRow(QString(), routabilityDrivenCheck_);
+            } else if (stage_ == openvlsi::ImplementationStage::cts) {
+                ctsEnabledCheck_ = new QCheckBox(QStringLiteral("Run clock-tree synthesis"));
+                form->addRow(QString(), ctsEnabledCheck_);
+                ctsRootBufferEdit_ = new QLineEdit;
+                ctsRootBufferEdit_->setPlaceholderText(QStringLiteral("Platform default"));
+                form->addRow(QStringLiteral("Root buffer"), ctsRootBufferEdit_);
+                ctsBuffersEdit_ = new QLineEdit;
+                ctsBuffersEdit_->setPlaceholderText(QStringLiteral("Comma-separated, e.g. BUF_X1, BUF_X2"));
+                form->addRow(QStringLiteral("Clock buffers"), ctsBuffersEdit_);
+            } else if (stage_ == openvlsi::ImplementationStage::routing) {
+                routingMinLayerEdit_ = new QLineEdit;
+                routingMinLayerEdit_->setPlaceholderText(QStringLiteral("Platform default"));
+                form->addRow(QStringLiteral("Routing min layer"), routingMinLayerEdit_);
+                routingMaxLayerEdit_ = new QLineEdit;
+                routingMaxLayerEdit_->setPlaceholderText(QStringLiteral("Platform default"));
+                form->addRow(QStringLiteral("Routing max layer"), routingMaxLayerEdit_);
+                antennaRepairCheck_ = new QCheckBox(QStringLiteral("Antenna repair"));
+                form->addRow(QString(), antennaRepairCheck_);
+            }
+            threadsSpin_ = new QSpinBox;
+            threadsSpin_->setRange(1, 64);
+            form->addRow(QStringLiteral("Threads"), threadsSpin_);
+            timeoutSpin_ = new QSpinBox;
+            timeoutSpin_->setRange(1, 86400);
+            timeoutSpin_->setSuffix(QStringLiteral(" s"));
+            form->addRow(QStringLiteral("Timeout"), timeoutSpin_);
+            outer->addLayout(form);
+            applyStageButton_ = new QPushButton(QStringLiteral("Apply %1 settings").arg(stageTitle(stage_)));
+            outer->addWidget(applyStageButton_);
+            outer->addStretch(1);
+            auto *formScroll = new QScrollArea;
+            formScroll->setFrameShape(QFrame::NoFrame);
+            formScroll->setWidgetResizable(true);
+            formScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+            formScroll->setWidget(formPage);
+            rightInspectorStack_ = new QStackedWidget;
+            rightInspectorStack_->addWidget(formScroll);
+            rightInspectorStack_->addWidget(inspectorTree_);
+            const auto inspectorIndex = rightTabs_->addTab(rightInspectorStack_, QStringLiteral("Properties"));
+            rightTabs_->setTabToolTip(
+                inspectorIndex, QStringLiteral("Stage settings, or selection details when an object is selected."));
+            rightTabs_->tabBar()->moveTab(inspectorIndex, 0);
+            rightTabs_->setCurrentIndex(0);
+        }
+    }
+    workspaceLayout->addWidget(rightTabs_, 0);
+
+    layout->addWidget(content, 1);
+
+    if (hdlMode()) {
+        hdlEditTimer_ = new QTimer(this);
+        hdlEditTimer_->setSingleShot(true);
+        hdlEditTimer_->setInterval(400);
+        QObject::connect(hdlEditTimer_, &QTimer::timeout, this, [this] {
+            if (hdlEditCellId_ == 0 || loadingHdlEditor_)
+                return;
+            if (auto *editor = hdlEditorFor(hdlEditCellId_))
+                controller_->editHdlText(hdlEditCellId_, editor->text().toStdString());
+            refreshOutline();
+        });
+        QObject::connect(newHdlButton_, &QPushButton::clicked, this, [this] {
+            if (createHdlBlockCallback_)
+                createHdlBlockCallback_();
+        });
+        QObject::connect(deleteHdlButton_, &QPushButton::clicked, this, [this] {
+            auto *item = hdlFileList_ ? hdlFileList_->currentItem() : nullptr;
+            if (!item || item->isHidden())
+                return;
+            const auto id = static_cast<openvlsi::ObjectId>(item->data(Qt::UserRole).toULongLong());
+            if (id != 0 && deleteHdlBlockCallback_)
+                deleteHdlBlockCallback_(id);
+        });
+        QObject::connect(hdlSearch_, &QLineEdit::textChanged, this,
+                         [this](const QString &text) { applyHdlFilter(text); });
+        QObject::connect(hdlFileList_, &QListWidget::currentRowChanged, this, [this](int row) {
+            deleteHdlButton_->setEnabled(row >= 0);
+            if (row < 0 || !hdlFileList_)
+                return;
+            auto *item = hdlFileList_->item(row);
+            if (!item)
+                return;
+            const auto id = static_cast<openvlsi::ObjectId>(item->data(Qt::UserRole).toULongLong());
+            const auto *project = controller_->project();
+            if (!project)
+                return;
+            const auto cell = project->schematicCells.find(id);
+            if (cell == project->schematicCells.end() || !cell->second.systemVerilogSchematic)
+                return;
+            flushHdlEdit();
+            activeHdlCellId_ = id;
+            openHdlFile(id);
+            refreshProperties();
+        });
+    } else if (synthesisMode()) {
+        QObject::connect(hdlSearch_, &QLineEdit::textChanged, this,
+                         [this](const QString &text) { applyHdlFilter(text); });
+        QObject::connect(hdlFileList_, &QListWidget::currentRowChanged, this, [this](int row) {
+            if (row < 0 || !hdlFileList_)
+                return;
+            auto *item = hdlFileList_->item(row);
+            if (!item)
+                return;
+            activeHdlCellId_ = static_cast<openvlsi::ObjectId>(item->data(Qt::UserRole).toULongLong());
+        });
+        QObject::connect(elaborateButton_, &QPushButton::clicked, this, [this] {
+            if (activeHdlCellId_ == 0) {
+                QMessageBox::information(this, QStringLiteral("Elaborate Design"),
+                                         QStringLiteral("Select an HDL file in the Explorer first."));
+                return;
+            }
+            const auto pdk = promptPdk(QStringLiteral("Elaborate Design"), {});
+            if (!pdk || !elaborateDesignCallback_)
+                return;
+            elaborateDesignCallback_(activeHdlCellId_, *pdk);
+        });
+        QObject::connect(runSearch_, &QLineEdit::textChanged, this,
+                         [this](const QString &text) { applyRunFilter(text); });
+        QObject::connect(runsTable_, &QTableWidget::itemSelectionChanged, this, [this] {
+            const auto id = selectedRunId();
+            if (id != 0) {
+                controller_->setActiveRunId(id);
+                refreshArtifacts();
+            }
+            updateRunActions();
+        });
+        QObject::connect(artifactsList_, &QListWidget::itemDoubleClicked, this, [this](QListWidgetItem *item) {
+            if (!item)
+                return;
+            const auto path = item->data(Qt::UserRole).toString();
+            if (!path.isEmpty())
+                openArtifact(path);
+        });
+        QObject::connect(runsTable_, &QTableWidget::cellDoubleClicked, this, [this](int, int) {
+            const auto id = selectedRunId();
+            if (id != 0)
+                showRunGraph(id);
+        });
+        QObject::connect(synthesizeButton_, &QPushButton::clicked, this, [this] {
+            const auto id = actionRunId();
+            const auto *run = id != 0 && controller_->project()
+                                  ? (controller_->project()->implementationRuns.contains(id)
+                                         ? &controller_->project()->implementationRuns.at(id)
+                                         : nullptr)
+                                  : nullptr;
+            if (!run || !synthesizeRunCallback_)
+                return;
+            const auto pdk = promptPdk(QStringLiteral("Synthesize Design"), run->config.pdk);
+            if (!pdk)
+                return;
+            synthesizeRunCallback_(id, *pdk);
+        });
+        QObject::connect(showGraphButton_, &QPushButton::clicked, this, [this] {
+            const auto id = actionRunId();
+            if (id != 0)
+                showRunGraph(id);
+        });
+        QObject::connect(exportVerilogButton_, &QPushButton::clicked, this, [this] {
+            const auto id = actionRunId();
+            if (id != 0 && exportVerilogCallback_)
+                exportVerilogCallback_(id);
+        });
+    } else {
+        QObject::connect(runTree_, &QTreeWidget::currentItemChanged, this, [this] { updateStageRunButtons(); });
+        QObject::connect(
+            runTree_, &QTreeWidget::currentItemChanged, this, [this](QTreeWidgetItem *item, QTreeWidgetItem *) {
+                if (!item)
+                    return;
+                const auto value = item->data(0, Qt::UserRole);
+                if (!value.isValid())
+                    return;
+                const auto runId = static_cast<openvlsi::ObjectId>(value.toULongLong());
+                const auto stageValue = item->data(0, Qt::UserRole + 1);
+                const auto stage = stageValue.isValid() ? std::optional<openvlsi::ImplementationStage>(
+                                                              static_cast<openvlsi::ImplementationStage>(stageValue.toInt()))
+                                                        : std::nullopt;
+                if (runSelectionCallback_)
+                    runSelectionCallback_(runId, stage);
+                // Rebuilding the runs trees while Qt is emitting
+                // currentItemChanged deletes the selected item.
+                // Apply the active-run change once the signal has
+                // finished so the rebuilt trees can restore it.
+                QTimer::singleShot(0, this, [this, runId] {
+                    if (controller_ && controller_->activeRunId() != runId)
+                        controller_->setActiveRunId(runId);
+                });
+            });
+        if (displayTree_) {
+            QObject::connect(displayTree_, &QTreeWidget::itemChanged, this, [this](QTreeWidgetItem *item, int) {
+                if (!previewCanvas_ || !item)
+                    return;
+                const auto group = item->data(0, Qt::UserRole).toString();
+                const auto key = item->data(0, Qt::UserRole + 1).toString();
+                const auto visible = item->checkState(0) == Qt::Checked;
+                if (group == QStringLiteral("layer"))
+                    previewCanvas_->setLayerVisible(key, visible);
+                else if (group == QStringLiteral("instance"))
+                    previewCanvas_->setInstanceCategoryVisible(key, visible);
+                else if (group == QStringLiteral("net"))
+                    previewCanvas_->setNetTypeVisible(key, visible);
+                else if (group == QStringLiteral("option") && key == QStringLiteral("special"))
+                    previewCanvas_->setShowSpecialNets(visible);
+                else if (group == QStringLiteral("option") && key == QStringLiteral("ports"))
+                    previewCanvas_->setShowPorts(visible);
+                else if (group == QStringLiteral("option") && key == QStringLiteral("guides"))
+                    previewCanvas_->setShowGuides(visible);
+                else if (group == QStringLiteral("option") && key == QStringLiteral("rows"))
+                    previewCanvas_->setShowRows(visible);
+                else if (group == QStringLiteral("option") && key == QStringLiteral("blockages"))
+                    previewCanvas_->setShowBlockages(visible);
+            });
+        }
+        if (runAllButton_) {
+            QObject::connect(runAllButton_, &QPushButton::clicked, this, [this] {
+                if (!controller_->activeRun() || controller_->busy())
+                    return;
+                controller_->run(openvlsi::ImplementationStage::floorplan, openvlsi::ImplementationStage::final);
+            });
+        }
+        if (runCombo_) {
+            QObject::connect(runCombo_, qOverload<int>(&QComboBox::currentIndexChanged), this, [this](int) {
+                if (!runCombo_)
+                    return;
+                const auto id = static_cast<openvlsi::ObjectId>(runCombo_->currentData().toULongLong());
+                if (id != 0)
+                    controller_->setActiveRunId(id);
+            });
+        }
+        if (cancelStageButton_) {
+            QObject::connect(cancelStageButton_, &QPushButton::clicked, this, [this] { controller_->cancel(); });
+        }
+        if (applyStageButton_) {
+            QObject::connect(applyStageButton_, &QPushButton::clicked, this, [this] { applyStageForm(); });
+        }
+    }
+}
+
+openvlsi::ImplementationStage ImplementationPage::runStartStage(const openvlsi::ImplementationRun &run,
+                                                           openvlsi::ImplementationStage target) {
+    for (const auto stage : openvlsi::implementationStages()) {
+        if (static_cast<int>(stage) < static_cast<int>(openvlsi::ImplementationStage::floorplan) ||
+            static_cast<int>(stage) > static_cast<int>(target))
+            continue;
+        const auto state = run.stages.find(stage);
+        if (state == run.stages.end() || state->second.status != openvlsi::ImplementationStageStatus::succeeded)
+            return stage;
+    }
+    return target;
+}
+
+bool ImplementationPage::sourcesChangedSincePrepare(const openvlsi::ImplementationRun &run) const {
+    const auto *project = controller_->project();
+    if (!project || run.directory.empty())
+        return true;
+    const auto projectRoot = std::filesystem::path(controller_->projectRoot().toStdString());
+    const auto readText = [](const std::filesystem::path &path, std::string &text) {
+        std::ifstream stream(path, std::ios::binary);
+        if (!stream)
+            return false;
+        text.assign(std::istreambuf_iterator<char>(stream), std::istreambuf_iterator<char>());
+        return true;
+    };
+    // prepareImplementationRun copies every source into build/impl/<run>/rtl/,
+    // so the snapshots tell us what the last stage actually consumed.
+    std::vector<std::string> snapshots;
+    std::error_code status;
+    const auto rtlDirectory = projectRoot / run.directory / "rtl";
+    for (std::filesystem::directory_iterator iterator(rtlDirectory, status), end; !status && iterator != end;
+         iterator.increment(status)) {
+        if (!iterator->is_regular_file())
+            continue;
+        const auto extension = iterator->path().extension();
+        if (extension != ".sv" && extension != ".v")
+            continue;
+        std::string text;
+        if (readText(iterator->path(), text))
+            snapshots.push_back(std::move(text));
+    }
+    const auto contains = [&](const std::string &text) {
+        return std::find(snapshots.begin(), snapshots.end(), text) != snapshots.end();
+    };
+    for (const auto cellId : run.config.sourceCells) {
+        const auto cell = project->schematicCells.find(cellId);
+        if (cell == project->schematicCells.end() || !cell->second.systemVerilogSchematic)
+            return true;
+        if (!contains(cell->second.systemVerilogText))
+            return true;
+    }
+    for (const auto &source : run.config.sources) {
+        const auto sourcePath = source.is_absolute() ? source : (projectRoot / source).lexically_normal();
+        std::string text;
+        if (!readText(sourcePath, text) || !contains(text))
+            return true;
+    }
+    return false;
+}
+
+void ImplementationPage::refreshRunTree() {
+    if (!runTree_)
+        return;
+    refreshRunCombo();
+
+    // Keep the user's row selected across refreshes. Rebuilding the tree
+    // unconditionally used to snap the selection back to the run row while a
+    // stage was being activated.
+    openvlsi::ObjectId previousRunId = 0;
+    std::optional<openvlsi::ImplementationStage> previousStage;
+    if (const auto *current = runTree_->currentItem()) {
+        previousRunId = static_cast<openvlsi::ObjectId>(current->data(0, Qt::UserRole).toULongLong());
+        const auto stageValue = current->data(0, Qt::UserRole + 1);
+        if (stageValue.isValid())
+            previousStage = static_cast<openvlsi::ImplementationStage>(stageValue.toInt());
+    }
+
+    const auto activeRunId = controller_->activeRunId();
+    const bool activeRunChanged = activeRunId != lastRunTreeActiveRunId_;
+    lastRunTreeActiveRunId_ = activeRunId;
+
+    QSignalBlocker blocker(runTree_);
+    runTree_->clear();
+    const auto *project = controller_->project();
+    if (!project)
+        return;
+    const auto isPhysicalStage = [](openvlsi::ImplementationStage stage) {
+        return stage == openvlsi::ImplementationStage::floorplan || stage == openvlsi::ImplementationStage::placement ||
+               stage == openvlsi::ImplementationStage::cts || stage == openvlsi::ImplementationStage::routing ||
+               stage == openvlsi::ImplementationStage::final;
+    };
+    std::map<openvlsi::ObjectId, QTreeWidgetItem *> runItems;
+    std::map<std::pair<openvlsi::ObjectId, openvlsi::ImplementationStage>, QTreeWidgetItem *> stageItems;
+    for (const auto &[id, run] : project->implementationRuns) {
+        auto *item = new QTreeWidgetItem(runTree_);
+        runItems.emplace(id, item);
+        item->setText(0, QString::fromStdString(run.name));
+        item->setData(0, Qt::UserRole, static_cast<qulonglong>(id));
+        item->setText(1, runStatusText(run.status));
+        item->setForeground(1, QBrush(QColor(runStatusColor(run.status))));
+        item->setToolTip(0, QStringLiteral("%1 · %2 / %3\n%4")
+                                .arg(QString::fromStdString(run.config.top), QString::fromStdString(run.config.pdk),
+                                     QString::fromStdString(run.config.stack), QString::fromStdString(run.directory)));
+        for (const auto stage : openvlsi::implementationStages()) {
+            if (physicalStageMode() && !isPhysicalStage(stage))
+                continue;
+            const auto state = run.stages.find(stage);
+            if (state == run.stages.end())
+                continue;
+            auto *stageItem = new QTreeWidgetItem(item);
+            stageItems.emplace(std::make_pair(id, stage), stageItem);
+            stageItem->setText(0, stageTitle(stage));
+            stageItem->setData(0, Qt::UserRole, static_cast<qulonglong>(id));
+            stageItem->setData(0, Qt::UserRole + 1, static_cast<int>(stage));
+            stageItem->setText(1, statusText(state->second.status));
+            stageItem->setForeground(1, QBrush(QColor(statusColor(state->second.status))));
+            if (!state->second.error.empty())
+                stageItem->setToolTip(0, QString::fromStdString(state->second.error));
+        }
+        item->setExpanded(id == activeRunId);
+    }
+
+    QTreeWidgetItem *selection = nullptr;
+    if (previousRunId != 0 && (!activeRunChanged || previousRunId == activeRunId)) {
+        if (previousStage) {
+            const auto stageItem = stageItems.find({previousRunId, *previousStage});
+            if (stageItem != stageItems.end())
+                selection = stageItem->second;
+        }
+        if (!selection) {
+            const auto runItem = runItems.find(previousRunId);
+            if (runItem != runItems.end())
+                selection = runItem->second;
+        }
+    }
+    if (!selection) {
+        const auto activeStage = stageItems.find({activeRunId, stage_});
+        if (activeStage != stageItems.end())
+            selection = activeStage->second;
+    }
+    if (!selection) {
+        const auto activeItem = runItems.find(activeRunId);
+        if (activeItem != runItems.end())
+            selection = activeItem->second;
+    }
+    if (selection) {
+        if (auto *parent = selection->parent())
+            parent->setExpanded(true);
+
+        runTree_->setCurrentItem(selection);
+        runTree_->scrollToItem(selection);
+    }
+    updateStageRunButtons();
+}
+
+void ImplementationPage::updateStageRunButtons() {
+    if (!runTree_)
+        return;
+    const auto *project = controller_->project();
+    const auto *current = runTree_->currentItem();
+    const bool currentIsStage = current && current->data(0, Qt::UserRole + 1).isValid();
+    for (int runIndex = 0; runIndex < runTree_->topLevelItemCount(); ++runIndex) {
+        auto *runItem = runTree_->topLevelItem(runIndex);
+        for (int stageIndex = 0; stageIndex < runItem->childCount(); ++stageIndex) {
+            auto *stageItem = runItem->child(stageIndex);
+            // Only the selected stage row carries the run action.
+            runTree_->removeItemWidget(stageItem, 2);
+            if (!project || !currentIsStage || stageItem != current)
+                continue;
+            const auto id = static_cast<openvlsi::ObjectId>(stageItem->data(0, Qt::UserRole).toULongLong());
+            const auto found = project->implementationRuns.find(id);
+            if (found == project->implementationRuns.end())
+                continue;
+            const auto &run = found->second;
+            const auto stage = static_cast<openvlsi::ImplementationStage>(stageItem->data(0, Qt::UserRole + 1).toInt());
+            const auto synthesis = run.stages.find(openvlsi::ImplementationStage::synthesis);
+            const bool canRun = !controller_->busy() && synthesis != run.stages.end() &&
+                                synthesis->second.status == openvlsi::ImplementationStageStatus::succeeded;
+            const auto from = runStartStage(run, stage);
+            auto *runButton = new QPushButton;
+            runButton->setFixedSize(22, 20);
+            runButton->setFlat(true);
+            runButton->setFocusPolicy(Qt::NoFocus);
+            setLucideIcon(runButton, QStringLiteral("play"), 14);
+            runButton->setEnabled(canRun);
+            runButton->setToolTip(from == stage
+                                      ? QStringLiteral("Run %1").arg(stageTitle(stage))
+                                      : QStringLiteral("Run %1 through %2").arg(stageTitle(from), stageTitle(stage)));
+            runButton->setAccessibleName(runButton->toolTip());
+            QObject::connect(runButton, &QPushButton::clicked, this, [this, id, from, stage] {
+                // The click rebuilds the runs tree via the active-run refresh, so
+                // start the run after the button's signal has finished.
+                QTimer::singleShot(0, this, [this, id, from, stage] {
+                    if (controller_->busy())
+                        return;
+                    if (controller_->activeRunId() != id)
+                        controller_->setActiveRunId(id);
+                    controller_->run(from, stage);
+                });
+            });
+            runTree_->setItemWidget(stageItem, 2, runButton);
+        }
+    }
+}
+
+void ImplementationPage::selectRunStage(openvlsi::ObjectId runId, std::optional<openvlsi::ImplementationStage> stage) {
+    if (!runTree_ || runId == 0)
+        return;
+    QTreeWidgetItem *runItem = nullptr;
+    for (int index = 0; index < runTree_->topLevelItemCount(); ++index) {
+        auto *candidate = runTree_->topLevelItem(index);
+        if (static_cast<openvlsi::ObjectId>(candidate->data(0, Qt::UserRole).toULongLong()) == runId) {
+            runItem = candidate;
+            break;
+        }
+    }
+    if (!runItem)
+        return;
+    QSignalBlocker blocker(runTree_);
+    QTreeWidgetItem *selection = runItem;
+    if (stage) {
+        for (int index = 0; index < runItem->childCount(); ++index) {
+            auto *stageItem = runItem->child(index);
+            const auto value = stageItem->data(0, Qt::UserRole + 1);
+            if (value.isValid() && static_cast<openvlsi::ImplementationStage>(value.toInt()) == *stage) {
+                selection = stageItem;
+                break;
+            }
+        }
+    }
+    runItem->setExpanded(true);
+    runTree_->setCurrentItem(selection);
+    runTree_->scrollToItem(selection);
+    updateStageRunButtons();
+}
+
+void ImplementationPage::refreshRunCombo() {
+    if (!runCombo_)
+        return;
+    QSignalBlocker blocker(runCombo_);
+    runCombo_->clear();
+    const auto *project = controller_->project();
+    if (!project) {
+        runCombo_->addItem(QStringLiteral("No project"));
+        runCombo_->setEnabled(false);
+        return;
+    }
+    int activeIndex = -1;
+    for (const auto &[id, run] : project->implementationRuns) {
+        runCombo_->addItem(QString::fromStdString(run.name) + QStringLiteral("  ·  ") + runStatusText(run.status),
+                           static_cast<qulonglong>(id));
+        if (id == controller_->activeRunId())
+            activeIndex = runCombo_->count() - 1;
+    }
+    if (runCombo_->count() == 0) {
+        runCombo_->addItem(QStringLiteral("No implementation runs"));
+        runCombo_->setEnabled(false);
+        return;
+    }
+    runCombo_->setEnabled(true);
+    runCombo_->setCurrentIndex(activeIndex >= 0 ? activeIndex : 0);
+}
+
+void ImplementationPage::refreshStageForm() {
+    if (!physicalStageMode())
+        return;
+    const auto *run = controller_->activeRun();
+    const auto *project = controller_->project();
+    if (!run) {
+        if (applyStageButton_)
+            applyStageButton_->setEnabled(false);
+        return;
+    }
+    const auto joinList = [](const std::vector<std::string> &values) {
+        QStringList text;
+        for (const auto &value : values)
+            text.push_back(QString::fromStdString(value));
+        return text.join(QStringLiteral(", "));
+    };
+    if (floorplanMode()) {
+        const auto toMicrons = [&](openvlsi::Coordinate value) -> double {
+            if (!project || project->units.nanometers_per_unit <= 0 || project->units.denominator <= 0)
+                return static_cast<double>(value) / 1000.0;
+            const auto nanometers = static_cast<double>(value) *
+                                    static_cast<double>(project->units.nanometers_per_unit) /
+                                    static_cast<double>(project->units.denominator);
+            return nanometers / 1000.0;
+        };
+        utilizationSpin_->setValue(run->config.utilization);
+        aspectRatioSpin_->setValue(run->config.aspectRatio);
+        dieAreaCheck_->setChecked(run->config.dieArea.has_value());
+        if (run->config.dieArea) {
+            dieWidthSpin_->setValue(toMicrons(run->config.dieArea->width));
+            dieHeightSpin_->setValue(toMicrons(run->config.dieArea->height));
+            dieXSpin_->setValue(toMicrons(run->config.dieArea->x));
+            dieYSpin_->setValue(toMicrons(run->config.dieArea->y));
+        }
+        coreAreaCheck_->setChecked(run->config.coreArea.has_value());
+        if (run->config.coreArea) {
+            coreWidthSpin_->setValue(toMicrons(run->config.coreArea->width));
+            coreHeightSpin_->setValue(toMicrons(run->config.coreArea->height));
+            coreXSpin_->setValue(toMicrons(run->config.coreArea->x));
+            coreYSpin_->setValue(toMicrons(run->config.coreArea->y));
+        }
+        siteEdit_->setText(QString::fromStdString(run->config.site));
+        ioHorizontalEdit_->setText(joinList(run->config.ioHorizontalLayers));
+        ioVerticalEdit_->setText(joinList(run->config.ioVerticalLayers));
+    } else if (stage_ == openvlsi::ImplementationStage::placement) {
+        placementDensitySpin_->setValue(run->config.placementDensity);
+        timingDrivenCheck_->setChecked(run->config.timingDriven);
+        routabilityDrivenCheck_->setChecked(run->config.routabilityDriven);
+    } else if (stage_ == openvlsi::ImplementationStage::cts) {
+        ctsEnabledCheck_->setChecked(run->config.ctsEnabled);
+        ctsRootBufferEdit_->setText(QString::fromStdString(run->config.ctsRootBuffer));
+        ctsBuffersEdit_->setText(joinList(run->config.ctsBuffers));
+    } else if (stage_ == openvlsi::ImplementationStage::routing) {
+        routingMinLayerEdit_->setText(QString::fromStdString(run->config.routingMinLayer));
+        routingMaxLayerEdit_->setText(QString::fromStdString(run->config.routingMaxLayer));
+        antennaRepairCheck_->setChecked(run->config.antennaRepair);
+    }
+    threadsSpin_->setValue(run->config.threads);
+    timeoutSpin_->setValue(run->config.timeoutSeconds);
+}
+
+void ImplementationPage::updateStageActions() {
+    if (!physicalStageMode())
+        return;
+    const auto *run = controller_->activeRun();
+    const auto busy = controller_->busy();
+    const auto status = [&](openvlsi::ImplementationStage stage) {
+        if (!run)
+            return openvlsi::ImplementationStageStatus::pending;
+        const auto found = run->stages.find(stage);
+        return found == run->stages.end() ? openvlsi::ImplementationStageStatus::pending : found->second.status;
+    };
+    bool ready = false;
+    QString hint = QStringLiteral("Select an implementation run in the Runs panel.");
+    if (run) {
+        if (stage_ == openvlsi::ImplementationStage::floorplan) {
+            bool mapped = false;
+            if (!run->directory.empty() && !controller_->projectRoot().isEmpty()) {
+                std::error_code fileStatus;
+                mapped = std::filesystem::is_regular_file(
+                             std::filesystem::path(controller_->projectRoot().toStdString()) / run->directory /
+                                 openvlsi::implementationMappedNetlistRelativePath(),
+                             fileStatus) &&
+                         !fileStatus;
+            }
+            const bool synthesized =
+                status(openvlsi::ImplementationStage::synthesis) == openvlsi::ImplementationStageStatus::succeeded;
+            ready = mapped && synthesized;
+            if (!synthesized)
+                hint = QStringLiteral("Run synthesis first.");
+            else if (!mapped)
+                hint = QStringLiteral("Export a technology-mapped netlist from the Synthesis tab first.");
+            else
+                hint = QStringLiteral("Use the play button on a stage row to run the flow up to that stage.");
+        } else if (stage_ == openvlsi::ImplementationStage::placement) {
+            ready = status(openvlsi::ImplementationStage::floorplan) == openvlsi::ImplementationStageStatus::succeeded;
+            hint = ready ? QStringLiteral("Use the play button on a stage row to run the flow up to that stage.")
+                         : QStringLiteral("Run floorplan first.");
+        } else if (stage_ == openvlsi::ImplementationStage::cts) {
+            if (!run->config.ctsEnabled) {
+                hint = QStringLiteral("CTS is disabled in the stage settings.");
+            } else {
+                ready = status(openvlsi::ImplementationStage::placement) == openvlsi::ImplementationStageStatus::succeeded;
+                hint = ready ? QStringLiteral("Use the play button on a stage row to run the flow up to that stage.")
+                             : QStringLiteral("Run placement first.");
+            }
+        } else if (stage_ == openvlsi::ImplementationStage::routing) {
+            const auto prerequisite =
+                run->config.ctsEnabled ? openvlsi::ImplementationStage::cts : openvlsi::ImplementationStage::placement;
+            ready = status(prerequisite) == openvlsi::ImplementationStageStatus::succeeded;
+            hint = ready ? QStringLiteral("Use the play button on a stage row to run the flow up to that stage.")
+                         : (run->config.ctsEnabled ? QStringLiteral("Run CTS first.")
+                                                   : QStringLiteral("Run placement first."));
+        } else if (stage_ == openvlsi::ImplementationStage::final) {
+            ready = status(openvlsi::ImplementationStage::routing) == openvlsi::ImplementationStageStatus::succeeded;
+            hint = ready ? QStringLiteral("Use the play button on a stage row to run the flow up to that stage.")
+                         : QStringLiteral("Run routing first.");
+        }
+    }
+    stageReady_ = run && ready;
+    stageHint_ = hint;
+    // Run all starts at floorplan, which maps the netlist automatically when
+    // synthesis has succeeded, so the run only needs a synthesized design.
+    const bool flowReady =
+        run && status(openvlsi::ImplementationStage::synthesis) == openvlsi::ImplementationStageStatus::succeeded;
+    if (runAllButton_) {
+        runAllButton_->setEnabled(!busy && flowReady);
+        runAllButton_->setToolTip(QStringLiteral("Run floorplan through final."));
+    }
+    if (cancelStageButton_)
+        cancelStageButton_->setEnabled(busy);
+    if (applyStageButton_)
+        applyStageButton_->setEnabled(run && !busy);
+    if (stageHintLabel_) {
+        stageHintLabel_->setVisible(true);
+        if (busy) {
+            stageHintLabel_->setText(QStringLiteral("Running %1…").arg(stageTitle(controller_->runningStage())));
+            stageHintLabel_->setStyleSheet(QStringLiteral("color: #2563eb;"));
+        } else if (!run) {
+            stageHintLabel_->setText(hint);
+            stageHintLabel_->setStyleSheet({});
+        } else {
+            const auto state = run->stages.find(stage_);
+            const auto statusValue =
+                state == run->stages.end() ? openvlsi::ImplementationStageStatus::pending : state->second.status;
+            if (statusValue == openvlsi::ImplementationStageStatus::failed) {
+                const auto message = state != run->stages.end() && !state->second.error.empty()
+                                         ? QStringLiteral("%1 failed: %2")
+                                               .arg(stageTitle(stage_), QString::fromStdString(state->second.error))
+                                         : QStringLiteral("%1 failed. Check the Activity log.").arg(stageTitle(stage_));
+                stageHintLabel_->setText(message);
+                stageHintLabel_->setStyleSheet(QStringLiteral("color: #b91c1c;"));
+            } else if (statusValue == openvlsi::ImplementationStageStatus::succeeded) {
+                stageHintLabel_->clear();
+                stageHintLabel_->setVisible(false);
+            } else {
+                stageHintLabel_->setText(hint);
+                stageHintLabel_->setStyleSheet(ready ? QStringLiteral("color: #15803d;")
+                                                     : QStringLiteral("color: #a16207;"));
+            }
+        }
+    }
+}
+
+void ImplementationPage::applyStageForm() {
+    if (!physicalStageMode() || !applyConfigCallback_ || !controller_ || controller_->busy())
+        return;
+    const auto *run = controller_->activeRun();
+    const auto *project = controller_->project();
+    if (!run || !project)
+        return;
+    auto config = run->config;
+    const auto splitList = [](const QString &text) {
+        std::vector<std::string> values;
+        for (const auto &part : text.split(QLatin1Char(','), Qt::SkipEmptyParts)) {
+            const auto trimmed = part.trimmed();
+            if (!trimmed.isEmpty())
+                values.push_back(trimmed.toStdString());
+        }
+        return values;
+    };
+    if (floorplanMode()) {
+        config.utilization = utilizationSpin_->value();
+        config.aspectRatio = aspectRatioSpin_->value();
+        if (dieAreaCheck_->isChecked()) {
+            const auto toUnits = [&](double microns) -> openvlsi::Coordinate {
+                const auto nanometers = microns * 1000.0;
+                const auto &units = project->units;
+                const auto scale = units.nanometers_per_unit > 0
+                                       ? static_cast<double>(units.denominator) / units.nanometers_per_unit
+                                       : 1.0;
+                return static_cast<openvlsi::Coordinate>(std::llround(nanometers * scale));
+            };
+            openvlsi::Rect die;
+            die.x = toUnits(dieXSpin_->value());
+            die.y = toUnits(dieYSpin_->value());
+            die.width = toUnits(dieWidthSpin_->value());
+            die.height = toUnits(dieHeightSpin_->value());
+            config.dieArea = die;
+        } else {
+            config.dieArea.reset();
+        }
+        if (coreAreaCheck_->isChecked()) {
+            const auto toUnits = [&](double microns) -> openvlsi::Coordinate {
+                const auto nanometers = microns * 1000.0;
+                const auto &units = project->units;
+                const auto scale = units.nanometers_per_unit > 0
+                                       ? static_cast<double>(units.denominator) / units.nanometers_per_unit
+                                       : 1.0;
+                return static_cast<openvlsi::Coordinate>(std::llround(nanometers * scale));
+            };
+            openvlsi::Rect core;
+            core.x = toUnits(coreXSpin_->value());
+            core.y = toUnits(coreYSpin_->value());
+            core.width = toUnits(coreWidthSpin_->value());
+            core.height = toUnits(coreHeightSpin_->value());
+            config.coreArea = core;
+        } else {
+            config.coreArea.reset();
+        }
+        config.site = siteEdit_->text().trimmed().toStdString();
+        config.ioHorizontalLayers = splitList(ioHorizontalEdit_->text());
+        config.ioVerticalLayers = splitList(ioVerticalEdit_->text());
+    } else if (stage_ == openvlsi::ImplementationStage::placement) {
+        config.placementDensity = placementDensitySpin_->value();
+        config.timingDriven = timingDrivenCheck_->isChecked();
+        config.routabilityDriven = routabilityDrivenCheck_->isChecked();
+    } else if (stage_ == openvlsi::ImplementationStage::cts) {
+        config.ctsEnabled = ctsEnabledCheck_->isChecked();
+        config.ctsRootBuffer = ctsRootBufferEdit_->text().trimmed().toStdString();
+        config.ctsBuffers = splitList(ctsBuffersEdit_->text());
+    } else if (stage_ == openvlsi::ImplementationStage::routing) {
+        config.routingMinLayer = routingMinLayerEdit_->text().trimmed().toStdString();
+        config.routingMaxLayer = routingMaxLayerEdit_->text().trimmed().toStdString();
+        config.antennaRepair = antennaRepairCheck_->isChecked();
+    }
+    config.threads = threadsSpin_->value();
+    config.timeoutSeconds = timeoutSpin_->value();
+    applyConfigCallback_(run->id, config);
+}
+
+void ImplementationPage::refreshSynthesisExplorer() {
+    if (!hdlFileList_)
+        return;
+    QSignalBlocker blocker(hdlFileList_);
+    hdlFileList_->clear();
+    const auto *project = controller_->project();
+    if (!project)
+        return;
+    struct Entry {
+        openvlsi::ObjectId id = 0;
+        std::string name;
+    };
+    std::vector<Entry> entries;
+    for (const auto &[id, cell] : project->schematicCells) {
+        if (cell.systemVerilogSchematic && !isDigitalTestbenchCell(*project, id))
+            entries.push_back({id, cell.name});
+    }
+    std::sort(entries.begin(), entries.end(),
+              [](const Entry &left, const Entry &right) { return left.name < right.name; });
+    if (activeHdlCellId_ == 0 || !project->schematicCells.contains(activeHdlCellId_) ||
+        !project->schematicCells.at(activeHdlCellId_).systemVerilogSchematic ||
+        isDigitalTestbenchCell(*project, activeHdlCellId_))
+        activeHdlCellId_ = entries.empty() ? 0 : entries.front().id;
+    int activeRow = -1;
+    for (const auto &entry : entries) {
+        auto *item = new QListWidgetItem(QString::fromStdString(entry.name) + QStringLiteral(".sv"));
+        item->setData(Qt::UserRole, static_cast<qulonglong>(entry.id));
+        item->setToolTip(QStringLiteral("%1.sv · SystemVerilog").arg(QString::fromStdString(entry.name)));
+        hdlFileList_->addItem(item);
+        if (entry.id == activeHdlCellId_)
+            activeRow = hdlFileList_->count() - 1;
+    }
+    if (activeRow >= 0)
+        hdlFileList_->setCurrentRow(activeRow);
+    applyHdlFilter(hdlSearch_ ? hdlSearch_->text() : QString());
+}
+
+void ImplementationPage::openArtifact(const QString &artifactPath) {
+    if ((!synthesisMode() && !physicalStageMode()) || !middleTabs_)
+        return;
+    std::filesystem::path path(artifactPath.toStdString());
+    if (path.is_relative())
+        path = std::filesystem::path(controller_->projectRoot().toStdString()) / path;
+    std::error_code status;
+    if (!std::filesystem::is_regular_file(path, status) || status) {
+        QMessageBox::information(
+            this, QStringLiteral("Open Artifact"),
+            QStringLiteral("The file does not exist:\n%1").arg(QString::fromStdString(path.string())));
+        return;
+    }
+    const auto size = std::filesystem::file_size(path, status);
+    const auto extension = QString::fromStdString(path.extension().string()).toLower();
+    if (!status && (size > 16ULL * 1024ULL * 1024ULL || extension == QStringLiteral(".odb"))) {
+        QMessageBox::information(this, QStringLiteral("Open Artifact"),
+                                 QStringLiteral("%1 is too large for the built-in viewer and will open externally.")
+                                     .arg(QString::fromStdString(path.filename().string())));
+        QDesktopServices::openUrl(QUrl::fromLocalFile(QString::fromStdString(path.string())));
+        return;
+    }
+    const auto key = path.lexically_normal().generic_string();
+    if (const auto existing = artifactTabs_.find(key); existing != artifactTabs_.end()) {
+        if (path.extension() == ".svg") {
+            if (auto *canvas = dynamic_cast<SvgPreviewCanvas *>(existing->second))
+                canvas->setSvg(path, QStringLiteral("The graph could not be rendered."));
+        } else if (auto *editor = dynamic_cast<TextDocumentEditor *>(existing->second)) {
+            std::ifstream input(path);
+            if (input.is_open()) {
+                std::ostringstream contents;
+                contents << input.rdbuf();
+                editor->setText(QString::fromStdString(contents.str()));
+            }
+        }
+        middleTabs_->setCurrentWidget(existing->second);
+        return;
+    }
+    if (middlePlaceholder_) {
+        const auto index = middleTabs_->indexOf(middlePlaceholder_);
+        if (index >= 0)
+            middleTabs_->removeTab(index);
+        delete middlePlaceholder_;
+        middlePlaceholder_ = nullptr;
+    }
+    QWidget *page = nullptr;
+    if (path.extension() == ".svg") {
+        auto *canvas = new SvgPreviewCanvas(middleTabs_);
+        canvas->setSvg(path, QStringLiteral("The graph could not be rendered."));
+        page = canvas;
+    } else {
+        auto *editor = new TextDocumentEditor(middleTabs_);
+        std::ifstream input(path);
+        if (!input.is_open()) {
+            delete editor;
+            ensureMiddlePlaceholder();
+            QMessageBox::information(this, QStringLiteral("Open Artifact"),
+                                     QStringLiteral("Unable to read:\n%1").arg(QString::fromStdString(path.string())));
+            return;
+        }
+        std::ostringstream contents;
+        contents << input.rdbuf();
+        editor->setText(QString::fromStdString(contents.str()));
+        if (extension == QStringLiteral(".v") || extension == QStringLiteral(".sv") ||
+            extension == QStringLiteral(".vh"))
+            editor->setLanguage(TextDocumentLanguage::SystemVerilog);
+        else if (extension == QStringLiteral(".sp") || extension == QStringLiteral(".cir") ||
+                 extension == QStringLiteral(".spice"))
+            editor->setLanguage(TextDocumentLanguage::Spice);
+        editor->setReadOnly(true);
+        page = editor;
+    }
+    const auto index = middleTabs_->addTab(page, QString::fromStdString(path.filename().string()));
+    middleTabs_->tabBar()->setTabData(index, 0);
+    middleTabs_->setTabToolTip(index, QString::fromStdString(path.string()));
+    middleTabs_->tabBar()->setVisible(true);
+    artifactTabs_[key] = page;
+    middleTabs_->setCurrentWidget(page);
+}
+
+void ImplementationPage::closeArtifactTab(QWidget *widget) {
+    if (!middleTabs_ || !widget)
+        return;
+    for (auto iterator = artifactTabs_.begin(); iterator != artifactTabs_.end(); ++iterator) {
+        if (iterator->second != widget)
+            continue;
+        const auto index = middleTabs_->indexOf(widget);
+        if (index >= 0)
+            middleTabs_->removeTab(index);
+        delete widget;
+        artifactTabs_.erase(iterator);
+        ensureMiddlePlaceholder();
+        return;
+    }
+}
+
+void ImplementationPage::ensureMiddlePlaceholder() {
+    if (!synthesisMode() || !middleTabs_ || middleTabs_->count() > 0)
+        return;
+    auto *page = new QWidget(middleTabs_);
+    auto *layout = new QVBoxLayout(page);
+    layout->setContentsMargins(24, 24, 24, 24);
+    auto *label = new QLabel(QStringLiteral("Double-click an artifact to open its graph or netlist."), page);
+    label->setAlignment(Qt::AlignCenter);
+    label->setWordWrap(true);
+    layout->addStretch(1);
+    layout->addWidget(label);
+    layout->addStretch(1);
+    middlePlaceholder_ = page;
+    const auto index = middleTabs_->addTab(page, QStringLiteral("Start"));
+    middleTabs_->tabBar()->setTabButton(index, QTabBar::RightSide, nullptr);
+    middleTabs_->tabBar()->setVisible(false);
+}
+
+QString ImplementationPage::runStageLabel(const openvlsi::ImplementationRun &run) const {
+    const auto status = [&](openvlsi::ImplementationStage stage) {
+        const auto found = run.stages.find(stage);
+        return found == run.stages.end() ? openvlsi::ImplementationStageStatus::pending : found->second.status;
+    };
+    if (run.status == openvlsi::ImplementationStatus::failed)
+        return QStringLiteral("failed");
+    if (status(openvlsi::ImplementationStage::synthesis) == openvlsi::ImplementationStageStatus::running)
+        return QStringLiteral("synthesizing");
+    if (status(openvlsi::ImplementationStage::synthesis) == openvlsi::ImplementationStageStatus::succeeded)
+        return QStringLiteral("synthesized");
+    if (status(openvlsi::ImplementationStage::elaboration) == openvlsi::ImplementationStageStatus::running)
+        return QStringLiteral("elaborating");
+    if (status(openvlsi::ImplementationStage::elaboration) == openvlsi::ImplementationStageStatus::succeeded)
+        return QStringLiteral("elaborated");
+    if (run.status == openvlsi::ImplementationStatus::cancelled)
+        return QStringLiteral("cancelled");
+    return QStringLiteral("created");
+}
+
+std::optional<std::string> ImplementationPage::promptPdk(const QString &title, const std::string &current) {
+    const auto pdks = openvlsi::discoverPdks();
+    if (pdks.empty()) {
+        QMessageBox::warning(this, title, QStringLiteral("No PDK packages are installed."));
+        return std::nullopt;
+    }
+    QStringList labels;
+    std::vector<std::string> ids;
+    int currentIndex = 0;
+    for (const auto &pdk : pdks) {
+        QString label = QString::fromStdString(pdk.id);
+        if (!pdk.packageName.empty())
+            label += QStringLiteral(" (%1)").arg(QString::fromStdString(pdk.packageName));
+        if (!pdk.implementationReady) {
+            QString reason = QStringLiteral("no implementation data");
+            for (const auto &missing : pdk.implementationMissing) {
+                if (missing.find("OPENROAD_FLOW_SCRIPTS") != std::string::npos) {
+                    reason = QStringLiteral("needs OpenROAD-flow-scripts");
+                    break;
+                }
+            }
+            if (reason == QStringLiteral("no implementation data") && !pdk.implementationMissing.empty())
+                reason = QString::fromStdString(pdk.implementationMissing.front());
+            label += QStringLiteral(" — ") + reason;
+        }
+        labels.push_back(label);
+        ids.push_back(pdk.id);
+        if (pdk.id == current)
+            currentIndex = static_cast<int>(ids.size()) - 1;
+    }
+    bool accepted = false;
+    const auto selected =
+        QInputDialog::getItem(this, title, QStringLiteral("PDK:"), labels, currentIndex, false, &accepted);
+    if (!accepted)
+        return std::nullopt;
+    const auto index = labels.indexOf(selected);
+    if (index < 0)
+        return std::nullopt;
+    return ids.at(static_cast<std::size_t>(index));
+}
+
+void ImplementationPage::refreshRunsTable() {
+    if (!runsTable_)
+        return;
+    QSignalBlocker blocker(runsTable_);
+    const auto previous = selectedRunId();
+    runsTable_->setRowCount(0);
+    const auto *project = controller_->project();
+    if (!project) {
+        updateRunActions();
+        return;
+    }
+    std::vector<std::pair<std::string, openvlsi::ObjectId>> runs;
+    for (const auto &[id, run] : project->implementationRuns)
+        runs.emplace_back(run.name, id);
+    std::sort(runs.begin(), runs.end(), [](const auto &left, const auto &right) { return left.first < right.first; });
+    const auto active = controller_->activeRunId();
+    const auto selected = active != 0 && project->implementationRuns.contains(active) ? active : previous;
+    int selectedRow = -1;
+    for (const auto &[name, id] : runs) {
+        const auto row = runsTable_->rowCount();
+        runsTable_->insertRow(row);
+        auto *runItem = new QTableWidgetItem(QString::fromStdString(name));
+        runItem->setData(Qt::UserRole, static_cast<qulonglong>(id));
+        runsTable_->setItem(row, 0, runItem);
+        const auto &run = project->implementationRuns.at(id);
+        runsTable_->setItem(row, 1, new QTableWidgetItem(runStageLabel(run)));
+        auto *removeButton = new QPushButton;
+        removeButton->setFlat(true);
+        removeButton->setFixedSize(20, 20);
+        removeButton->setFocusPolicy(Qt::NoFocus);
+        setLucideIcon(removeButton, QStringLiteral("trash"), 12);
+        const bool removable = !controller_->busy() && run.status != openvlsi::ImplementationStatus::running;
+        removeButton->setEnabled(removable);
+        removeButton->setToolTip(removable ? QStringLiteral("Remove run and delete its build directory")
+                                           : QStringLiteral("Cannot remove a running run"));
+        removeButton->setAccessibleName(QStringLiteral("Remove run %1").arg(QString::fromStdString(run.name)));
+        QObject::connect(removeButton, &QPushButton::clicked, this, [this, id] {
+            if (removeRunCallback_)
+                removeRunCallback_(id);
+        });
+        auto *removeCell = new QWidget;
+        auto *removeCellLayout = new QHBoxLayout(removeCell);
+        removeCellLayout->setContentsMargins(0, 0, 0, 0);
+        removeCellLayout->addStretch(1);
+        removeCellLayout->addWidget(removeButton, 0, Qt::AlignCenter);
+        removeCellLayout->addStretch(1);
+        runsTable_->setCellWidget(row, 2, removeCell);
+        if (id == selected)
+            selectedRow = row;
+    }
+    if (selectedRow >= 0)
+        runsTable_->setCurrentCell(selectedRow, 0);
+    applyRunFilter(runSearch_ ? runSearch_->text() : QString());
+    updateRunActions();
+}
+
+void ImplementationPage::applyRunFilter(const QString &text) {
+    if (!runsTable_)
+        return;
+    const auto needle = text.trimmed();
+    for (int row = 0; row < runsTable_->rowCount(); ++row) {
+        const auto *runItem = runsTable_->item(row, 0);
+        const auto *stageItem = runsTable_->item(row, 1);
+        const bool match = needle.isEmpty() || (runItem && runItem->text().contains(needle, Qt::CaseInsensitive)) ||
+                           (stageItem && stageItem->text().contains(needle, Qt::CaseInsensitive));
+        runsTable_->setRowHidden(row, !match);
+    }
+    if (const auto *current = runsTable_->currentItem(); current && runsTable_->isRowHidden(current->row())) {
+        runsTable_->clearSelection();
+        runsTable_->setCurrentCell(-1, -1);
+    }
+    updateRunActions();
+}
+
+openvlsi::ObjectId ImplementationPage::selectedRunId() const {
+    if (!runsTable_)
+        return 0;
+    const auto row = runsTable_->currentRow();
+    if (row < 0 || runsTable_->isRowHidden(row))
+        return 0;
+    const auto *item = runsTable_->item(row, 0);
+    return item ? static_cast<openvlsi::ObjectId>(item->data(Qt::UserRole).toULongLong()) : 0;
+}
+
+openvlsi::ObjectId ImplementationPage::actionRunId() const {
+    const auto selected = selectedRunId();
+    return selected != 0 ? selected : controller_->activeRunId();
+}
+
+void ImplementationPage::updateRunActions() {
+    if (!synthesizeButton_ || !showGraphButton_ || !exportVerilogButton_)
+        return;
+    const auto id = actionRunId();
+    const auto *project = controller_->project();
+    const auto *run =
+        project && id != 0 && project->implementationRuns.contains(id) ? &project->implementationRuns.at(id) : nullptr;
+    if (!run) {
+        synthesizeButton_->setEnabled(false);
+        showGraphButton_->setEnabled(false);
+        exportVerilogButton_->setEnabled(false);
+        return;
+    }
+    const auto stageStatus = [&](openvlsi::ImplementationStage stage) {
+        const auto found = run->stages.find(stage);
+        return found == run->stages.end() ? openvlsi::ImplementationStageStatus::pending : found->second.status;
+    };
+    const bool busy = controller_->busy();
+    const bool elaborated =
+        stageStatus(openvlsi::ImplementationStage::elaboration) == openvlsi::ImplementationStageStatus::succeeded;
+    const bool synthesized =
+        stageStatus(openvlsi::ImplementationStage::synthesis) == openvlsi::ImplementationStageStatus::succeeded;
+    // A successful synthesis stays final until the RTL changes, so do not let
+    // the same sources be synthesized repeatedly.
+    const bool synthesisCurrent = synthesized && !sourcesChangedSincePrepare(*run);
+    synthesizeButton_->setEnabled(elaborated && !busy && !synthesisCurrent);
+    synthesizeButton_->setToolTip(
+        synthesisCurrent ? QStringLiteral("Synthesis is up to date. Edit the SystemVerilog source to synthesize again.")
+        : !elaborated    ? QStringLiteral("Elaborate the design first.")
+                         : QStringLiteral("Synthesize the elaborated design."));
+    showGraphButton_->setEnabled((elaborated || synthesized) && !busy);
+    exportVerilogButton_->setEnabled(synthesized && !busy);
+}
+
+void ImplementationPage::showRunGraph(openvlsi::ObjectId runId) {
+    const auto *project = controller_->project();
+    if (!project || !synthesisMode() || !middleTabs_)
+        return;
+    const auto run = project->implementationRuns.find(runId);
+    if (run == project->implementationRuns.end())
+        return;
+    const auto root = controller_->projectRoot();
+    const auto elaborationPath = runGraph(run->second, root, "elaboration", true);
+    const auto synthesisPath = runGraph(run->second, root, "synthesis", true);
+    if (!elaborationPath && !synthesisPath) {
+        const auto runDirectory = std::filesystem::path(root.toStdString()) / run->second.directory;
+        QMessageBox::information(
+            this, QStringLiteral("Run Graph"),
+            QStringLiteral("No elaboration or synthesis graph is available for this run yet.\n\nRun directory:\n%1")
+                .arg(QString::fromStdString(runDirectory.string())));
+        return;
+    }
+    if (elaborationPath)
+        openArtifact(QString::fromStdString(elaborationPath->string()));
+    if (synthesisPath)
+        openArtifact(QString::fromStdString(synthesisPath->string()));
+}
+
+void ImplementationPage::refreshExplorer() {
+    if (!hdlFileList_)
+        return;
+    QSignalBlocker blocker(hdlFileList_);
+    QSignalBlocker tabBlocker(middleTabs_);
+    hdlFileList_->clear();
+    const auto *project = controller_->project();
+    const auto projectKey =
+        project ? controller_->projectPath() + QLatin1Char(':') + QString::fromStdString(project->identity) : QString();
+    if (projectKey != hdlProjectKey_) {
+        hdlProjectKey_ = projectKey;
+        hdlTabsInitialized_ = false;
+        hdlEditCellId_ = 0;
+        hdlTempCellId_ = 0;
+        hdlScratchCreating_ = false;
+        hdlScratchDismissed_ = false;
+        closeHdlScratchEditor();
+        if (hdlEditTimer_)
+            hdlEditTimer_->stop();
+        for (auto &[id, editor] : hdlEditors_) {
+            for (int index = 0; index < middleTabs_->count(); ++index) {
+                if (static_cast<openvlsi::ObjectId>(middleTabs_->tabBar()->tabData(index).toULongLong()) == id) {
+                    middleTabs_->removeTab(index);
+                    break;
+                }
+            }
+            delete editor;
+        }
+        hdlEditors_.clear();
+        hdlEditor_ = nullptr;
+        activeHdlCellId_ = 0;
+    }
+    if (!project)
+        return;
+
+    struct Entry {
+        openvlsi::ObjectId id = 0;
+        std::string name;
+    };
+    std::vector<Entry> entries;
+    for (const auto &[id, cell] : project->schematicCells) {
+        if (cell.systemVerilogSchematic)
+            entries.push_back({id, cell.name});
+    }
+    std::sort(entries.begin(), entries.end(),
+              [](const Entry &left, const Entry &right) { return left.name < right.name; });
+
+    // With no HDL files the workspace still gets a text editor, so new RTL can
+    // be typed straight away. Its backing block is created on the first
+    // non-blank edit; an untouched editor never touches the project.
+    if (entries.empty()) {
+        if (!hdlScratchEditor_ && !hdlScratchDismissed_)
+            ensureHdlScratchEditor();
+    } else {
+        // A real HDL file is available again, so a dismissed scratch editor
+        // should come back if the project later runs out of files.
+        hdlScratchDismissed_ = false;
+        if (hdlScratchEditor_ && hdlScratchEditor_->text().trimmed().isEmpty())
+            closeHdlScratchEditor();
+    }
+
+    for (auto it = hdlEditors_.begin(); it != hdlEditors_.end();) {
+        const auto cell = project->schematicCells.find(it->first);
+        if (cell == project->schematicCells.end() || !cell->second.systemVerilogSchematic) {
+            const auto id = it->first;
+            if (hdlTempCellId_ == id)
+                hdlTempCellId_ = 0;
+            const auto *editor = it->second;
+            ++it;
+            for (int index = 0; index < middleTabs_->count(); ++index) {
+                if (static_cast<openvlsi::ObjectId>(middleTabs_->tabBar()->tabData(index).toULongLong()) == id) {
+                    middleTabs_->removeTab(index);
+                    break;
+                }
+            }
+            hdlEditors_.erase(id);
+            delete editor;
+            continue;
+        }
+        if ((hdlEditCellId_ != it->first || !hdlEditTimer_ || !hdlEditTimer_->isActive())) {
+            const auto text = QString::fromStdString(cell->second.systemVerilogText);
+            if (it->second->text() != text) {
+                loadingHdlEditor_ = true;
+                it->second->setText(text);
+                loadingHdlEditor_ = false;
+            }
+        }
+        for (int index = 0; index < middleTabs_->count(); ++index) {
+            if (static_cast<openvlsi::ObjectId>(middleTabs_->tabBar()->tabData(index).toULongLong()) == it->first) {
+                middleTabs_->setTabText(index, QString::fromStdString(cell->second.name) + QStringLiteral(".sv"));
+                break;
+            }
+        }
+        ++it;
+    }
+
+    if (activeHdlCellId_ == 0 || !project->schematicCells.contains(activeHdlCellId_) ||
+        !project->schematicCells.at(activeHdlCellId_).systemVerilogSchematic) {
+        activeHdlCellId_ = 0;
+        if (!hdlEditors_.empty()) {
+            const auto current = middleTabs_->currentIndex();
+            if (current >= 0) {
+                const auto currentId =
+                    static_cast<openvlsi::ObjectId>(middleTabs_->tabBar()->tabData(current).toULongLong());
+                if (hdlEditors_.contains(currentId))
+                    activeHdlCellId_ = currentId;
+            }
+            if (activeHdlCellId_ == 0)
+                activeHdlCellId_ = hdlEditors_.begin()->first;
+        } else if (!entries.empty()) {
+            activeHdlCellId_ = entries.front().id;
+        }
+    }
+    hdlEditor_ = hdlEditorFor(activeHdlCellId_);
+    if (!hdlEditor_ && activeHdlCellId_ == 0)
+        hdlEditor_ = hdlScratchEditor_;
+    for (int index = 0; index < middleTabs_->count(); ++index) {
+        if (static_cast<openvlsi::ObjectId>(middleTabs_->tabBar()->tabData(index).toULongLong()) == activeHdlCellId_) {
+            middleTabs_->setCurrentIndex(index);
+            break;
+        }
+    }
+
+    int activeRow = -1;
+    for (const auto &entry : entries) {
+        auto *item = new QListWidgetItem(QString::fromStdString(entry.name) + QStringLiteral(".sv"));
+        item->setData(Qt::UserRole, static_cast<qulonglong>(entry.id));
+        item->setToolTip(QStringLiteral("%1.sv · SystemVerilog").arg(QString::fromStdString(entry.name)));
+        hdlFileList_->addItem(item);
+        if (entry.id == activeHdlCellId_)
+            activeRow = hdlFileList_->count() - 1;
+    }
+    if (activeRow >= 0)
+        hdlFileList_->setCurrentRow(activeRow);
+    else if (activeHdlCellId_ == 0)
+        hdlFileList_->clearSelection();
+    applyHdlFilter(hdlSearch_ ? hdlSearch_->text() : QString());
+
+    if (!hdlTabsInitialized_ && !entries.empty()) {
+        hdlTabsInitialized_ = true;
+        if (activeHdlCellId_ != 0)
+            openHdlFile(activeHdlCellId_);
+    }
+}
+
+void ImplementationPage::applyHdlFilter(const QString &text) {
+    if (!hdlFileList_)
+        return;
+    const auto needle = text.trimmed();
+    for (int row = 0; row < hdlFileList_->count(); ++row) {
+        auto *item = hdlFileList_->item(row);
+        item->setHidden(!needle.isEmpty() && !item->text().contains(needle, Qt::CaseInsensitive));
+    }
+    auto *current = hdlFileList_->currentItem();
+    if (current && current->isHidden()) {
+        hdlFileList_->clearSelection();
+        hdlFileList_->setCurrentRow(-1);
+        current = nullptr;
+    }
+    if (deleteHdlButton_)
+        deleteHdlButton_->setEnabled(current != nullptr && !current->isHidden());
+}
+
+void ImplementationPage::openHdlFile(openvlsi::ObjectId id) {
+    const auto *project = controller_->project();
+    if (!project)
+        return;
+    const auto cell = project->schematicCells.find(id);
+    if (cell == project->schematicCells.end() || !cell->second.systemVerilogSchematic)
+        return;
+    if (const auto existing = hdlEditors_.find(id); existing != hdlEditors_.end()) {
+        for (int index = 0; index < middleTabs_->count(); ++index) {
+            if (static_cast<openvlsi::ObjectId>(middleTabs_->tabBar()->tabData(index).toULongLong()) == id) {
+                middleTabs_->setCurrentIndex(index);
+                break;
+            }
+        }
+        hdlEditor_ = existing->second;
+        activeHdlCellId_ = id;
+        return;
+    }
+    auto *editor = new TextDocumentEditor(middleTabs_);
+    editor->setLanguage(TextDocumentLanguage::SystemVerilog);
+    loadingHdlEditor_ = true;
+    editor->setText(QString::fromStdString(cell->second.systemVerilogText));
+    loadingHdlEditor_ = false;
+    editor->setOnTextEdited([this, id](const QString &) {
+        if (!loadingHdlEditor_ && hdlEditTimer_) {
+            hdlEditCellId_ = id;
+            hdlEditTimer_->start();
+        }
+    });
+    const auto index = middleTabs_->addTab(editor, QString::fromStdString(cell->second.name) + QStringLiteral(".sv"));
+    middleTabs_->tabBar()->setTabData(index, static_cast<qulonglong>(id));
+    hdlEditors_[id] = editor;
+    hdlEditor_ = editor;
+    activeHdlCellId_ = id;
+    middleTabs_->setCurrentIndex(index);
+    QSignalBlocker blocker(hdlFileList_);
+    for (int row = 0; row < hdlFileList_->count(); ++row) {
+        if (static_cast<openvlsi::ObjectId>(hdlFileList_->item(row)->data(Qt::UserRole).toULongLong()) == id) {
+            hdlFileList_->setCurrentRow(row);
+            break;
+        }
+    }
+}
+
+void ImplementationPage::closeHdlFile(openvlsi::ObjectId id) {
+    flushHdlEdit();
+    QSignalBlocker tabBlocker(middleTabs_);
+    const auto editor = hdlEditors_.find(id);
+    if (editor == hdlEditors_.end())
+        return;
+    for (int index = 0; index < middleTabs_->count(); ++index) {
+        if (static_cast<openvlsi::ObjectId>(middleTabs_->tabBar()->tabData(index).toULongLong()) == id) {
+            middleTabs_->removeTab(index);
+            break;
+        }
+    }
+    delete editor->second;
+    hdlEditors_.erase(editor);
+    if (activeHdlCellId_ == id) {
+        hdlEditor_ = nullptr;
+        activeHdlCellId_ = 0;
+        if (middleTabs_->count() > 0) {
+            const auto current = middleTabs_->currentIndex();
+            if (current >= 0) {
+                activeHdlCellId_ = static_cast<openvlsi::ObjectId>(middleTabs_->tabBar()->tabData(current).toULongLong());
+                hdlEditor_ = hdlEditorFor(activeHdlCellId_);
+            }
+        }
+    }
+    QSignalBlocker blocker(hdlFileList_);
+    if (activeHdlCellId_ == 0) {
+        hdlFileList_->clearSelection();
+    } else {
+        for (int row = 0; row < hdlFileList_->count(); ++row) {
+            if (static_cast<openvlsi::ObjectId>(hdlFileList_->item(row)->data(Qt::UserRole).toULongLong()) ==
+                activeHdlCellId_) {
+                hdlFileList_->setCurrentRow(row);
+                break;
+            }
+        }
+    }
+    refreshProperties();
+}
+
+void ImplementationPage::ensureHdlScratchEditor() {
+    if (!hdlMode() || !middleTabs_ || hdlScratchEditor_)
+        return;
+    auto *editor = new TextDocumentEditor(middleTabs_);
+    editor->setLanguage(TextDocumentLanguage::SystemVerilog);
+    editor->setOnTextEdited([this](const QString &text) {
+        if (loadingHdlEditor_ || hdlScratchCreating_ || !hdlScratchEditor_ || !createTemporaryHdlBlockCallback_)
+            return;
+        // An empty editor is not a file: only actual source creates a block.
+        if (text.trimmed().isEmpty())
+            return;
+        hdlScratchCreating_ = true;
+        const auto id = createTemporaryHdlBlockCallback_(text.toStdString());
+        hdlScratchCreating_ = false;
+        if (id == 0)
+            return;
+        promoteHdlScratchEditor(id);
+        controller_->refresh();
+    });
+    auto label = hdlDefaultBlockNameCallback_ ? hdlDefaultBlockNameCallback_() : QString();
+    if (label.isEmpty())
+        label = QStringLiteral("untitled");
+    const auto index = middleTabs_->addTab(editor, label + QStringLiteral(".sv"));
+    middleTabs_->tabBar()->setTabData(index, 0);
+    middleTabs_->setTabToolTip(index, QStringLiteral("Type SystemVerilog to create a new HDL block."));
+    middleTabs_->setCurrentIndex(index);
+    hdlScratchEditor_ = editor;
+    hdlEditor_ = editor;
+}
+
+void ImplementationPage::promoteHdlScratchEditor(openvlsi::ObjectId id) {
+    const auto *project = controller_->project();
+    if (!project || !hdlScratchEditor_)
+        return;
+    const auto cell = project->schematicCells.find(id);
+    if (cell == project->schematicCells.end())
+        return;
+    auto *editor = hdlScratchEditor_;
+    hdlScratchEditor_ = nullptr;
+    // Remember the scratch block so its first save can ask for a real name.
+    hdlTempCellId_ = id;
+    hdlEditors_[id] = editor;
+    hdlEditor_ = editor;
+    activeHdlCellId_ = id;
+    editor->setOnTextEdited([this, id](const QString &) {
+        if (!loadingHdlEditor_ && hdlEditTimer_) {
+            hdlEditCellId_ = id;
+            hdlEditTimer_->start();
+        }
+    });
+    for (int index = 0; index < middleTabs_->count(); ++index) {
+        if (middleTabs_->widget(index) != editor)
+            continue;
+        middleTabs_->tabBar()->setTabData(index, static_cast<qulonglong>(id));
+        middleTabs_->setTabText(index, QString::fromStdString(cell->second.name) + QStringLiteral(".sv"));
+        break;
+    }
+}
+
+void ImplementationPage::closeHdlScratchEditor() {
+    if (!hdlScratchEditor_)
+        return;
+    auto *editor = hdlScratchEditor_;
+    hdlScratchEditor_ = nullptr;
+    if (middleTabs_) {
+        for (int index = 0; index < middleTabs_->count(); ++index) {
+            if (middleTabs_->widget(index) != editor)
+                continue;
+            middleTabs_->removeTab(index);
+            break;
+        }
+    }
+    if (hdlEditor_ == editor)
+        hdlEditor_ = nullptr;
+    delete editor;
+}
+
+bool ImplementationPage::prepareHdlFileSave(openvlsi::ObjectId &cellId) {
+    cellId = 0;
+    flushHdlEdit();
+    const auto *project = controller_->project();
+    if (activeHdlCellId_ == 0 || !project)
+        return false;
+    const auto cell = project->schematicCells.find(activeHdlCellId_);
+    if (cell == project->schematicCells.end() || !cell->second.systemVerilogSchematic)
+        return false;
+    if (activeHdlCellId_ == hdlTempCellId_) {
+        bool accepted = false;
+        const auto name = QInputDialog::getText(
+            this, QStringLiteral("Save HDL Block"),
+            QStringLiteral("This block was created as a temporary file. Choose a name to save it:"),
+            QLineEdit::Normal, QString::fromStdString(cell->second.name), &accepted);
+        const auto trimmed = name.trimmed();
+        if (!accepted || trimmed.isEmpty() || !renameHdlBlockCallback_)
+            return false;
+        if (!renameHdlBlockCallback_(activeHdlCellId_, trimmed.toStdString()))
+            return false;
+        hdlTempCellId_ = 0;
+    }
+    cellId = activeHdlCellId_;
+    return true;
+}
+
+void ImplementationPage::flushHdlEdit() {
+    if (hdlEditTimer_ && hdlEditTimer_->isActive())
+        hdlEditTimer_->stop();
+    if (hdlEditCellId_ == 0)
+        return;
+    if (auto *editor = hdlEditorFor(hdlEditCellId_))
+        controller_->editHdlText(hdlEditCellId_, editor->text().toStdString());
+    hdlEditCellId_ = 0;
+}
+
+TextDocumentEditor *ImplementationPage::hdlEditorFor(openvlsi::ObjectId id) const {
+    const auto found = hdlEditors_.find(id);
+    return found == hdlEditors_.end() ? nullptr : found->second;
+}
+
+void ImplementationPage::selectHdlCell(openvlsi::ObjectId id) {
+    flushHdlEdit();
+    activeHdlCellId_ = id;
+    openHdlFile(id);
+    refreshProperties();
+}
+
+void ImplementationPage::refreshOutline() {
+    if (!outlineTree_)
+        return;
+    QSignalBlocker blocker(outlineTree_);
+    outlineTree_->clear();
+    const auto addItem = [](QTreeWidgetItem *parent, const QString &text, int line, const QString &tooltip = {}) {
+        auto *item = new QTreeWidgetItem(parent);
+        item->setText(0, text);
+        if (line > 0)
+            item->setText(1, QString::number(line));
+        item->setData(0, Qt::UserRole, line);
+        if (!tooltip.isEmpty())
+            item->setToolTip(0, tooltip);
+        return item;
+    };
+    const auto addTopItem = [&](const QString &text, int line, const QString &tooltip = {}) {
+        auto *item = new QTreeWidgetItem(outlineTree_);
+        item->setText(0, text);
+        if (line > 0)
+            item->setText(1, QString::number(line));
+        item->setData(0, Qt::UserRole, line);
+        if (!tooltip.isEmpty())
+            item->setToolTip(0, tooltip);
+        return item;
+    };
+    const auto addGroup = [&](const QString &title) {
+        auto *item = new QTreeWidgetItem(outlineTree_);
+        item->setText(0, title);
+        item->setFirstColumnSpanned(true);
+        auto font = item->font(0);
+        font.setBold(true);
+        item->setFont(0, font);
+        return item;
+    };
+
+    const auto *project = controller_->project();
+    if (!project || activeHdlCellId_ == 0) {
+        addTopItem(QStringLiteral("No HDL file open"), 0);
+        return;
+    }
+    const auto cell = project->schematicCells.find(activeHdlCellId_);
+    if (cell == project->schematicCells.end() || !cell->second.systemVerilogSchematic) {
+        addTopItem(QStringLiteral("No HDL file open"), 0);
+        return;
+    }
+    QString source = QString::fromStdString(cell->second.systemVerilogText);
+    if (const auto *editor = hdlEditorFor(activeHdlCellId_))
+        source = editor->text();
+    const auto lines = source.split(QLatin1Char('\n'));
+    const auto parsed = openvlsi::parseSystemVerilogModule(source.toStdString(), cell->second.name);
+
+    QTreeWidgetItem *parsedModuleItem = nullptr;
+    const QRegularExpression moduleExpression(QStringLiteral(R"(^\s*module\s+([A-Za-z_]\w*))"));
+    for (int index = 0; index < lines.size(); ++index) {
+        const auto match = moduleExpression.match(lines.at(index));
+        if (!match.hasMatch())
+            continue;
+        auto *moduleItem = addTopItem(QStringLiteral("module %1").arg(match.captured(1)), index + 1);
+        if (parsed.ok && match.captured(1).toStdString() == parsed.module.name)
+            parsedModuleItem = moduleItem;
+    }
+    if (parsed.ok) {
+        if (!parsedModuleItem)
+            parsedModuleItem =
+                addTopItem(QStringLiteral("module %1").arg(QString::fromStdString(parsed.module.name)), 0);
+        for (const auto &port : parsed.module.ports) {
+            QString direction = port.direction == openvlsi::HdlPortDirection::input    ? QStringLiteral("input")
+                                : port.direction == openvlsi::HdlPortDirection::output ? QStringLiteral("output")
+                                                                                  : QStringLiteral("inout");
+            QString text = direction;
+            if (port.real)
+                text += QStringLiteral(" real");
+            else if (port.width > 1)
+                text += QStringLiteral(" [%1:0]").arg(port.width - 1);
+            text += QStringLiteral(" %1").arg(QString::fromStdString(port.name));
+            addItem(parsedModuleItem, text, 0);
+        }
+    }
+
+    const QRegularExpression parameterExpression(
+        QStringLiteral(R"(^\s*(?:parameter|localparam)\s+(?:[A-Za-z_]\w*\s+)?([A-Za-z_]\w*))"));
+    const QRegularExpression alwaysExpression(QStringLiteral(R"(^\s*(always_ff|always_comb|always_latch|always)\b)"));
+    const QRegularExpression assignExpression(QStringLiteral(R"(^\s*assign\s+(.+?)\s*=)"));
+    const QRegularExpression functionExpression(QStringLiteral(R"(^\s*(function|task)\b)"));
+    QTreeWidgetItem *parameters = nullptr;
+    QTreeWidgetItem *alwaysBlocks = nullptr;
+    QTreeWidgetItem *assignments = nullptr;
+    QTreeWidgetItem *functions = nullptr;
+    for (int index = 0; index < lines.size(); ++index) {
+        const auto &line = lines.at(index);
+        if (const auto match = parameterExpression.match(line); match.hasMatch()) {
+            if (!parameters)
+                parameters = addGroup(QStringLiteral("Parameters"));
+            addItem(parameters, match.captured(1), index + 1);
+        }
+        if (const auto match = alwaysExpression.match(line); match.hasMatch()) {
+            if (!alwaysBlocks)
+                alwaysBlocks = addGroup(QStringLiteral("Always blocks"));
+            addItem(alwaysBlocks, match.captured(1), index + 1);
+        }
+        if (const auto match = assignExpression.match(line); match.hasMatch()) {
+            if (!assignments)
+                assignments = addGroup(QStringLiteral("Assignments"));
+            addItem(assignments, QStringLiteral("assign %1").arg(match.captured(1).trimmed()), index + 1);
+        }
+        if (const auto match = functionExpression.match(line); match.hasMatch()) {
+            if (!functions)
+                functions = addGroup(QStringLiteral("Functions / Tasks"));
+            addItem(functions, match.captured(1), index + 1);
+        }
+    }
+    outlineTree_->expandAll();
+}
+
+void ImplementationPage::refreshIpLibraries() {
+    if (!ipLibrariesTree_)
+        return;
+    QSignalBlocker blocker(ipLibrariesTree_);
+    ipLibrariesTree_->clear();
+    const auto addGroup = [&](const QString &title) {
+        auto *item = new QTreeWidgetItem(ipLibrariesTree_);
+        item->setText(0, title);
+        item->setFirstColumnSpanned(true);
+        auto font = item->font(0);
+        font.setBold(true);
+        item->setFont(0, font);
+        return item;
+    };
+    const auto addValue = [](QTreeWidgetItem *parent, const QString &name, const QString &details, openvlsi::ObjectId id = 0,
+                             const QString &tooltip = {}) {
+        auto *item = new QTreeWidgetItem(parent);
+        item->setText(0, name);
+        item->setText(1, details);
+        if (id != 0)
+            item->setData(0, Qt::UserRole, static_cast<qulonglong>(id));
+        if (!tooltip.isEmpty())
+            item->setToolTip(0, tooltip);
+        return item;
+    };
+
+    const auto *project = controller_->project();
+    auto *dependencies = addGroup(QStringLiteral("Project Packages"));
+    if (!project || project->packageDependencies.empty())
+        addValue(dependencies, QStringLiteral("(none)"), QString());
+    else
+        for (const auto &dependency : project->packageDependencies)
+            addValue(dependencies, QString::fromStdString(dependency), QString());
+
+    auto *pdks = addGroup(QStringLiteral("Installed PDK Packages"));
+    const auto installed = openvlsi::discoverPdks();
+    if (installed.empty()) {
+        addValue(pdks, QStringLiteral("(none)"), QString());
+    } else {
+        for (const auto &pdk : installed) {
+            const auto details = pdk.packageVersion.empty() ? QString() : QString::fromStdString(pdk.packageVersion);
+            addValue(pdks, QString::fromStdString(pdk.id), details, 0,
+                     QString::fromStdString(pdk.packageRoot.generic_string()));
+        }
+    }
+
+    auto *modules = addGroup(QStringLiteral("HDL Modules"));
+    if (!project) {
+        addValue(modules, QStringLiteral("(none)"), QString());
+    } else {
+        std::vector<std::pair<std::string, openvlsi::ObjectId>> cells;
+        for (const auto &[id, cell] : project->schematicCells) {
+            if (cell.systemVerilogSchematic)
+                cells.emplace_back(cell.name, id);
+        }
+        std::sort(cells.begin(), cells.end(),
+                  [](const auto &left, const auto &right) { return left.first < right.first; });
+        if (cells.empty())
+            addValue(modules, QStringLiteral("(none)"), QString());
+        for (const auto &[name, id] : cells) {
+            const auto &cell = project->schematicCells.at(id);
+            const auto parsed = openvlsi::parseSystemVerilogModule(cell);
+            const auto details =
+                parsed.ok ? QString::fromStdString(parsed.module.name) : QStringLiteral("SystemVerilog");
+            addValue(modules, QString::fromStdString(name) + QStringLiteral(".sv"), details, id,
+                     QStringLiteral("Double-click to open"));
+        }
+    }
+    ipLibrariesTree_->expandAll();
+}
+
+void ImplementationPage::refreshProperties() {
+    if (!hdlMode())
+        return;
+    refreshOutline();
+    refreshIpLibraries();
+}
+
+void ImplementationPage::refresh() {
+    if (hdlMode()) {
+        refreshExplorer();
+        refreshProperties();
+        return;
+    }
+    if (synthesisMode()) {
+        ensureMiddlePlaceholder();
+        refreshSynthesisExplorer();
+        refreshRunsTable();
+        refreshArtifacts();
+        return;
+    }
+    refreshRunTree();
+    refreshStageForm();
+    updateStageActions();
+    const auto *run = controller_->activeRun();
+    if (!run) {
+        metricsTable_->setRowCount(0);
+        if (previewCanvas_)
+            previewCanvas_->setPreview({}, 0, QStringLiteral("Select an implementation run in the Runs panel."), {},
+                                       controller_->project());
+        refreshInspector();
+        refreshTiming();
+        return;
+    }
+    refreshMetrics();
+    if (isVisible())
+        refreshPreview();
+}
+
+void ImplementationPage::showEvent(QShowEvent *event) {
+    QWidget::showEvent(event);
+    // Pick up edits made in other tabs (for example RTL changes that make a
+    // synthesis result stale) without waiting for the next project change.
+    refresh();
+}
+
+void ImplementationPage::refreshMetrics() {
+    metricsTable_->setRowCount(0);
+    const auto *run = controller_->activeRun();
+    if (!run)
+        return;
+    std::map<QString, std::vector<std::pair<QString, double>>> groups;
+    for (const auto &[name, value] : run->metrics) {
+        const auto full = QString::fromStdString(name);
+        auto group = full.section(QStringLiteral("__"), 0, 0);
+        if (group.isEmpty())
+            group = QStringLiteral("Other");
+        groups[group].push_back({full, value});
+    }
+    int row = 0;
+    const auto addSection = [&](const QString &name) {
+        metricsTable_->insertRow(row);
+        auto *item = new QTableWidgetItem(name);
+        auto font = item->font();
+        font.setBold(true);
+        item->setFont(font);
+        item->setFlags(Qt::NoItemFlags);
+        metricsTable_->setItem(row, 0, item);
+        metricsTable_->setSpan(row, 0, 1, 2);
+        ++row;
+    };
+    const auto formatValue = [](const QString &name, double value) -> QString {
+        if (name.startsWith(QStringLiteral("timing__")) && std::abs(value) <= 1.0e20)
+            return QStringLiteral("%1 ns").arg(value * 1.0e9, 0, 'f', 4);
+        if (name.startsWith(QStringLiteral("power__")))
+            return QStringLiteral("%1 mW").arg(value * 1.0e3, 0, 'f', 4);
+        if (name.endsWith(QStringLiteral("__area")) || name.endsWith(QStringLiteral("__area__stdcell")))
+            return QStringLiteral("%1 µm²").arg(value, 0, 'f', 2);
+        if (name.endsWith(QStringLiteral("__wirelength")))
+            return QStringLiteral("%1 µm").arg(value, 0, 'f', 2);
+        return QString::number(value, 'g', 12);
+    };
+    for (auto &[group, metrics] : groups) {
+        std::sort(metrics.begin(), metrics.end(),
+                  [](const auto &left, const auto &right) { return left.first < right.first; });
+        addSection(group);
+        for (const auto &[name, value] : metrics) {
+            metricsTable_->insertRow(row);
+            metricsTable_->setItem(row, 0, new QTableWidgetItem(name));
+            auto *valueItem = new QTableWidgetItem(formatValue(name, value));
+            valueItem->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
+            metricsTable_->setItem(row, 1, valueItem);
+            ++row;
+        }
+    }
+}
+
+void ImplementationPage::refreshArtifacts() {
+    if (!artifactsList_)
+        return;
+    artifactsList_->clear();
+    const auto *run = controller_->activeRun();
+    if (!run)
+        return;
+    std::vector<std::string> artifacts;
+    const auto append = [&](const std::string &artifact) {
+        if (std::find(artifacts.begin(), artifacts.end(), artifact) == artifacts.end())
+            artifacts.push_back(artifact);
+    };
+    const auto appendStage = [&](openvlsi::ImplementationStage stage) {
+        const auto state = run->stages.find(stage);
+        if (state == run->stages.end())
+            return;
+        for (const auto &artifact : state->second.artifacts)
+            append(artifact);
+    };
+    const auto isSynthesisArtifact = [](const std::string &artifact) {
+        return artifact.ends_with("/reports/elaboration.svg") || artifact == "reports/elaboration.svg" ||
+               artifact.ends_with("/reports/elaboration.dot") || artifact == "reports/elaboration.dot" ||
+               artifact.ends_with("/reports/synthesis.svg") || artifact == "reports/synthesis.svg" ||
+               artifact.ends_with("/reports/synthesis.dot") || artifact == "reports/synthesis.dot" ||
+               artifact.ends_with("/synth/2_tech_map.v") || artifact == "synth/2_tech_map.v";
+    };
+    if (synthesisMode()) {
+        appendStage(openvlsi::ImplementationStage::elaboration);
+        appendStage(openvlsi::ImplementationStage::synthesis);
+        for (const auto &artifact : run->artifacts) {
+            if (isSynthesisArtifact(artifact))
+                append(artifact);
+        }
+        artifacts.erase(std::remove_if(artifacts.begin(), artifacts.end(),
+                                       [&](const auto &artifact) { return !isSynthesisArtifact(artifact); }),
+                        artifacts.end());
+    } else {
+        appendStage(stage_);
+        const auto runRoot = std::filesystem::path(controller_->projectRoot().toStdString()) / run->directory;
+        for (const auto *heatmap :
+             {"reports/placement-heatmap.csv", "reports/routing-heatmap.csv", "reports/power-heatmap.csv",
+              "reports/pin-heatmap.csv", "reports/rudy-heatmap.csv", "reports/irdrop-heatmap.csv"}) {
+            std::error_code status;
+            if (std::filesystem::is_regular_file(runRoot / heatmap, status) && !status)
+                append(heatmap);
+        }
+    }
+    const auto pathFor = [](const std::string &artifact) -> QString { return QString::fromStdString(artifact); };
+    const auto labelFor = [&](const std::string &artifact) -> QString {
+        if (synthesisMode()) {
+            if (artifact.ends_with("/reports/elaboration.svg") || artifact == "reports/elaboration.svg")
+                return QStringLiteral("Elaboration graph (elaboration.svg)");
+            if (artifact.ends_with("/reports/elaboration.dot") || artifact == "reports/elaboration.dot")
+                return QStringLiteral("Elaboration graph source (elaboration.dot)");
+            if (artifact.ends_with("/reports/synthesis.svg") || artifact == "reports/synthesis.svg")
+                return QStringLiteral("Synthesis graph (synthesis.svg)");
+            if (artifact.ends_with("/reports/synthesis.dot") || artifact == "reports/synthesis.dot")
+                return QStringLiteral("Synthesis graph source (synthesis.dot)");
+            if (artifact.ends_with("/synth/2_tech_map.v") || artifact == "synth/2_tech_map.v")
+                return QStringLiteral("Technology-mapped netlist (2_tech_map.v)");
+        }
+        return QString::fromStdString(artifact);
+    };
+    for (const auto &artifact : artifacts) {
+        auto *item = new QListWidgetItem(labelFor(artifact));
+        item->setToolTip(pathFor(artifact));
+        item->setData(Qt::UserRole, pathFor(artifact));
+        artifactsList_->addItem(item);
+    }
+}
+
+void ImplementationPage::refreshDisplayControls() {
+    if (!displayTree_)
+        return;
+    QSignalBlocker blocker(displayTree_);
+    displayTree_->clear();
+    if (!previewCanvas_)
+        return;
+    const auto addGroup = [&](const QString &name) {
+        auto *group = new QTreeWidgetItem(displayTree_);
+        group->setText(0, name);
+        auto font = group->font(0);
+        font.setBold(true);
+        group->setFont(0, font);
+        group->setFirstColumnSpanned(true);
+        group->setExpanded(true);
+        return group;
+    };
+    const auto addLeaf = [&](QTreeWidgetItem *parent, const QString &label, bool visible, const QString &group,
+                             const QString &key, const QIcon &icon = {}) {
+        auto *item = new QTreeWidgetItem(parent);
+        item->setText(0, label);
+        item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
+        item->setCheckState(0, visible ? Qt::Checked : Qt::Unchecked);
+        item->setData(0, Qt::UserRole, group);
+        item->setData(0, Qt::UserRole + 1, key);
+        if (!icon.isNull())
+            item->setIcon(0, icon);
+        return item;
+    };
+
+    const auto layers = previewCanvas_->layers();
+    if (!layers.empty()) {
+        auto *group = addGroup(QStringLiteral("Layers"));
+        for (const auto &layer : layers)
+            addLeaf(group, layer.label, layer.visible, QStringLiteral("layer"), layer.key,
+                    QIcon(layerPreviewIcon({layer.color, Qt::SolidPattern})));
+    }
+
+    const auto categories = previewCanvas_->instanceCategories();
+    if (!categories.empty()) {
+        auto *group = addGroup(QStringLiteral("Instances"));
+        for (const auto &[category, count] : categories) {
+            const auto label = category.isEmpty() ? QStringLiteral("other") : category;
+            addLeaf(group, QStringLiteral("%1 (%2)").arg(label).arg(count),
+                    previewCanvas_->instanceCategoryVisible(label), QStringLiteral("instance"), label);
+        }
+    }
+
+    const auto netTypes = previewCanvas_->netTypes();
+    if (!netTypes.empty()) {
+        auto *group = addGroup(QStringLiteral("Nets"));
+        for (const auto &[type, count] : netTypes) {
+            const auto label = type.isEmpty() ? QStringLiteral("signal") : type;
+            addLeaf(group, QStringLiteral("%1 (%2)").arg(label).arg(count), previewCanvas_->netTypeVisible(label),
+                    QStringLiteral("net"), label);
+        }
+    }
+
+    auto *options = addGroup(QStringLiteral("Options"));
+    addLeaf(options, QStringLiteral("Special nets"), previewCanvas_->showSpecialNets(), QStringLiteral("option"),
+            QStringLiteral("special"));
+    addLeaf(options, QStringLiteral("Ports"), previewCanvas_->showPorts(), QStringLiteral("option"),
+            QStringLiteral("ports"));
+    if (previewCanvas_->hasGuides())
+        addLeaf(options, QStringLiteral("Route guides"), previewCanvas_->showGuides(), QStringLiteral("option"),
+                QStringLiteral("guides"));
+    if (previewCanvas_->hasRows())
+        addLeaf(options, QStringLiteral("Rows"), previewCanvas_->showRows(), QStringLiteral("option"),
+                QStringLiteral("rows"));
+    if (previewCanvas_->hasBlockages())
+        addLeaf(options, QStringLiteral("Blockages"), previewCanvas_->showBlockages(), QStringLiteral("option"),
+                QStringLiteral("blockages"));
+    displayTree_->expandAll();
+    if (displayTree_->topLevelItemCount() == 0) {
+        auto *item = new QTreeWidgetItem(displayTree_);
+        item->setText(0, QStringLiteral("No display data in this preview."));
+        item->setFlags(Qt::NoItemFlags);
+    }
+}
+
+void ImplementationPage::refreshInspector() {
+    if (!inspectorTree_)
+        return;
+    QSignalBlocker blocker(inspectorTree_);
+    inspectorTree_->clear();
+    const auto selection = previewCanvas_ ? previewCanvas_->selection() : ImplementationPreviewCanvas::Selection{};
+    const bool hasSelection = selection.valid();
+    if (rightInspectorStack_)
+        rightInspectorStack_->setCurrentIndex(hasSelection ? 1 : 0);
+    if (!hasSelection)
+        return;
+    const auto add = [&](const QString &name, const QString &value) {
+        auto *item = new QTreeWidgetItem(inspectorTree_);
+        item->setText(0, name);
+        item->setText(1, value);
+        item->setToolTip(1, value);
+    };
+    const auto kind =
+        selection.kind == ImplementationPreviewCanvas::SelectionKind::instance ? QStringLiteral("Instance")
+        : selection.kind == ImplementationPreviewCanvas::SelectionKind::port   ? QStringLiteral("Port")
+        : selection.kind == ImplementationPreviewCanvas::SelectionKind::shape  ? QStringLiteral("Shape")
+                                                                               : QStringLiteral("DRC marker");
+    add(QStringLiteral("Kind"), kind);
+    if (!selection.name.isEmpty())
+        add(QStringLiteral("Name"), selection.name);
+    if (!selection.master.isEmpty())
+        add(QStringLiteral("Master"), selection.master);
+    if (!selection.category.isEmpty())
+        add(QStringLiteral("Category"), selection.category);
+    if (!selection.module.isEmpty())
+        add(QStringLiteral("Module"), selection.module);
+    if (!selection.net.isEmpty())
+        add(QStringLiteral("Net"), selection.net);
+    if (!selection.layer.isEmpty())
+        add(QStringLiteral("Layer"), selection.layer);
+    if (!selection.type.isEmpty())
+        add(QStringLiteral("Type"), selection.type);
+    if (!selection.sources.isEmpty())
+        add(QStringLiteral("Sources"), selection.sources);
+    if (!selection.comment.isEmpty())
+        add(QStringLiteral("Comment"), selection.comment);
+    if (selection.special)
+        add(QStringLiteral("Special net"), QStringLiteral("yes"));
+    if (selection.rectangle.isValid())
+        add(QStringLiteral("Bounds"), QStringLiteral("%1 × %2 µm")
+                                          .arg(selection.rectangle.width() / 1000.0, 0, 'f', 3)
+                                          .arg(selection.rectangle.height() / 1000.0, 0, 'f', 3));
+    inspectorTree_->expandAll();
+}
+
+bool ImplementationPage::selectDrcMarker(int index) {
+    if (!previewCanvas_ || index < 0 || index >= static_cast<int>(previewCanvas_->drcMarkers().size()))
+        return false;
+    previewCanvas_->selectMarker(index);
+    return true;
+}
+
+void ImplementationPage::refreshDrc() {
+    if (!drcReportCallback_)
+        return;
+    openvlsi::VerificationReport report;
+    if (previewCanvas_) {
+        const auto markers = previewCanvas_->drcMarkers();
+        const auto *run = controller_->activeRun();
+        auto cellName = run ? QString::fromStdString(run->config.top) : QString();
+        if (cellName.isEmpty() && run)
+            cellName = QString::fromStdString(run->name);
+        report.drc.reserve(markers.size());
+        for (int index = 0; index < static_cast<int>(markers.size()); ++index) {
+            const auto &marker = markers[static_cast<std::size_t>(index)];
+            openvlsi::DrcViolation violation;
+            violation.severity = openvlsi::VerificationSeverity::error;
+            violation.rule = marker.type.toStdString();
+            QStringList details;
+            if (!marker.comment.isEmpty())
+                details << marker.comment;
+            if (!marker.sources.isEmpty() && marker.sources != marker.comment)
+                details << marker.sources;
+            if (!marker.layer.isEmpty())
+                details << QStringLiteral("Layer %1").arg(marker.layer);
+            violation.message = details.join(QStringLiteral(" · ")).toStdString();
+            violation.cell = cellName.toStdString();
+            // The bottom DRC report uses this to select the matching marker
+            // when its row is activated.
+            violation.object = static_cast<openvlsi::ObjectId>(index);
+            const auto rectangle = marker.rectangle.normalized();
+            violation.location = {
+                static_cast<openvlsi::Coordinate>(std::llround(rectangle.left())),
+                static_cast<openvlsi::Coordinate>(std::llround(rectangle.top())),
+                static_cast<openvlsi::Coordinate>(std::llround(rectangle.width())),
+                static_cast<openvlsi::Coordinate>(std::llround(rectangle.height())),
+            };
+            report.drc.push_back(std::move(violation));
+        }
+    }
+    drcReportCallback_(report, stageTitle(stage_));
+}
+
+void ImplementationPage::refreshTiming() {
+    std::vector<std::pair<QString, QString>> metrics;
+    const auto *run = controller_->activeRun();
+    if (run) {
+        for (const auto &[name, value] : run->metrics) {
+            if (name.starts_with("timing__")) {
+                metrics.emplace_back(QString::fromStdString(name),
+                                     std::abs(value) > 1.0e20 ? QStringLiteral("unconstrained")
+                                                              : QStringLiteral("%1 ns").arg(value * 1.0e9, 0, 'f', 4));
+            } else if (name.starts_with("power__")) {
+                metrics.emplace_back(QString::fromStdString(name),
+                                     QStringLiteral("%1 mW").arg(value * 1.0e3, 0, 'f', 4));
+            } else if (name == "route__drc_errors") {
+                metrics.emplace_back(QString::fromStdString(name), QString::number(value, 'g', 8));
+            } else if (name.starts_with("antenna__")) {
+                metrics.emplace_back(QString::fromStdString(name), QString::number(value, 'g', 8));
+            }
+        }
+    }
+    if (timingMetricsCallback_)
+        timingMetricsCallback_(metrics);
+}
+
+void ImplementationPage::refreshPreview() {
+    if (!previewCanvas_)
+        return;
+    if (previewStatusLabel_)
+        previewStatusLabel_->setVisible(false);
+    if (physicalStageMode()) {
+        const auto *run = controller_->activeRun();
+        if (run) {
+            const auto stage = run->stages.find(stage_);
+            if (stage != run->stages.end() && stage->second.status != openvlsi::ImplementationStageStatus::succeeded &&
+                stage->second.status != openvlsi::ImplementationStageStatus::running) {
+                const auto title = stageTitle(stage_);
+                QString message;
+                if (stage->second.status == openvlsi::ImplementationStageStatus::failed)
+                    message = QStringLiteral("%1 failed. Check the stage log, adjust the settings, then run it again.")
+                                  .arg(title);
+                else if (stage->second.status == openvlsi::ImplementationStageStatus::skipped)
+                    message = QStringLiteral("%1 is skipped for this run.").arg(title);
+                else
+                    message = QStringLiteral("%1 settings changed or the stage has not run yet.\n"
+                                             "Run the stage to generate the DEF preview.")
+                                  .arg(title);
+                previewCanvas_->setPreview({}, 0, message, {}, controller_->project());
+                refreshDisplayControls();
+                refreshInspector();
+                refreshDrc();
+                refreshTiming();
+                return;
+            }
+        }
+    }
+    if (previewStatusLabel_) {
+        previewStatusLabel_->setText(QStringLiteral("Loading preview…"));
+        previewStatusLabel_->setStyleSheet(QStringLiteral("color: %1;").arg(openvlsi::uiColor(openvlsi::UiColor::Text2).name()));
+        previewStatusLabel_->setVisible(true);
+    }
+    QPointer<ImplementationPage> self(this);
+    const auto runId = controller_->activeRunId();
+    controller_->requestStagePreview(
+        stage_, [self, runId, stage = stage_](const ImplementationUiController::StagePreview &preview) {
+            if (!self || self->controller_->activeRunId() != runId)
+                return;
+            self->previewCanvas_->setPreview(preview.project, preview.cell, preview.message, preview.model,
+                                             preview.project ? preview.project.get() : self->controller_->project());
+            if (self->previewStatusLabel_) {
+                if (preview.model && preview.model->truncated) {
+                    self->previewStatusLabel_->setText(
+                        QStringLiteral("Preview truncated by the OpenDB reader; some routed geometry is not shown."));
+                    self->previewStatusLabel_->setStyleSheet(QStringLiteral("color: #a16207;"));
+                    self->previewStatusLabel_->setVisible(true);
+                } else {
+                    self->previewStatusLabel_->setVisible(false);
+                }
+            }
+            self->refreshDisplayControls();
+            self->refreshInspector();
+            self->refreshDrc();
+            self->refreshTiming();
+            (void)stage;
+        });
+}
+
+PhysicalDesignPage::PhysicalDesignPage(ImplementationUiController *controller, QWidget *parent) : QWidget(parent) {
+    stages_ = {openvlsi::ImplementationStage::floorplan, openvlsi::ImplementationStage::placement, openvlsi::ImplementationStage::cts,
+               openvlsi::ImplementationStage::routing, openvlsi::ImplementationStage::final};
+    auto *layout = new QVBoxLayout(this);
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->setSpacing(0);
+    stageStack_ = new QStackedWidget;
+    for (const auto stage : stages_) {
+        auto *page = new ImplementationPage(stage, controller, stageStack_, true);
+        page->setRunSelectionCallback([this](openvlsi::ObjectId runId, std::optional<openvlsi::ImplementationStage> activated) {
+            selectRunStage(runId, activated);
+        });
+        pages_.push_back(page);
+        stageStack_->addWidget(page);
+    }
+    layout->addWidget(stageStack_, 1);
+    stageStack_->setCurrentIndex(0);
+}
+
+void PhysicalDesignPage::setCurrentStage(openvlsi::ImplementationStage stage) {
+    const auto index = stageIndex(stage);
+    if (index < 0 || !stageStack_)
+        return;
+    stageStack_->setCurrentIndex(index);
+}
+
+void PhysicalDesignPage::selectRunStage(openvlsi::ObjectId runId, std::optional<openvlsi::ImplementationStage> stage) {
+    if (stage)
+        setCurrentStage(*stage);
+    for (auto *page : pages_)
+        page->selectRunStage(runId, stage);
+}
+
+openvlsi::ImplementationStage PhysicalDesignPage::currentStage() const {
+    return stageAt(stageStack_ ? stageStack_->currentIndex() : 0);
+}
+
+std::vector<ImplementationPage *> PhysicalDesignPage::pages() const { return pages_; }
+
+ImplementationPage *PhysicalDesignPage::pageForStage(openvlsi::ImplementationStage stage) const {
+    const auto index = stageIndex(stage);
+    return index >= 0 && index < static_cast<int>(pages_.size()) ? pages_[index] : nullptr;
+}
+
+void PhysicalDesignPage::showEvent(QShowEvent *event) {
+    QWidget::showEvent(event);
+    if (auto *page = pageForStage(currentStage()))
+        page->refresh();
+}
+
+int PhysicalDesignPage::stageIndex(openvlsi::ImplementationStage stage) const {
+    for (int index = 0; index < static_cast<int>(stages_.size()); ++index) {
+        if (stages_[index] == stage)
+            return index;
+    }
+    return -1;
+}
+
+openvlsi::ImplementationStage PhysicalDesignPage::stageAt(int index) const {
+    if (index < 0 || index >= static_cast<int>(stages_.size()))
+        return openvlsi::ImplementationStage::floorplan;
+    return stages_[index];
+}

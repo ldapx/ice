@@ -1,11 +1,11 @@
-"""Inspect an ICE project through the optional nanobind surface.
+"""Inspect an OpenVLSI project through the optional nanobind surface.
 
-The binding module is named ``icepy`` when the optional Python target is built.
+The binding module is named ``openvlsipy`` when the optional Python target is built.
 """
 
-import icepy
+import openvlsipy
 
 
-project = icepy.load_project("demo/project.icepro")
+project = openvlsipy.load_project("demo/project.ovpro")
 print(project.name)
 print(project.schema_version)

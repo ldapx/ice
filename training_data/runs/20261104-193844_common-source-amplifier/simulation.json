@@ -1,7 +1,7 @@
 {
   "analysis": "transient",
   "error": "",
-  "format": "ice-simulation-result",
+  "format": "openvlsi-simulation-result",
   "graphs": [
     {
       "id": 3,

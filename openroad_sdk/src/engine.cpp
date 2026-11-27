@@ -1,4 +1,4 @@
-#include "ice_openroad/engine.hpp"
+#include "openvlsi_openroad/engine.hpp"
 
 #include <algorithm>
 #include <cstdio>
@@ -37,7 +37,7 @@
 #include "utl/Logger.h"
 #include "web/core.h"
 
-namespace ice::openroad {
+namespace openvlsi::openroad {
 namespace {
 
 std::string tclQuote(const std::string &text) {
@@ -596,7 +596,7 @@ struct Engine::Impl {
                                  die.yMax() - core_space);
             floorplan.initFloorplan(die, core, site);
         } else {
-            // ICE stores utilization as a fraction, while OpenROAD's
+            // OpenVLSI stores utilization as a fraction, while OpenROAD's
             // initFloorplan expects a percentage (0.5 becomes 50%).
             const double utilization_percent = job.options.utilization * 100.0;
             floorplan.initFloorplan(utilization_percent, job.options.aspect_ratio, core_space, core_space, core_space,
@@ -872,4 +872,4 @@ std::string Engine::openroadVersion() {
     return std::string(version ? version : "unknown") + " " + (git ? git : "unknown");
 }
 
-} // namespace ice::openroad
+} // namespace openvlsi::openroad

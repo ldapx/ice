@@ -8,7 +8,7 @@ LVS, PEX, and hierarchy instances.
 
 The script runs in a separate Python process with a single injected object named
 `layout`. Scripts build geometry through that builder; they do not mutate the
-project database directly. ICE validates the builder output before applying it,
+project database directly. OpenVLSI validates the builder output before applying it,
 so a failed script leaves the previous generated geometry untouched.
 
 ## Quick start
@@ -28,7 +28,7 @@ layout.port(
 ```
 
 Create and regenerate the layout from the GUI (**+** in the Layout
-**Hierarchy** → **Procedural Layout**), the CLI, `icepy`, or MCP. The generated
+**Hierarchy** → **Procedural Layout**), the CLI, `openvlsipy`, or MCP. The generated
 child is read-only; edit the script or parameter form and regenerate instead of
 drawing over it.
 
@@ -146,12 +146,12 @@ re-simulation.
 | Entry point | Create | Regenerate |
 | --- | --- | --- |
 | GUI | Layout **Hierarchy** → **+** → **Procedural Layout** | **Regenerate layout** button or context menu |
-| CLI | `ice-cli layout-add-procedural <project> <name> [pdk] [script-file] [stack]` | `ice-cli layout-regenerate <project> <procedural> [timeout-seconds]` |
-| `icepy` | `project.create_procedural_layout(...)` | `project.regenerate_procedural_layout(name)` |
+| CLI | `openvlsi-cli layout-add-procedural <project> <name> [pdk] [script-file] [stack]` | `openvlsi-cli layout-regenerate <project> <procedural> [timeout-seconds]` |
+| `openvlsipy` | `project.create_procedural_layout(...)` | `project.regenerate_procedural_layout(name)` |
 | MCP | `layout_create_procedural` | `layout_regenerate` |
 
 The GUI runs scripts with a 60-second timeout. The CLI and MCP regeneration
-operations accept a timeout override. Set `ICE_PYTHON` to choose the
+operations accept a timeout override. Set `OPENVLSI_PYTHON` to choose the
 interpreter; otherwise `python3` is used.
 
 ## Coordinates and units
@@ -176,7 +176,7 @@ integer database units.
 
 `layout.layer(name, number=None, datatype=None)` registers or resolves a layer
 and returns a reusable {py:class}`procedural_runner.Layer` handle. When the
-stream values are omitted, ICE resolves the layer from the active PDK package
+stream values are omitted, OpenVLSI resolves the layer from the active PDK package
 or from layers already present in the project. Explicit values are used as a
 fallback.
 
@@ -228,7 +228,7 @@ metal.path([(0, 0), (4000, 0), (4000, 2000)], width=layout.um(0.5), net="VDD")
 metal.text(0, 2500, "M2", height=layout.um(0.5), net="VDD")
 ```
 
-A path stores its centerline and width; ICE expands it to polygons for display,
+A path stores its centerline and width; OpenVLSI expands it to polygons for display,
 bounds, and `layout.iter_polygons()`. Text is stored as a bounding rectangle
 with text metadata. When `width` is omitted, the text width is estimated from
 the label length and height.
@@ -258,13 +258,13 @@ PDK extensions such as dummy fill can inspect the completed builder:
   when no geometry matches. Without a layer filter it includes ports and child
   instances; pass a layer name to restrict the result to shapes on that layer.
 - `layout.cells` is the project layout-cell catalog keyed by cell name. Each
-  entry carries the cell `bounds` and `ports` when ICE supplied the catalog.
+  entry carries the cell `bounds` and `ports` when OpenVLSI supplied the catalog.
 - `layout.layer_number(name)` returns the registered GDS layer number.
 
 ## Ports
 
-`layout.port(...)` adds an intrinsic ICE port to the generated cell. Ports
-participate in hierarchy wiring, connectivity checks, and LVS. ICE uses
+`layout.port(...)` adds an intrinsic OpenVLSI port to the generated cell. Ports
+participate in hierarchy wiring, connectivity checks, and LVS. OpenVLSI uses
 **port** for a layout-cell terminal and **pin** for a schematic-symbol
 terminal; LEF/DEF keep their `PIN` keyword at the file-format boundary.
 
@@ -350,8 +350,8 @@ fingers = int(layout.parameter("nf", "2", "Number of fingers"))
 Declared parameters appear in the GUI parameter form above the script editor.
 They can also be changed before regeneration through:
 
-- CLI: `ice-cli layout-set-parameter <project> <procedural> <name> <value>`
-- `icepy`: `project.set_procedural_parameter(layout_name, parameter_name, value)`
+- CLI: `openvlsi-cli layout-set-parameter <project> <procedural> <name> <value>`
+- `openvlsipy`: `project.set_procedural_parameter(layout_name, parameter_name, value)`
 - MCP: `layout_set_parameter`
 
 A procedural layout reports `needs_regeneration` when its script hash or
@@ -360,7 +360,7 @@ parameter hash differs from the last successful run.
 ## Devices
 
 `layout.device(...)` places a device from the active package's layout device
-library. The library may contain generated PCells and fixed `.icelay` cells.
+library. The library may contain generated PCells and fixed `.ovlay` cells.
 Device geometry is flattened into the generated cell, while a planned-device
 record preserves the model, parameters, and terminal nets for LVS and PEX.
 
@@ -673,7 +673,7 @@ part of the generated layout.
 ## PDK-provided operations
 
 Procedural scripts can request process-specific work through generic builder
-calls. ICE dispatches the request to the active package after the user script
+calls. OpenVLSI dispatches the request to the active package after the user script
 finishes.
 
 ### Dummy fill
@@ -700,11 +700,11 @@ available devices and routing metadata.
 
 A run is isolated from the project database:
 
-1. ICE writes the script and parameter JSON to a temporary directory.
+1. OpenVLSI writes the script and parameter JSON to a temporary directory.
 2. Python executes the script with the `layout` builder.
 3. The builder emits a versioned JSON document with layers, parameters,
    shapes, ports, instances, and devices.
-4. ICE parses and validates the document, then applies it to the project.
+4. OpenVLSI parses and validates the document, then applies it to the project.
 5. The generated child replaces its previous contents; its script/output
    hashes and stale state are updated.
 
@@ -788,8 +788,8 @@ in `assets/layout/procedural_runner.py`.
 ## See also
 
 - {doc}`gui` — procedural layout editor and regeneration workflow.
-- {doc}`icepy` — creating and regenerating procedural layouts from Python.
+- {doc}`openvlsipy` — creating and regenerating procedural layouts from Python.
 - {doc}`cli` — headless procedural layout commands.
-- {doc}`ice-mcp` — MCP tools for scripts, parameters, and regeneration.
+- {doc}`openvlsi-mcp` — MCP tools for scripts, parameters, and regeneration.
 - {doc}`/developer/packages` — device libraries, connectivity, and dummy fill
   contracts.

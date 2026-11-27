@@ -1,42 +1,42 @@
-# ICE Architecture
+# OpenVLSI Architecture
 
 > Product intent is in {doc}`/project/vision`; capabilities and acceptance
 > criteria are in {doc}`/project/roadmap`.
 
 ## Overview
 
-ICE is an open-source, extensible **integrated-circuit design environment** focused on schematic design, IC layout, analog simulation, automated layout, analysis, benchmarking, and programmable design workflows.
+OpenVLSI is an open-source, extensible **integrated-circuit design environment** focused on schematic design, IC layout, analog simulation, automated layout, analysis, benchmarking, and programmable design workflows.
 
-ICE is a unified product composed of several executables and one shared core
+OpenVLSI is a unified product composed of several executables and one shared core
 library. The executables provide focused process boundaries while reusing the
-same domain model and application services from `icelib`.
+same domain model and application services from `openvlsilib`.
 
 ```text
-                         ICE product
+                         OpenVLSI product
                               │
               ┌───────────────┼───────────────┐
               │               │               │
-             ice           ice-cli         ice-pkg
+             openvlsi           openvlsi-cli         openvlsi-pkg
         main EDA GUI     automation CLI   package manager
               │               │               │
               └───────────────┼───────────────┘
                               │
-                           icelib
+                           openvlsilib
                     canonical core library
                               │
-                           ice-mcp
+                           openvlsi-mcp
                          MCP server
 ```
 
 The executables, Python bindings, MCP server, and plugins must operate on the
-same `icelib` project/database model rather than implementing independent
+same `openvlsilib` project/database model rather than implementing independent
 domain logic.
 
 ---
 
 ## 1. Goals
 
-ICE should provide an integrated workflow for:
+OpenVLSI should provide an integrated workflow for:
 
 1. Creating and editing schematics.
 2. Creating and editing IC layouts.
@@ -51,27 +51,27 @@ ICE should provide an integrated workflow for:
 11. Importing and exporting industry-standard layout formats.
 12. Installing and managing PDKs, libraries, symbols, models, plugins, scripts, and other packages.
 13. Automating all editor functionality through a CLI.
-14. Automating ICE through Python.
-15. Allowing AI agents to operate ICE through MCP.
-16. Providing an Agent Client Protocol chat interface inside ICE.
-17. Supporting third-party extensions without making them part of the ICE core.
+14. Automating OpenVLSI through Python.
+15. Allowing AI agents to operate OpenVLSI through MCP.
+16. Providing an Agent Client Protocol chat interface inside OpenVLSI.
+17. Supporting third-party extensions without making them part of the OpenVLSI core.
 
 ---
 
 ## 2. High-Level Architecture
 
 ```text
-                                      ICE
+                                      OpenVLSI
                                        │
              ┌─────────────────────────┼─────────────────────────┐
              │                         │                         │
              ▼                         ▼                         ▼
-            ice                     ice-cli                    Python
+            openvlsi                     openvlsi-cli                    Python
          Qt 6 GUI                CLI11 frontend              bindings
              │                         │                         │
              └─────────────────────────┼─────────────────────────┘
                                        │
-                                icelib Core API
+                                openvlsilib Core API
                                        │
        ┌───────────────┬───────────────┼───────────────┬───────────────┐
        │               │               │               │               │
@@ -97,11 +97,11 @@ ICE should provide an integrated workflow for:
 Separate product services use the same core:
 
 ```text
-                         icelib
+                         openvlsilib
                             │
                 ┌───────────┴───────────┐
                 │                       │
-             ice-mcp                 ice-pkg
+             openvlsi-mcp                 openvlsi-pkg
           MCP JSON-RPC          package/PDK manager
                 │
             AI agents
@@ -111,24 +111,24 @@ Separate product services use the same core:
 
 ## 3. Product Executables and Process Boundaries
 
-ICE should not be one executable. It should consist of the following primary
+OpenVLSI should not be one executable. It should consist of the following primary
 executables:
 
 | Executable | Responsibility |
 | --- | --- |
-| `ice` | Main Qt desktop EDA application: schematic, layout, simulation, analysis, and integrated project workflows. |
-| `ice-cli` | Headless automation and scripting entry point for core operations. |
-| `ice-pkg` | Package and PDK installation, resolution, verification, repository, and lockfile management. |
-| `ice-mcp` | MCP server exposing approved `icelib` operations to external agents. |
+| `openvlsi` | Main Qt desktop EDA application: schematic, layout, simulation, analysis, and integrated project workflows. |
+| `openvlsi-cli` | Headless automation and scripting entry point for core operations. |
+| `openvlsi-pkg` | Package and PDK installation, resolution, verification, repository, and lockfile management. |
+| `openvlsi-mcp` | MCP server exposing approved `openvlsilib` operations to external agents. |
 
-All four executables link to or otherwise use `icelib`. They must not maintain
+All four executables link to or otherwise use `openvlsilib`. They must not maintain
 separate domain models. Python bindings should also be generated from
-`icelib`, and the `ice` application may host the in-process ACP chatbox.
+`openvlsilib`, and the `openvlsi` application may host the in-process ACP chatbox.
 
-The main `ice` application contains:
+The main `openvlsi` application contains:
 
 ```text
-ICE
+OpenVLSI
 ├── Project Manager
 ├── Schematic Editor
 ├── Layout Editor
@@ -141,13 +141,13 @@ ICE
 └── Agent Client Protocol Chatbox
 ```
 
-`ice-pkg` remains a separate executable because package installation and
+`openvlsi-pkg` remains a separate executable because package installation and
 repository operations have different permissions, lifecycles, and failure
-boundaries from interactive editing. `ice-mcp` remains separate so an external
+boundaries from interactive editing. `openvlsi-mcp` remains separate so an external
 agent connection cannot require the GUI process.
 
-The schematic and layout editors, `ice-cli`, `ice-pkg`, and `ice-mcp` should
-share through `icelib`:
+The schematic and layout editors, `openvlsi-cli`, `openvlsi-pkg`, and `openvlsi-mcp` should
+share through `openvlsilib`:
 
 * Project state
 * PDK information
@@ -190,12 +190,12 @@ Select layout shape
                                 │ stdio JSON-RPC
                                 ▼
                            ┌─────────┐
-                           │ ice-mcp │
+                           │ openvlsi-mcp │
                            └────┬────┘
                                 │
                                 ▼
 ┌──────────────┐      ┌──────────────────────┐      ┌──────────────┐
-│     ice      │      │       icelib         │      │   ice-cli    │
+│     openvlsi      │      │       openvlsilib         │      │   openvlsi-cli    │
 │ Qt GUI/ACP   │◄────►│ domain + operations  │◄────►│ headless CLI  │
 └──────┬───────┘      └──────────┬───────────┘      └──────────────┘
        │                         │
@@ -206,7 +206,7 @@ Select layout shape
        └───────────────┐
                        ▼
                  ┌──────────┐
-                 │  ice-pkg │
+                 │  openvlsi-pkg │
                  │ packages │
                  └────┬─────┘
                       │
@@ -216,7 +216,7 @@ Select layout shape
 Optional workers are separate processes where isolation or tool lifecycle
 requires it:
 
-  ice / ice-cli / ice-mcp
+  openvlsi / openvlsi-cli / openvlsi-mcp
               │
               ├── ngspice worker
               ├── ALIGN worker
@@ -224,7 +224,7 @@ requires it:
               └── plugin or package worker
 ```
 
-`icelib` owns the canonical model and operation contracts. Workers communicate
+`openvlsilib` owns the canonical model and operation contracts. Workers communicate
 through versioned adapter protocols and return normalized results. A worker
 failure must not corrupt the caller's project state.
 
@@ -234,10 +234,10 @@ failure must not corrupt the caller's project state.
 
 The GUI should **not** be the primary abstraction.
 
-`icelib` should provide the reusable application API:
+`openvlsilib` should provide the reusable application API:
 
 ```text
-                       icelib API
+                       openvlsilib API
                           │
           ┌───────────────┼───────────────┐
           │               │               │
@@ -270,9 +270,9 @@ Initial core technologies:
 
 | Technology        | Purpose                                      |
 | ----------------- | -------------------------------------------- |
-| **C++**           | `icelib` core library and executables        |
-| **Qt 6**          | `ice` GUI and desktop application            |
-| **CLI11**         | `ice-cli` and relevant executable commands   |
+| **C++**           | `openvlsilib` core library and executables        |
+| **Qt 6**          | `openvlsi` GUI and desktop application            |
+| **CLI11**         | `openvlsi-cli` and relevant executable commands   |
 | **reflect-cpp**   | Reflection/serialization/data representation |
 | **Clipper2**      | 2D polygon Boolean and offset operations     |
 | **ALIGN**         | Automated analog layout synthesis            |
@@ -377,7 +377,7 @@ y = 40
 direction = "inout"
 ```
 
-At load, ICE should parse the TOML + SVG pair into the schematic database. The database is the runtime source of truth; the files are the authoring format. SVG files must contain no scripts or external references.
+At load, OpenVLSI should parse the TOML + SVG pair into the schematic database. The database is the runtime source of truth; the files are the authoring format. SVG files must contain no scripts or external references.
 
 A validator should reject missing SVGs, undefined pins, and off-grid port positions.
 
@@ -385,7 +385,7 @@ A validator should reject missing SVGs, undefined pins, and off-grid port positi
 
 ## 7. IC Layout Editor
 
-The layout editor is a first-class part of the same ICE executable.
+The layout editor is a first-class part of the same OpenVLSI executable.
 
 It should support:
 
@@ -431,9 +431,9 @@ automatically generated layout → manual refinement
 
 ## 8. Layout Database
 
-The layout database should be **ICE's own representation**.
+The layout database should be **OpenVLSI's own representation**.
 
-It should be defined natively in ICE rather than mirroring an external tool's data model.
+It should be defined natively in OpenVLSI rather than mirroring an external tool's data model.
 
 Conceptually:
 
@@ -450,15 +450,15 @@ Design
 └── PDK
 ```
 
-ICE calls a layout-cell terminal a **port** and a schematic-symbol terminal a
+OpenVLSI calls a layout-cell terminal a **port** and a schematic-symbol terminal a
 **pin**. LEF, DEF, and GDS use `PIN`/pin-label vocabulary as file-format
-keywords. Ports are intrinsic ICE annotations. They carry a name, rectangle,
+keywords. Ports are intrinsic OpenVLSI annotations. They carry a name, rectangle,
 direction, side, net, and label, and do not require a process-layer
 association: the layer is required, persisted with the port, and drives
 routing, DRC/LVS matching, and interchange. A PDK pin-purpose or label layer is
 only an optional interchange projection, never the source of truth for port
 identity. GDS/OASIS writers project each port onto its layer; LEF/DEF writers
-use the same layer. `ICE_PORT` remains a fallback for malformed interchange
+use the same layer. `OPENVLSI_PORT` remains a fallback for malformed interchange
 input with no layer.
 
 A shape can conceptually contain:
@@ -487,7 +487,7 @@ This provides deterministic geometry operations and avoids floating-point ambigu
 
 ## 9. Geometry Kernel
 
-ICE should have a custom EDA-oriented geometry API.
+OpenVLSI should have a custom EDA-oriented geometry API.
 
 It should **not** expose Clipper2 types throughout the entire codebase.
 
@@ -507,7 +507,7 @@ public:
 Clipper2 implements the underlying computational geometry:
 
 ```text
-ICE Geometry API
+OpenVLSI Geometry API
        │
        ▼
 Geometry Kernel
@@ -516,7 +516,7 @@ Geometry Kernel
 Clipper2
 ```
 
-Clipper2 is the implementation behind ICE's geometry model, and it covers the operations ICE needs:
+Clipper2 is the implementation behind OpenVLSI's geometry model, and it covers the operations OpenVLSI needs:
 
 * Union
 * Intersection
@@ -538,7 +538,7 @@ Those operations are required by:
 * PDK generators
 * Device generation
 
-This gives ICE ownership of its geometry model while avoiding the complexity and risk of implementing robust polygon clipping from scratch.
+This gives OpenVLSI ownership of its geometry model while avoiding the complexity and risk of implementing robust polygon clipping from scratch.
 
 ---
 
@@ -558,7 +558,7 @@ Which objects overlap this route?
 
 An R-tree spatial data structure should be used.
 
-The spatial index should be integrated with the ICE layout database rather than becoming the layout database itself.
+The spatial index should be integrated with the OpenVLSI layout database rather than becoming the layout database itself.
 
 ---
 
@@ -589,7 +589,7 @@ The layout system should preserve hierarchy when possible rather than flattening
 
 ## 12. Ports
 
-ICE should use a **port abstraction** for programmable layout.
+OpenVLSI should use a **port abstraction** for programmable layout.
 
 A port should conceptually contain:
 
@@ -645,7 +645,7 @@ PDK
 └── Simulation information
 ```
 
-The core ICE layout API should remain PDK-agnostic.
+The core OpenVLSI layout API should remain PDK-agnostic.
 
 For example:
 
@@ -669,7 +669,7 @@ pdk.via(...)
 
 ## 14. Automated Analog Layout
 
-ICE should integrate **ALIGN** as an analog layout synthesis backend.
+OpenVLSI should integrate **ALIGN** as an analog layout synthesis backend.
 
 ALIGN's role is:
 
@@ -683,10 +683,10 @@ ALIGN
 Automated layout
        │
        ▼
-ICE Layout Database
+OpenVLSI Layout Database
 ```
 
-ALIGN should be treated as a synthesis engine rather than the owner of ICE's final layout database.
+ALIGN should be treated as a synthesis engine rather than the owner of OpenVLSI's final layout database.
 
 The desired workflow is:
 
@@ -700,7 +700,7 @@ ALIGN synthesis
 Initial layout
     │
     ▼
-ICE Layout Editor
+OpenVLSI Layout Editor
     │
     ├── manual modifications
     ├── Python modifications
@@ -711,9 +711,9 @@ ICE Layout Editor
 Final layout
 ```
 
-ICE should avoid a workflow where the layout must be exported to GDS and re-imported merely to move between ALIGN and ICE.
+OpenVLSI should avoid a workflow where the layout must be exported to GDS and re-imported merely to move between ALIGN and OpenVLSI.
 
-ALIGN must sit behind a narrow, ICE-owned adapter boundary. The core should only know versioned `AnalogLayoutRequest` / `AnalogLayoutResult` structs built from PDK-agnostic nets, layers, devices, and constraints. The adapter owns all ALIGN specifics: input and constraint file formats, invocation as an out-of-process run with a pinned environment, output parsing, and PDK name/layer mappings. No ALIGN types, file schemas, or PDK-generator names may appear in core headers or the canonical layout database.
+ALIGN must sit behind a narrow, OpenVLSI-owned adapter boundary. The core should only know versioned `AnalogLayoutRequest` / `AnalogLayoutResult` structs built from PDK-agnostic nets, layers, devices, and constraints. The adapter owns all ALIGN specifics: input and constraint file formats, invocation as an out-of-process run with a pinned environment, output parsing, and PDK name/layer mappings. No ALIGN types, file schemas, or PDK-generator names may appear in core headers or the canonical layout database.
 
 This keeps ALIGN and PDK churn from leaking into the core DB, and allows ALIGN to be pinned, mocked, or replaced without touching the core.
 
@@ -721,18 +721,18 @@ This keeps ALIGN and PDK churn from leaking into the core DB, and allows ALIGN t
 
 ## 15. Generic Layout Scripting
 
-ICE should provide a **Python-first layout scripting API**.
+OpenVLSI should provide a **Python-first layout scripting API**.
 
-The scripting API operates directly on the ICE layout database:
+The scripting API operates directly on the OpenVLSI layout database:
 
 ```text
 Python
   │
   ▼
-ICE Python API
+OpenVLSI Python API
   │
   ▼
-ICE Layout Database
+OpenVLSI Layout Database
   │
   ▼
 Geometry Kernel
@@ -758,7 +758,7 @@ Python scripts should be able to create:
 Example:
 
 ```python
-from ice import Cell
+from openvlsi import Cell
 
 cell = Cell("example")
 
@@ -779,7 +779,7 @@ The exact API is intentionally subject to future design.
 
 ## 16. Python as the Unified Automation Language
 
-Python should be the primary user-facing scripting language for ICE.
+Python should be the primary user-facing scripting language for OpenVLSI.
 
 It should cover:
 
@@ -807,7 +807,7 @@ Conceptually:
               nanobind
                 │
                 ▼
-           ICE C++ API
+           OpenVLSI C++ API
 ```
 
 This avoids maintaining separate Python and C++ implementations.
@@ -816,7 +816,7 @@ This avoids maintaining separate Python and C++ implementations.
 
 ## 17. Analog Simulation
 
-ICE should integrate **ngspice** via shared-library mode (**libngspice**).
+OpenVLSI should integrate **ngspice** via shared-library mode (**libngspice**).
 
 The simulation backend should load libngspice in-process and drive it through its C API (init callbacks, load netlist, run, halt). Callbacks should stream vectors and status back during the run for live plotting, early-stop on divergence, and cancellation. ngspice data callbacks fire off the GUI thread, so the adapter must marshal results to the Qt thread and serialize concurrent runs.
 
@@ -847,7 +847,7 @@ Raw SPICE should remain available for advanced users.
 
 ## 18. Testbench System
 
-Testbenches should be first-class ICE objects.
+Testbenches should be first-class OpenVLSI objects.
 
 A testbench should be able to specify:
 
@@ -886,7 +886,7 @@ MCP tools (`simulation_update`, `simulation_corner_defaults`,
 `simulation_experiment`) all use the same `Experiment`/`SimulationRunner`
 contract.
 
-Waveform analysis is presentation-only and lives in `icelib/waveform.*`.
+Waveform analysis is presentation-only and lives in `openvlsilib/waveform.*`.
 `computeSpectrum` resamples onto a uniform grid and returns amplitude/phase
 spectra; `evaluateDerivedTrace` evaluates safe arithmetic/function expressions
 over captured traces; `buildWaveformSeries` applies a graph's view, derived
@@ -898,7 +898,7 @@ markers are serialized on `SimulationGraph` so the GUI, CLI, and MCP agree.
 
 ## 19. Model Analysis
 
-ICE should provide tools for analyzing device and circuit models.
+OpenVLSI should provide tools for analyzing device and circuit models.
 
 Examples:
 
@@ -925,7 +925,7 @@ Scientific Python libraries can be used for:
 * Statistical analysis
 * Machine learning where useful
 
-ICE should not duplicate functionality that is already well-covered by the Python scientific ecosystem.
+OpenVLSI should not duplicate functionality that is already well-covered by the Python scientific ecosystem.
 
 ---
 
@@ -971,7 +971,7 @@ Results should be machine-readable and suitable for further analysis.
 
 ## 21. Analog Benchmarking
 
-ICE should provide a benchmarking framework for analog circuits.
+OpenVLSI should provide a benchmarking framework for analog circuits.
 
 A benchmark should define:
 
@@ -1037,7 +1037,7 @@ Optimization
     └───────────────► improved design/layout
 ```
 
-This allows ICE to evaluate designs based not only on schematic-level performance but also:
+This allows OpenVLSI to evaluate designs based not only on schematic-level performance but also:
 
 * Layout area
 * Parasitics
@@ -1051,7 +1051,7 @@ This allows ICE to evaluate designs based not only on schematic-level performanc
 
 ## 23. GDSII / OASIS
 
-ICE should support standard layout interchange formats.
+OpenVLSI should support standard layout interchange formats.
 
 At minimum:
 
@@ -1063,7 +1063,7 @@ OASIS
 The layout database should remain independent of the interchange representation.
 
 ```text
-ICE Layout DB
+OpenVLSI Layout DB
       │
       ├── GDSII exporter
       ├── GDSII importer
@@ -1090,7 +1090,7 @@ cell-name table. Neither path depends on KLayout or a GDS intermediate file.
 
 ## 24. Package Manager
 
-ICE should include a first-class package manager.
+OpenVLSI should include a first-class package manager.
 
 The package manager should support installation of:
 
@@ -1112,20 +1112,20 @@ The package manager should support installation of:
 Example commands:
 
 ```text
-ice install sky130
-ice install ihp-sg13g2
-ice install analoglib
-ice install opamp-library
+openvlsi install sky130
+openvlsi install ihp-sg13g2
+openvlsi install analoglib
+openvlsi install opamp-library
 
-ice update
-ice remove analoglib
-ice list
-ice search opamp
+openvlsi update
+openvlsi remove analoglib
+openvlsi list
+openvlsi search opamp
 ```
 
 ---
 
-## 25. ICE Package Format
+## 25. OpenVLSI Package Format
 
 A package should be simple and extensible.
 
@@ -1155,7 +1155,7 @@ description = "Example PDK package"
 license = "..."
 
 [dependencies]
-ice = ">=0.1"
+openvlsi = ">=0.1"
 some-library = "^2.1"
 
 [provides]
@@ -1172,12 +1172,12 @@ The package system should be capability-oriented rather than forcing every packa
 
 ## 26. Package Repositories
 
-ICE should support multiple package repositories.
+OpenVLSI should support multiple package repositories.
 
 Example:
 
 ```text
-ICE Official Repository
+OpenVLSI Official Repository
 ├── PDKs
 ├── official libraries
 └── official plugins
@@ -1210,7 +1210,7 @@ The package system should support reproducible version selection.
 
 ## 27. CLI
 
-ICE should include a CLI implemented using **CLI11**.
+OpenVLSI should include a CLI implemented using **CLI11**.
 
 The CLI should expose the complete set of **user-relevant core operations**
 available through the editor. It should not be a reduced utility interface for
@@ -1223,7 +1223,7 @@ The goal is:
 GUI action
      │
      ▼
-icelib core operation
+openvlsilib core operation
      ▲
      │
 CLI command
@@ -1232,25 +1232,25 @@ CLI command
 For example:
 
 ```text
-ice project create
-ice project open
-ice schematic open
-ice schematic add-device
-ice schematic connect
-ice layout open
-ice layout add-polygon
-ice layout move
-ice layout route
-ice layout boolean
-ice layout export
-ice simulate
-ice testbench run
-ice benchmark run
-ice drc
-ice lvs
-ice pex
-ice package install
-ice package search
+openvlsi project create
+openvlsi project open
+openvlsi schematic open
+openvlsi schematic add-device
+openvlsi schematic connect
+openvlsi layout open
+openvlsi layout add-polygon
+openvlsi layout move
+openvlsi layout route
+openvlsi layout boolean
+openvlsi layout export
+openvlsi simulate
+openvlsi testbench run
+openvlsi benchmark run
+openvlsi drc
+openvlsi lvs
+openvlsi pex
+openvlsi package install
+openvlsi package search
 ```
 
 The exact command hierarchy is subject to future design.
@@ -1259,7 +1259,7 @@ The exact command hierarchy is subject to future design.
 
 ## 28. Core-operation parity
 
-A fundamental ICE requirement is:
+A fundamental OpenVLSI requirement is:
 
 > **Every supported core operation should have a clearly defined interface
 > contract and be available through the appropriate automation surfaces.**
@@ -1302,7 +1302,7 @@ cannot be reproduced or scripted.
 
 ## Capability matrix
 
-ICE should maintain a capability matrix for every public core operation. The
+OpenVLSI should maintain a capability matrix for every public core operation. The
 matrix should identify whether an operation is:
 
 * supported;
@@ -1335,14 +1335,14 @@ capability to be declared explicitly rather than silently omitted.
 
 ---
 
-## 29. `ice-mcp` Server
+## 29. `openvlsi-mcp` Server
 
-ICE should provide an **`ice-mcp` executable** for AI agents, implemented with
+OpenVLSI should provide an **`openvlsi-mcp` executable** for AI agents, implemented with
 **agentsdk-cpp** (`agentsdk::mcp::mcp_server`,
 https://github.com/ldapx/agentsdk-cpp) over stdio JSON-RPC.
 
-The `ice-mcp` executable should expose the same `icelib` core functionality as
-`ice` and `ice-cli`.
+The `openvlsi-mcp` executable should expose the same `openvlsilib` core functionality as
+`openvlsi` and `openvlsi-cli`.
 
 Potential tool categories:
 
@@ -1377,25 +1377,25 @@ run_benchmark
 install_package
 ```
 
-The MCP layer should call the same `icelib` APIs used by `ice` and `ice-cli`.
+The MCP layer should call the same `openvlsilib` APIs used by `openvlsi` and `openvlsi-cli`.
 
 It should **not** implement its own layout manipulation logic.
 
-Each ICE operation should map to an agentsdk-cpp tool handler (`tools/list` with pagination, `tools/call` with `isError` results). `resources/list` / `resources/read`, `prompts/list` / `prompts/get`, capability negotiation via the `initialize` handshake, and progress/cancellation notifications should be used where they fit instead of inventing new mechanisms.
+Each OpenVLSI operation should map to an agentsdk-cpp tool handler (`tools/list` with pagination, `tools/call` with `isError` results). `resources/list` / `resources/read`, `prompts/list` / `prompts/get`, capability negotiation via the `initialize` handshake, and progress/cancellation notifications should be used where they fit instead of inventing new mechanisms.
 
 ---
 
 ## 30. Agent Client Protocol Chatbox
 
-ICE should also contain an **Agent Client Protocol chatbox**, implemented with **agentsdk-cpp** (`agentsdk::acp::acp_client`, `acp_session`, `acp_agent_manager`).
+OpenVLSI should also contain an **Agent Client Protocol chatbox**, implemented with **agentsdk-cpp** (`agentsdk::acp::acp_client`, `acp_session`, `acp_agent_manager`).
 
-The chatbox is a user-facing AI interface inside ICE. It should drive a local coding agent as a subprocess over stdio JSON-RPC, discover agents on `PATH`, manage session state, and surface tool-call updates and permission prompts inside the ICE chat panel.
+The chatbox is a user-facing AI interface inside OpenVLSI. It should drive a local coding agent as a subprocess over stdio JSON-RPC, discover agents on `PATH`, manage session state, and surface tool-call updates and permission prompts inside the OpenVLSI chat panel.
 
 Conceptually:
 
 ```text
 ┌─────────────────────────────────────────────┐
-│ ICE                                         │
+│ OpenVLSI                                         │
 │                                             │
 │  Schematic / Layout / Simulation            │
 │                                             │
@@ -1428,8 +1428,8 @@ Agent:
 
 The chatbox should not have a separate private representation of the project.
 
-It should operate through the same `icelib` APIs exposed to `ice-cli` and
-`ice-mcp`.
+It should operate through the same `openvlsilib` APIs exposed to `openvlsi-cli` and
+`openvlsi-mcp`.
 
 ---
 
@@ -1438,7 +1438,7 @@ It should operate through the same `icelib` APIs exposed to `ice-cli` and
 The desired architecture is:
 
 ```text
-                          icelib
+                          openvlsilib
                             │
            ┌────────────────┼────────────────┐
            │                │                │
@@ -1450,7 +1450,7 @@ The desired architecture is:
                             │
              ┌──────────────┴──────────────┐
              │                             │
-        ice-mcp                  ACP Chatbox in ice
+        openvlsi-mcp                  ACP Chatbox in openvlsi
              │                             │
           External                   User-facing
           AI agents                     agent
@@ -1472,26 +1472,26 @@ This prevents AI functionality from becoming tightly coupled to the GUI.
 * Structured interchange
 * Potential RPC/API representations
 
-However, the serialized representation should remain an ICE-defined format rather than exposing implementation-specific third-party types.
+However, the serialized representation should remain an OpenVLSI-defined format rather than exposing implementation-specific third-party types.
 
 ---
 
 ## 33. Project Files
 
-An ICE project is a directory with one JSON project file and per-document JSON
+An OpenVLSI project is a directory with one JSON project file and per-document JSON
 files:
 
 ```text
 project/
-├── project.icepro       # project metadata only
+├── project.ovpro       # project metadata only
 ├── sch/
-│   └── <cell>.icesch    # one schematic cell per file
+│   └── <cell>.ovsch    # one schematic cell per file
 ├── lay/
-│   └── <cell>.icelay    # one layout cell or procedural layout per file
+│   └── <cell>.ovlay    # one layout cell or procedural layout per file
 ├── impl/
-│   └── <run>.iceimpl    # one RTL-to-GDS implementation run per file
+│   └── <run>.ovimpl    # one RTL-to-GDS implementation run per file
 ├── sim/
-│   └── <sim>.icesim     # one simulation per file
+│   └── <sim>.ovsim     # one simulation per file
 ├── scripts/
 │   └── <script>.py      # project-level simulation script
 ├── build/               # generated simulation/implementation artifacts, ignored by Git
@@ -1499,7 +1499,7 @@ project/
 └── AGENTS.md
 ```
 
-The `.icepro` file contains identity, name, units, grid, package
+The `.ovpro` file contains identity, name, units, grid, package
 dependencies, layer metadata, project-level simulation script associations, and
 an inventory of the sidecar files that belong to the project. It does not
 contain the sidecar objects themselves. The inventory lets `Project::load`
@@ -1515,7 +1515,7 @@ For example:
 ```text
 project
     │
-    ├── ICE version
+    ├── OpenVLSI version
     ├── PDK version
     ├── library versions
     ├── plugin versions
@@ -1524,7 +1524,7 @@ project
 
 This is important for reproducible simulation and layout results.
 
-While ICE is in development with no users, file-format migrations and backwards compatibility are explicitly non-goals. Formats may break between versions without migration paths; version stamps should be recorded so breakage is detectable, not so old files remain loadable.
+While OpenVLSI is in development with no users, file-format migrations and backwards compatibility are explicitly non-goals. Formats may break between versions without migration paths; version stamps should be recorded so breakage is detectable, not so old files remain loadable.
 
 ---
 
@@ -1604,7 +1604,7 @@ terminal-topology match; pin and net maps, parameter comparisons, typed object
 references, and layout bounds are included. Authored links remain stored on
 layout instances and planned devices, so the report is derived and does not
 create a second source of truth. Manual bind/unbind operations edit those
-fields through `icelib`, and `Project::validate()` reports stale or duplicate
+fields through `openvlsilib`, and `Project::validate()` reports stale or duplicate
 links. A layout cell may also carry one cell-level link to a schematic cell;
 LVS prefers it over name inference, which lets separately authored schematic
 and layout cells be paired explicitly. Geometry-extracted device anchors and
@@ -1632,7 +1632,7 @@ SPICE
 Post-layout results
 ```
 
-The extracted representation should be usable directly by the ICE simulation/benchmarking environment.
+The extracted representation should be usable directly by the OpenVLSI simulation/benchmarking environment.
 
 The current implementation is a first-order lumped extractor. It groups layout
 geometry with the same connectivity rules as the layout connectivity view,
@@ -1664,8 +1664,8 @@ is the Netgen/Magic-style extraction layer; PDK packages own their layer names,
 models, and extraction requirements. Verify the result with LVS before treating
 it as sign-off data.
 
-Use the GUI action **Tools → Run PEX** (F9), `ice-cli pex`, the MCP
-`pex_run` tool, or the Python `icepy.run_pex` helper. Coefficients are
+Use the GUI action **Tools → Run PEX** (F9), `openvlsi-cli pex`, the MCP
+`pex_run` tool, or the Python `openvlsipy.run_pex` helper. Coefficients are
 configurable through the API/MCP surfaces and are recorded in the generated
 deck so results remain traceable.
 
@@ -1673,7 +1673,7 @@ deck so results remain traceable.
 
 ## 37. Manual + Automated Design
 
-A central ICE philosophy should be that **automation and manual editing are not separate workflows**.
+A central OpenVLSI philosophy should be that **automation and manual editing are not separate workflows**.
 
 Instead:
 
@@ -1705,10 +1705,10 @@ All operations manipulate the same layout database.
 
 ## 38. Extensibility
 
-ICE should support experimental third-party plugins. During the pre-user
+OpenVLSI should support experimental third-party plugins. During the pre-user
 development phase, plugin APIs are allowed to change or break without
 compatibility shims or migration paths. Plugin authors should target a specific
-ICE build or source revision, and package metadata should record that target so
+OpenVLSI build or source revision, and package metadata should record that target so
 incompatibilities are detectable.
 
 Potential plugin capabilities:
@@ -1731,11 +1731,11 @@ Benchmark suites
 Plugin stability is intentionally deferred. Until a future release explicitly
 introduces a stable plugin API:
 
-- No API or ABI compatibility guarantee is made between ICE builds.
-- Plugins must declare the ICE build, source revision, or development API
+- No API or ABI compatibility guarantee is made between OpenVLSI builds.
+- Plugins must declare the OpenVLSI build, source revision, or development API
   snapshot they target.
-- `ice-pkg` should reject or warn about plugins whose declared target does not
-  match the installed ICE version.
+- `openvlsi-pkg` should reject or warn about plugins whose declared target does not
+  match the installed OpenVLSI version.
 - Plugin lifecycle hooks should still be explicit: discover, load, initialize,
   enable, disable, and unload where technically possible.
 - Plugin dependencies and required capabilities should be declared in package
@@ -1745,7 +1745,7 @@ introduces a stable plugin API:
   project integrity should prefer an out-of-process worker boundary.
 - Plugin failures must be reported and must not silently corrupt the project
   database.
-- Plugin operations must use `icelib` services rather than maintaining a
+- Plugin operations must use `openvlsilib` services rather than maintaining a
   competing project representation.
 
 API/ABI versioning, long-term capability negotiation, compatibility windows,
@@ -1763,7 +1763,7 @@ The architecture should maintain strict boundaries:
 GUI
  │
  ▼
-ICE Application API
+OpenVLSI Application API
  │
  ▼
 Domain Model
@@ -1789,7 +1789,7 @@ External dependencies should generally be accessed through adapters.
 For example:
 
 ```text
-ICE Layout Geometry
+OpenVLSI Layout Geometry
         │
         ▼
 Geometry Kernel Interface
@@ -1798,12 +1798,12 @@ Geometry Kernel Interface
 Clipper2 Backend
 ```
 
-rather than spreading Clipper2 types throughout ICE.
+rather than spreading Clipper2 types throughout OpenVLSI.
 
 Likewise:
 
 ```text
-ICE Simulation API
+OpenVLSI Simulation API
         │
         ▼
 ngspice Adapter
@@ -1815,7 +1815,7 @@ ngspice
 and:
 
 ```text
-ICE Analog Layout API
+OpenVLSI Analog Layout API
         │
         ▼
 ALIGN Adapter
@@ -1864,7 +1864,7 @@ Matplotlib
 Jupyter
 ```
 
-The user-facing ecosystem libraries are optional and should not become hard dependencies of the ICE executable.
+The user-facing ecosystem libraries are optional and should not become hard dependencies of the OpenVLSI executable.
 
 ### Developer tooling
 
@@ -1874,11 +1874,11 @@ doctest (C++ unit tests)
 Sphinx (documentation)
 ```
 
-These run at build/docs time only and should not become hard dependencies of the ICE executable.
+These run at build/docs time only and should not become hard dependencies of the OpenVLSI executable.
 
 ### Code quality and style
 
-ICE must be solid as rock. Production code should favor correctness,
+OpenVLSI must be solid as rock. Production code should favor correctness,
 determinism, explicit error handling, strong type safety, and clear ownership
 over shortcuts or fragile convenience abstractions. C++ and Qt code must follow
 the [Qt Coding Style](https://wiki.qt.io/Qt_Coding_Style); reviews and automated
@@ -1888,7 +1888,7 @@ format/style checks should enforce the project conventions as they are added.
 
 ## 41. Unified Workflow
 
-A complete ICE analog workflow should eventually look like:
+A complete OpenVLSI analog workflow should eventually look like:
 
 ```text
                     PDK
@@ -1918,7 +1918,7 @@ A complete ICE analog workflow should eventually look like:
              Initial layout
                      │
                      ▼
-              ICE Layout Editor
+              OpenVLSI Layout Editor
                      │
            ┌─────────┼─────────┐
            │         │         │
@@ -1987,17 +1987,17 @@ The AI layer should be capable of operating at multiple levels.
 "Optimize this design for gain and power while keeping the area below the target."
 ```
 
-The agent should use ICE's structured APIs rather than interacting with Qt widgets as if it were a human.
+The agent should use OpenVLSI's structured APIs rather than interacting with Qt widgets as if it were a human.
 
 ---
 
 ## 43. Long-Term Vision
 
-ICE should eventually function as a programmable IC design environment:
+OpenVLSI should eventually function as a programmable IC design environment:
 
 ```text
                      ┌───────────────┐
-                     │      ICE      │
+                     │      OpenVLSI      │
                      └───────┬───────┘
                              │
           ┌──────────────────┼──────────────────┐
@@ -2023,11 +2023,11 @@ ICE should eventually function as a programmable IC design environment:
 
 The most important architectural principle is:
 
-> **ICE should have one canonical design model and one set of core operations,
-> with `ice`, `ice-cli`, `ice-pkg`, `ice-mcp`, Python bindings, and the agent
-> chatbox all acting as different interfaces to `icelib`.**
+> **OpenVLSI should have one canonical design model and one set of core operations,
+> with `openvlsi`, `openvlsi-cli`, `openvlsi-pkg`, `openvlsi-mcp`, Python bindings, and the agent
+> chatbox all acting as different interfaces to `openvlsilib`.**
 
-That allows ICE to be simultaneously:
+That allows OpenVLSI to be simultaneously:
 
 * A traditional schematic/layout editor
 * A programmable layout environment

@@ -1,8 +1,8 @@
-#include "icelib/drc.hpp"
-#include "icelib/interchange.hpp"
-#include "icelib/operations.hpp"
-#include "icelib/pdk.hpp"
-#include "icelib/verification.hpp"
+#include "openvlsilib/drc.hpp"
+#include "openvlsilib/interchange.hpp"
+#include "openvlsilib/operations.hpp"
+#include "openvlsilib/pdk.hpp"
+#include "openvlsilib/verification.hpp"
 
 #include <doctest/doctest.h>
 
@@ -15,7 +15,7 @@
 #include <vector>
 
 TEST_CASE("package DRC deck configuration resolves KLayout decks and suites") {
-    const auto root = std::filesystem::temp_directory_path() / "ice-drc-package-test";
+    const auto root = std::filesystem::temp_directory_path() / "openvlsi-drc-package-test";
     std::filesystem::remove_all(root);
     const auto package = root / "testdrc";
     std::filesystem::create_directories(package / "technology");
@@ -34,7 +34,7 @@ display_name = "Test DRC"
 )";
     std::ofstream(package / "technology" / "test.lydrc") << "report(\"test\", $report)\n";
     std::ofstream(package / "technology" / "drc.json") << R"({
-  "format": "ice-drc",
+  "format": "openvlsi-drc",
   "schema_version": 1,
   "engine": "klayout",
   "deck": "test.lydrc",
@@ -46,21 +46,21 @@ display_name = "Test DRC"
     }
   }
 })";
-    ice::setPdkPackageRoots({root});
-    const auto mainDeck = ice::drcDeckForPdk("testdrc", "main");
+    openvlsi::setPdkPackageRoots({root});
+    const auto mainDeck = openvlsi::drcDeckForPdk("testdrc", "main");
     CHECK(mainDeck.has_value());
     if (mainDeck) {
         CHECK(mainDeck->engine == "klayout");
         CHECK(mainDeck->path.filename() == "test.lydrc");
         CHECK(mainDeck->arguments.size() == 3);
     }
-    const auto beolDeck = ice::drcDeckForPdk("testdrc", "beol");
+    const auto beolDeck = openvlsi::drcDeckForPdk("testdrc", "beol");
     CHECK(beolDeck.has_value());
     if (beolDeck) {
         CHECK(beolDeck->path.filename() == "test.lydrc");
         CHECK(beolDeck->arguments.size() == 5);
     }
-    ice::setPdkPackageRoots({});
+    openvlsi::setPdkPackageRoots({});
     std::filesystem::remove_all(root);
 }
 
@@ -111,10 +111,10 @@ TEST_CASE("gdscheck lyrdb reports become normalized DRC violations") {
 </report-database>
 )XML";
 
-    const auto report = ice::parseGdsCheckLyrdbText(text);
+    const auto report = openvlsi::parseGdsCheckLyrdbText(text);
     CHECK(report.drc.size() == 2);
     const auto &density = report.drc[0];
-    CHECK(density.severity == ice::VerificationSeverity::error);
+    CHECK(density.severity == openvlsi::VerificationSeverity::error);
     CHECK(density.rule == "M2.Fil");
     CHECK(density.cell == "TOP");
     CHECK(density.message.find("Minimum windowed density violation") != std::string::npos);
@@ -125,7 +125,7 @@ TEST_CASE("gdscheck lyrdb reports become normalized DRC violations") {
     CHECK(density.location.height == 4390);
 
     const auto &spacing = report.drc[1];
-    CHECK(spacing.severity == ice::VerificationSeverity::warning);
+    CHECK(spacing.severity == openvlsi::VerificationSeverity::warning);
     CHECK(spacing.rule == "M3.k");
     CHECK(spacing.message.find("Recommended spacing") != std::string::npos);
     CHECK(spacing.location.width == 0);
@@ -133,7 +133,7 @@ TEST_CASE("gdscheck lyrdb reports become normalized DRC violations") {
 }
 
 TEST_CASE("gdscheck lyrdb without items is a clean report") {
-    const auto report = ice::parseGdsCheckLyrdbText(
+    const auto report = openvlsi::parseGdsCheckLyrdbText(
         "<?xml version=\"1.0\"?><report-database><categories></categories><items></items></report-database>");
     CHECK(report.drc.empty());
     CHECK(report.lvs.empty());
@@ -141,14 +141,14 @@ TEST_CASE("gdscheck lyrdb without items is a clean report") {
 }
 
 TEST_CASE("layout GDS export writes gdscheck-compatible records") {
-    ice::Project project;
+    openvlsi::Project project;
     project.identity = "drc-gds";
     project.name = "drc-gds";
-    const auto cell = ice::createLayoutCell(project, "top", "ihp.sg13g2");
-    const auto layer = ice::addLayer(project, "Activ", 1);
-    ice::addRectangle(project, cell, layer, {0, 0, 1000, 1000});
-    const auto path = std::filesystem::temp_directory_path() / "ice-drc-export.gds";
-    ice::LayoutInterchange::exportGds(project, cell, path);
+    const auto cell = openvlsi::createLayoutCell(project, "top", "ihp.sg13g2");
+    const auto layer = openvlsi::addLayer(project, "Activ", 1);
+    openvlsi::addRectangle(project, cell, layer, {0, 0, 1000, 1000});
+    const auto path = std::filesystem::temp_directory_path() / "openvlsi-drc-export.gds";
+    openvlsi::LayoutInterchange::exportGds(project, cell, path);
     std::ifstream input(path, std::ios::binary);
     const std::vector<unsigned char> bytes((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
     std::filesystem::remove(path);
@@ -203,22 +203,22 @@ TEST_CASE("layout GDS export writes gdscheck-compatible records") {
 }
 
 TEST_CASE("flattened GDS export includes transformed instance geometry") {
-    ice::Project project;
+    openvlsi::Project project;
     project.identity = "flatten";
     project.name = "flatten";
-    const auto top = ice::createLayoutCell(project, "top", "ihp.sg13g2");
-    const auto device = ice::createLayoutCell(project, "device", "ihp.sg13g2");
+    const auto top = openvlsi::createLayoutCell(project, "top", "ihp.sg13g2");
+    const auto device = openvlsi::createLayoutCell(project, "device", "ihp.sg13g2");
     project.layoutCells.at(device).library = true;
     project.layoutCells.at(device).device = "nmos";
-    const auto layer = ice::addLayer(project, "Activ", 1);
-    ice::addRectangle(project, device, layer, {0, 0, 10, 20});
+    const auto layer = openvlsi::addLayer(project, "Activ", 1);
+    openvlsi::addRectangle(project, device, layer, {0, 0, 10, 20});
     const auto instance = project.nextId();
     project.layoutCells.at(top).instances.emplace(
-        instance, ice::LayoutInstance{instance, device, "device_1", 100, 50, ice::Orientation::r90});
+        instance, openvlsi::LayoutInstance{instance, device, "device_1", 100, 50, openvlsi::Orientation::r90});
 
-    const auto path = std::filesystem::temp_directory_path() / "ice-drc-flattened.gds";
-    ice::LayoutInterchange::exportFlattenedGds(project, top, path);
-    const auto imported = ice::LayoutInterchange::importGds(path);
+    const auto path = std::filesystem::temp_directory_path() / "openvlsi-drc-flattened.gds";
+    openvlsi::LayoutInterchange::exportFlattenedGds(project, top, path);
+    const auto imported = openvlsi::LayoutInterchange::importGds(path);
     std::filesystem::remove(path);
 
     CHECK(imported.layoutCells.size() == 1);
@@ -236,20 +236,20 @@ TEST_CASE("flattened GDS export includes transformed instance geometry") {
 }
 
 TEST_CASE("invalid lyrdb input is rejected") {
-    CHECK_THROWS_AS(ice::parseGdsCheckLyrdbText("<not-a-report/>"), ice::ProjectError);
+    CHECK_THROWS_AS(openvlsi::parseGdsCheckLyrdbText("<not-a-report/>"), openvlsi::ProjectError);
 }
 
 TEST_CASE("truncated lyrdb reports are rejected") {
-    CHECK_THROWS_AS(ice::parseGdsCheckLyrdbText("<report-database><items></items>"), ice::ProjectError);
+    CHECK_THROWS_AS(openvlsi::parseGdsCheckLyrdbText("<report-database><items></items>"), openvlsi::ProjectError);
     CHECK_THROWS_AS(
-        ice::parseGdsCheckLyrdbText("<report-database><categories></categories><items><item><category>A</category>"),
-        ice::ProjectError);
-    CHECK(ice::parseGdsCheckLyrdbText("<report-database><categories></categories><items></items></report-database>")
+        openvlsi::parseGdsCheckLyrdbText("<report-database><categories></categories><items><item><category>A</category>"),
+        openvlsi::ProjectError);
+    CHECK(openvlsi::parseGdsCheckLyrdbText("<report-database><categories></categories><items></items></report-database>")
               .drc.empty());
 }
 
 TEST_CASE("layout DRC rejects a nonzero tool exit with a clean report") {
-    const auto root = std::filesystem::temp_directory_path() / "ice-drc-status-test";
+    const auto root = std::filesystem::temp_directory_path() / "openvlsi-drc-status-test";
     std::filesystem::remove_all(root);
     std::filesystem::create_directories(root);
     const auto script = root / "gdscheck";
@@ -271,16 +271,16 @@ TEST_CASE("layout DRC rejects a nonzero tool exit with a clean report") {
     const auto previousPath = std::getenv("PATH") ? std::string(std::getenv("PATH")) : std::string{};
     setenv("PATH", (root.string() + ":" + previousPath).c_str(), 1);
 
-    ice::Project project;
+    openvlsi::Project project;
     project.identity = "drc-status";
     project.name = "drc-status";
-    const auto cell = ice::createLayoutCell(project, "top", "ihp.sg13g2");
-    const auto layer = ice::addLayer(project, "Activ", 1);
-    ice::addRectangle(project, cell, layer, {0, 0, 1000, 1000});
-    ice::LayoutDrcOptions options;
+    const auto cell = openvlsi::createLayoutCell(project, "top", "ihp.sg13g2");
+    const auto layer = openvlsi::addLayer(project, "Activ", 1);
+    openvlsi::addRectangle(project, cell, layer, {0, 0, 1000, 1000});
+    openvlsi::LayoutDrcOptions options;
     options.workDirectory = root / "work";
     options.engine = "gdscheck";
-    const auto result = ice::runLayoutDrc(project, cell, options);
+    const auto result = openvlsi::runLayoutDrc(project, cell, options);
 
     setenv("PATH", previousPath.c_str(), 1);
     std::filesystem::remove_all(root);
@@ -289,17 +289,17 @@ TEST_CASE("layout DRC rejects a nonzero tool exit with a clean report") {
 }
 
 TEST_CASE("package DRC configuration declares the gdscheck process") {
-    const auto ihp = ice::drcDeckForPdk("ihp-sg13g2");
+    const auto ihp = openvlsi::drcDeckForPdk("ihp-sg13g2");
     if (ihp) {
         CHECK(ihp->engine == "gdscheck");
         CHECK(ihp->process == "ihp-sg13g2");
     }
-    const auto gf = ice::drcDeckForPdk("gf180mcuA");
+    const auto gf = openvlsi::drcDeckForPdk("gf180mcuA");
     if (gf) {
         CHECK(gf->engine == "gdscheck");
         CHECK(gf->process == "gf180mcuA");
     }
-    const auto sky = ice::drcDeckForPdk("sky130A");
+    const auto sky = openvlsi::drcDeckForPdk("sky130A");
     if (sky) {
         CHECK(sky->engine == "klayout");
         CHECK(sky->process == "sky130A");
@@ -307,44 +307,44 @@ TEST_CASE("package DRC configuration declares the gdscheck process") {
 }
 
 TEST_CASE("gdscheck process and argument mapping is stable") {
-    CHECK(ice::gdsCheckProcessForPdk("ihp.sg13g2") == "ihp-sg13g2");
-    CHECK(ice::gdsCheckProcessForPdk("IHP SG13G2") == "ihp-sg13g2");
-    CHECK(ice::gdsCheckProcessForPdk("ihp.sg13cmos5l") == "ihp-sg13cmos5l");
-    CHECK(ice::gdsCheckProcessForPdk("gf180mcuA") == "gf180mcuA");
-    CHECK(ice::gdsCheckProcessForPdk("gf180mcuD") == "gf180mcuD");
-    CHECK(ice::gdsCheckProcessForPdk("icsprout55") == "icsprout55");
-    CHECK(ice::gdsCheckProcessForPdk(ice::genericPdkId).empty());
+    CHECK(openvlsi::gdsCheckProcessForPdk("ihp.sg13g2") == "ihp-sg13g2");
+    CHECK(openvlsi::gdsCheckProcessForPdk("IHP SG13G2") == "ihp-sg13g2");
+    CHECK(openvlsi::gdsCheckProcessForPdk("ihp.sg13cmos5l") == "ihp-sg13cmos5l");
+    CHECK(openvlsi::gdsCheckProcessForPdk("gf180mcuA") == "gf180mcuA");
+    CHECK(openvlsi::gdsCheckProcessForPdk("gf180mcuD") == "gf180mcuD");
+    CHECK(openvlsi::gdsCheckProcessForPdk("icsprout55") == "icsprout55");
+    CHECK(openvlsi::gdsCheckProcessForPdk(openvlsi::genericPdkId).empty());
 
-    const ice::GdsCheckOptions options{"/tmp/layout.gds", "/tmp/drc.lyrdb", "ihp-sg13g2", "TOP", "main"};
-    CHECK((ice::gdsCheckArguments(options) == std::vector<std::string>{"run", "--input", "/tmp/layout.gds", "--process",
+    const openvlsi::GdsCheckOptions options{"/tmp/layout.gds", "/tmp/drc.lyrdb", "ihp-sg13g2", "TOP", "main"};
+    CHECK((openvlsi::gdsCheckArguments(options) == std::vector<std::string>{"run", "--input", "/tmp/layout.gds", "--process",
                                                                        "ihp-sg13g2", "--topcell", "TOP", "--report",
                                                                        "/tmp/drc.lyrdb", "--suite", "main"}));
 }
 
 TEST_CASE("local verification checks port geometry and port shorts") {
-    ice::Project project;
+    openvlsi::Project project;
     project.identity = "pin-drc";
     project.name = "pin-drc";
     project.grid = 10;
-    const auto cell = ice::createLayoutCell(project, "top");
-    const auto layer = ice::addLayer(project, "Metal1", 8);
-    const auto power = ice::createLayoutNet(project, cell, "VDD");
-    const auto ground = ice::createLayoutNet(project, cell, "VSS");
-    ice::addRectangle(project, cell, layer, {0, 0, 4000, 4000});
-    ice::addPort(project, cell, "VDD", layer, {0, 0, 1000, 1000}, ice::PortDirection::power, ice::PortSide::left, power,
+    const auto cell = openvlsi::createLayoutCell(project, "top");
+    const auto layer = openvlsi::addLayer(project, "Metal1", 8);
+    const auto power = openvlsi::createLayoutNet(project, cell, "VDD");
+    const auto ground = openvlsi::createLayoutNet(project, cell, "VSS");
+    openvlsi::addRectangle(project, cell, layer, {0, 0, 4000, 4000});
+    openvlsi::addPort(project, cell, "VDD", layer, {0, 0, 1000, 1000}, openvlsi::PortDirection::power, openvlsi::PortSide::left, power,
                  "VDD");
-    ice::addPort(project, cell, "VSS", layer, {500, 500, 1000, 1000}, ice::PortDirection::ground, ice::PortSide::bottom,
+    openvlsi::addPort(project, cell, "VSS", layer, {500, 500, 1000, 1000}, openvlsi::PortDirection::ground, openvlsi::PortSide::bottom,
                  ground, "VSS");
-    ice::addPort(project, cell, "NARROW", layer, {2000, 2000, 1, 1000}, ice::PortDirection::input, ice::PortSide::right,
+    openvlsi::addPort(project, cell, "NARROW", layer, {2000, 2000, 1, 1000}, openvlsi::PortDirection::input, openvlsi::PortSide::right,
                  0, "NARROW");
-    ice::addPort(project, cell, "OUTSIDE", layer, {5000, 5000, 500, 500}, ice::PortDirection::output,
-                 ice::PortSide::right, 0, "OUTSIDE");
+    openvlsi::addPort(project, cell, "OUTSIDE", layer, {5000, 5000, 500, 500}, openvlsi::PortDirection::output,
+                 openvlsi::PortSide::right, 0, "OUTSIDE");
 
-    ice::LocalVerificationAdapter adapter;
+    openvlsi::LocalVerificationAdapter adapter;
     const auto report = adapter.run(project, cell);
     const auto hasRule = [&](const std::string &rule) {
         return std::any_of(report.drc.begin(), report.drc.end(),
-                           [&](const ice::DrcViolation &violation) { return violation.rule == rule; });
+                           [&](const openvlsi::DrcViolation &violation) { return violation.rule == rule; });
     };
     CHECK(hasRule("port-short"));
     CHECK(hasRule("port-min-width"));

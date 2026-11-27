@@ -1,8 +1,8 @@
-# ICE Vision
+# OpenVLSI Vision
 
 ## Purpose
 
-ICE is an open-source, extensible integrated-circuit design environment for
+OpenVLSI is an open-source, extensible integrated-circuit design environment for
 schematics, IC layout, simulation, analysis, automated layout, and programmable
 design workflows.
 
@@ -11,13 +11,13 @@ remaining compatible with established EDA backends and interchange formats.
 
 ## Core promise
 
-ICE has one canonical design model and one set of core operations. The main EDA
+OpenVLSI has one canonical design model and one set of core operations. The main EDA
 application, command-line tools, Python API, MCP server, agent chatbox, and
-plugins are different interfaces to the shared `icelib` core library.
+plugins are different interfaces to the shared `openvlsilib` core library.
 
 This means a design operation should not have separate implementations for each
-interface. The `ice`, `ice-cli`, and `ice-mcp` executables, Python bindings,
-and plugins should converge on the same validated `icelib` operation.
+interface. The `openvlsi`, `openvlsi-cli`, and `openvlsi-mcp` executables, Python bindings,
+and plugins should converge on the same validated `openvlsilib` operation.
 Interfaces may differ in interaction style, permissions, and presentation.
 
 ## Product principles
@@ -45,14 +45,14 @@ compatibility is intentionally deferred during early development.
 
 External tools and libraries should be accessed through adapters. Their types,
 file formats, and implementation-specific assumptions should not leak into the
-canonical ICE model.
+canonical OpenVLSI model.
 
 ### Extensible without fragmenting the core
 
 PDKs, generators, simulation backends, verification tools, package types, and
-AI integrations should be extensible without requiring forks of ICE or parallel
+AI integrations should be extensible without requiring forks of OpenVLSI or parallel
 representations of a design. A stable third-party plugin API is intentionally
-deferred until ICE has a substantial user and plugin base.
+deferred until OpenVLSI has a substantial user and plugin base.
 
 ### Safe automation
 
@@ -63,7 +63,7 @@ and auditable results.
 
 ### Solid engineering
 
-ICE code must be solid as rock: correct, deterministic, maintainable, and
+OpenVLSI code must be solid as rock: correct, deterministic, maintainable, and
 carefully tested. C++ and Qt code should follow the
 [Qt Coding Style](https://wiki.qt.io/Qt_Coding_Style), including its
 conventions for naming, formatting, structure, and readability. Exceptions
@@ -72,7 +72,7 @@ codebase.
 
 ## Intended user experience
 
-An ICE user should be able to:
+An OpenVLSI user should be able to:
 
 1. Create or import a schematic.
 2. Select devices and configure a PDK.
@@ -90,13 +90,13 @@ adding the larger ecosystem.
 
 ## Long-term direction
 
-ICE should become a programmable IC design environment composed of:
+OpenVLSI should become a programmable IC design environment composed of:
 
-- the main EDA application, `ice`;
-- the package manager, `ice-pkg`;
-- the command-line interface, `ice-cli`;
-- the MCP server, `ice-mcp`;
-- and the shared core library, `icelib`.
+- the main EDA application, `openvlsi`;
+- the package manager, `openvlsi-pkg`;
+- the command-line interface, `openvlsi-cli`;
+- the MCP server, `openvlsi-mcp`;
+- and the shared core library, `openvlsilib`.
 
 Together these provide:
 

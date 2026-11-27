@@ -1,33 +1,33 @@
-# ice-cli
+# openvlsi-cli
 
-`ice-cli` is the headless automation surface over the same `icelib` operations
+`openvlsi-cli` is the headless automation surface over the same `openvlsilib` operations
 used by the GUI, Python bindings, and MCP server. Successful commands print JSON
 to stdout; diagnostics and logs go to stderr.
 
 ## Project
 
 ```sh
-ice-cli project-create <folder|project.icepro> [name]
-ice-cli project-info [folder|project.icepro]
-ice-cli project-validate <folder|project.icepro>
-ice-cli project-trust <folder|project.icepro> <pdk|package> [trusted|untrusted]
-ice-cli project-repair <folder|project.icepro>
-ice-cli doctor [project] [--probe]
-ice-cli pdk-info [pdk] [--probe]
+openvlsi-cli project-create <folder|project.ovpro> [name]
+openvlsi-cli project-info [folder|project.ovpro]
+openvlsi-cli project-validate <folder|project.ovpro>
+openvlsi-cli project-trust <folder|project.ovpro> <pdk|package> [trusted|untrusted]
+openvlsi-cli project-repair <folder|project.ovpro>
+openvlsi-cli doctor [project] [--probe]
+openvlsi-cli pdk-info [pdk] [--probe]
 ```
 
-`project-create` initializes `project.icepro`, `sch/`, `lay/`, `sim/`,
+`project-create` initializes `project.ovpro`, `sch/`, `lay/`, `sim/`,
 `scripts/`, `build/`, `.gitignore`, and `AGENTS.md`. The generated `AGENTS.md`
 is written once when the project is created and is not rewritten on later
-saves. `project-info` can omit the path: ICE uses `ICE_PROJECT` or searches
-the current directory and its parents for a single `project.icepro`.
+saves. `project-info` can omit the path: OpenVLSI uses `OPENVLSI_PROJECT` or searches
+the current directory and its parents for a single `project.ovpro`.
 
-`ice-cli --version` prints the build fingerprint as JSON, including the git
+`openvlsi-cli --version` prints the build fingerprint as JSON, including the git
 commit, build time, executable path, and feature flags.
 
-`project-trust` stores the package name in `project.icepro` so procedural
+`project-trust` stores the package name in `project.ovpro` so procedural
 layouts in that project may execute the package's device generators without
-setting `ICE_ALLOW_PACKAGE_CODE`. Pass `untrusted` to remove the entry.
+setting `OPENVLSI_ALLOW_PACKAGE_CODE`. Pass `untrusted` to remove the entry.
 
 Project metadata and sidecar writes are atomic and guarded by a project lock
 and revision check. A CLI process that loaded an older revision fails with
@@ -47,32 +47,32 @@ when `ok` is false, so scripts and agents can fail fast on a broken PDK setup.
 ## Schematic
 
 ```sh
-ice-cli schematic-add-cell <project> <name> [pdk]
-ice-cli schematic-add-text <project> <name> [pdk] [spice-file]
-ice-cli schematic-add-text <project> <name> --pdk <pdk> --file <spice-file>
-ice-cli schematic-add-sv <project> <name> [pdk] [source-file]
-ice-cli schematic-set-text <project> <cell> [--kind text|systemverilog] [--source-path <path>] [--convert] <file|->
-ice-cli schematic-list <project>
-ice-cli schematic-info <project> <cell>
-ice-cli schematic-remove <project> <cell> [--dry-run] [--cascade]
-ice-cli schematic-add-symbol <project> <cell> <name> [source-cell] [--blank]
-ice-cli schematic-add-pin <project> <cell> <symbol> <name> [x] [y] [direction]
-ice-cli schematic-add-instance <project> <cell> <symbol> <name> <x> <y>
-ice-cli schematic-add-component <project> <cell> <type> [name] [x] [y] [param=value ...]
-ice-cli schematic-list-symbols [pdk] [query]
-ice-cli schematic-add-circuit <project> <cell> <json-file|->
-ice-cli schematic-set-parameter <project> <cell> <instance> <name> <value>
-ice-cli schematic-set-cell-parameter <project> <cell> <name> <value>
-ice-cli schematic-remove-cell-parameter <project> <cell> <name>
-ice-cli schematic-add-net <project> <cell> <name> <pin> <pin> ...
-ice-cli schematic-wrap <project> <cell> <instance> <instance> ... [--name <name>]
-ice-cli schematic-validate <project> <cell>
-ice-cli schematic-import-spice <project> <name> [--pdk <pdk>] [--mode text|drawn|auto] <file|->
-ice-cli schematic-hdl-ports <project> <cell>
-ice-cli schematic-add-hdl-instance <project> <cell> <source-cell> <name> <x> <y> [--flatten-buses]
-ice-cli schematic-add-spice-instance <project> <cell> <source-cell> <name> <x> <y>
-ice-cli schematic-validate-hierarchy <project> <cell>
-ice-cli schematic-netlist <project> <cell>   # includes the subcircuit port order
+openvlsi-cli schematic-add-cell <project> <name> [pdk]
+openvlsi-cli schematic-add-text <project> <name> [pdk] [spice-file]
+openvlsi-cli schematic-add-text <project> <name> --pdk <pdk> --file <spice-file>
+openvlsi-cli schematic-add-sv <project> <name> [pdk] [source-file]
+openvlsi-cli schematic-set-text <project> <cell> [--kind text|systemverilog] [--source-path <path>] [--convert] <file|->
+openvlsi-cli schematic-list <project>
+openvlsi-cli schematic-info <project> <cell>
+openvlsi-cli schematic-remove <project> <cell> [--dry-run] [--cascade]
+openvlsi-cli schematic-add-symbol <project> <cell> <name> [source-cell] [--blank]
+openvlsi-cli schematic-add-pin <project> <cell> <symbol> <name> [x] [y] [direction]
+openvlsi-cli schematic-add-instance <project> <cell> <symbol> <name> <x> <y>
+openvlsi-cli schematic-add-component <project> <cell> <type> [name] [x] [y] [param=value ...]
+openvlsi-cli schematic-list-symbols [pdk] [query]
+openvlsi-cli schematic-add-circuit <project> <cell> <json-file|->
+openvlsi-cli schematic-set-parameter <project> <cell> <instance> <name> <value>
+openvlsi-cli schematic-set-cell-parameter <project> <cell> <name> <value>
+openvlsi-cli schematic-remove-cell-parameter <project> <cell> <name>
+openvlsi-cli schematic-add-net <project> <cell> <name> <pin> <pin> ...
+openvlsi-cli schematic-wrap <project> <cell> <instance> <instance> ... [--name <name>]
+openvlsi-cli schematic-validate <project> <cell>
+openvlsi-cli schematic-import-spice <project> <name> [--pdk <pdk>] [--mode text|drawn|auto] <file|->
+openvlsi-cli schematic-hdl-ports <project> <cell>
+openvlsi-cli schematic-add-hdl-instance <project> <cell> <source-cell> <name> <x> <y> [--flatten-buses]
+openvlsi-cli schematic-add-spice-instance <project> <cell> <source-cell> <name> <x> <y>
+openvlsi-cli schematic-validate-hierarchy <project> <cell>
+openvlsi-cli schematic-netlist <project> <cell>   # includes the subcircuit port order
 ```
 
 Cells, symbols, pins, and instances may be referenced by name or id. Pins can
@@ -84,9 +84,9 @@ declares a parameter on the schematic cell itself; component values can then use
 SPICE brace expressions, and hierarchical instances can override the value:
 
 ```sh
-ice-cli schematic-set-cell-parameter project divider R 1k
-ice-cli schematic-set-parameter project divider R1 resistance '{R}'
-ice-cli schematic-set-parameter project top X1 R 2k
+openvlsi-cli schematic-set-cell-parameter project divider R 1k
+openvlsi-cli schematic-set-parameter project divider R1 resistance '{R}'
+openvlsi-cli schematic-set-parameter project top X1 R 2k
 ```
 
 The child subcircuit is emitted with `params: R=1k`, and the parent instance is
@@ -101,7 +101,7 @@ real artwork and pins for known library names (`RES`, `NMOS`, `VDD`, `GND`,
 returns its pin ids. `schematic-list-symbols` lists primitive and PDK symbols.
 The generic `Ports` library includes `Input`, `Output`, and the bidirectional
 `Pin`; add a pin with
-`ice-cli schematic-add-component project divider pin P1 0 0`, then connect its
+`openvlsi-cli schematic-add-component project divider pin P1 0 0`, then connect its
 `P1.PIN` pin to the desired net. `schematic-add-circuit` takes a JSON object such as
 `{"components":[{"type":"resistor","name":"R1","parameters":{"resistance":"1k"}}],
 "nets":[{"name":"out","pins":["R1.1","C1.1"]}]}`
@@ -143,7 +143,7 @@ The MCP equivalent is `schematic_create` with `kind: "text"` or
 `schematic_create_text`.
 
 `schematic-add-sv` creates a SystemVerilog source cell. The optional file is stored as its source; without a
-file, ICE inserts a small digital block template. `schematic-info` and
+file, OpenVLSI inserts a small digital block template. `schematic-info` and
 `schematic-list` report the `systemverilog` flag for these cells.
 `schematic-info` also includes each cell's `parameters` array and every
 instance's `parameters` array, including hierarchical block overrides.
@@ -170,43 +170,43 @@ layouts. A layout instance whose child uses a different PDK or stack is
 rejected.
 
 ```sh
-ice-cli layout-add-cell <project> <name> [pdk] [stack]
-ice-cli layout-add-procedural <project> <name> [pdk] [script-file] [stack]
-ice-cli layout-regenerate <project> <procedural> [timeout-seconds]
-ice-cli layout-set-parameter <project> <procedural> <name> <value>
-ice-cli layout-create-from-schematic <project> <schematic> [layout-name]
-ice-cli layout-list <project>
-ice-cli layout-info <project> <cell|procedural>
-ice-cli layout-review <project> <procedural> [--min-utilization <v>] [--max-gap-um <v>] [--require-composition] [--require-plan]
-ice-cli layout-get-script <project> <procedural>
-ice-cli layout-set-script <project> <procedural> <script-file|->
-ice-cli layout-remove <project> <cell|procedural> [--dry-run]
-ice-cli layout-add-layer <project> <name> <number> [datatype]
-ice-cli layout-add-rectangle <project> <cell> <layer> <x> <y> <width> <height>
-ice-cli layout-add-text <project> <cell> <layer> <x> <y> <text> [height]
-ice-cli layout-add-polygon <project> <cell> <layer> <x,y> <x,y> <x,y> ...
-ice-cli layout-add-port <project> <cell> <name> <layer> <x> <y> <width> <height> [port options]
-ice-cli layout-list-ports <project> <cell>
-ice-cli layout-update-port <project> <cell> <port> [port options]
-ice-cli layout-remove-port <project> <cell> <port>
-ice-cli layout-add-net <project> <cell> <name>
-ice-cli layout-assign-port-net <project> <cell> <port> <net|none>
-ice-cli layout-add-instance <project> <parent> <child> <name> <x> <y> [orientation]
-ice-cli layout-duplicate <project> <cell> <shape> <shape> ... [--dx <n>] [--dy <n>]
-ice-cli layout-array <project> <cell> <shape> <shape> ... --rows <n> --columns <n> [--x-pitch <n>] [--y-pitch <n>]
-ice-cli layout-arrange <project> <cell> <operation> <shape> <shape> ...
-ice-cli layout-bind-device <project> <layout> <layout-device> <schematic> <schematic-device>
-ice-cli layout-unbind-device <project> <layout> <layout-device>
-ice-cli layout-device-links <project> <layout> [--schematic <schematic>]
-ice-cli layout-link-schematic <project> <layout> <schematic>
-ice-cli layout-unlink-schematic <project> <layout>
-ice-cli layout-connectivity <project> <cell>
-ice-cli layout-export-gds <project> <cell> <output.gds|oas> [--flatten]
-ice-cli layout-export-lef <project> <cell> <output.lef>
-ice-cli layout-export-def <project> <cell> <output.def>
-ice-cli layout-import-gds <input.gds|oas> <project> [port-label-layer] [--top-cell <name>] [--force]
-ice-cli layout-import-lef <input.lef> <project> [--force]
-ice-cli layout-import-def <input.def> <project> [--force]
+openvlsi-cli layout-add-cell <project> <name> [pdk] [stack]
+openvlsi-cli layout-add-procedural <project> <name> [pdk] [script-file] [stack]
+openvlsi-cli layout-regenerate <project> <procedural> [timeout-seconds]
+openvlsi-cli layout-set-parameter <project> <procedural> <name> <value>
+openvlsi-cli layout-create-from-schematic <project> <schematic> [layout-name]
+openvlsi-cli layout-list <project>
+openvlsi-cli layout-info <project> <cell|procedural>
+openvlsi-cli layout-review <project> <procedural> [--min-utilization <v>] [--max-gap-um <v>] [--require-composition] [--require-plan]
+openvlsi-cli layout-get-script <project> <procedural>
+openvlsi-cli layout-set-script <project> <procedural> <script-file|->
+openvlsi-cli layout-remove <project> <cell|procedural> [--dry-run]
+openvlsi-cli layout-add-layer <project> <name> <number> [datatype]
+openvlsi-cli layout-add-rectangle <project> <cell> <layer> <x> <y> <width> <height>
+openvlsi-cli layout-add-text <project> <cell> <layer> <x> <y> <text> [height]
+openvlsi-cli layout-add-polygon <project> <cell> <layer> <x,y> <x,y> <x,y> ...
+openvlsi-cli layout-add-port <project> <cell> <name> <layer> <x> <y> <width> <height> [port options]
+openvlsi-cli layout-list-ports <project> <cell>
+openvlsi-cli layout-update-port <project> <cell> <port> [port options]
+openvlsi-cli layout-remove-port <project> <cell> <port>
+openvlsi-cli layout-add-net <project> <cell> <name>
+openvlsi-cli layout-assign-port-net <project> <cell> <port> <net|none>
+openvlsi-cli layout-add-instance <project> <parent> <child> <name> <x> <y> [orientation]
+openvlsi-cli layout-duplicate <project> <cell> <shape> <shape> ... [--dx <n>] [--dy <n>]
+openvlsi-cli layout-array <project> <cell> <shape> <shape> ... --rows <n> --columns <n> [--x-pitch <n>] [--y-pitch <n>]
+openvlsi-cli layout-arrange <project> <cell> <operation> <shape> <shape> ...
+openvlsi-cli layout-bind-device <project> <layout> <layout-device> <schematic> <schematic-device>
+openvlsi-cli layout-unbind-device <project> <layout> <layout-device>
+openvlsi-cli layout-device-links <project> <layout> [--schematic <schematic>]
+openvlsi-cli layout-link-schematic <project> <layout> <schematic>
+openvlsi-cli layout-unlink-schematic <project> <layout>
+openvlsi-cli layout-connectivity <project> <cell>
+openvlsi-cli layout-export-gds <project> <cell> <output.gds|oas> [--flatten]
+openvlsi-cli layout-export-lef <project> <cell> <output.lef>
+openvlsi-cli layout-export-def <project> <cell> <output.def>
+openvlsi-cli layout-import-gds <input.gds|oas> <project> [port-label-layer] [--top-cell <name>] [--force]
+openvlsi-cli layout-import-lef <input.lef> <project> [--force]
+openvlsi-cli layout-import-def <input.def> <project> [--force]
 ```
 
 Port options are `--direction input|output|inout|power|ground`, `--side
@@ -238,7 +238,7 @@ ground instances are rejected.
 schematic cell. This is a cell-level link, separate from per-device bindings.
 LVS and `lvs-auto` prefer it over name matching and planned-device inference,
 and the GUI shows the linked schematic in the layout hierarchy tooltip.
-`layout-unlink-schematic` removes it. The link is persisted in the `.icelay`
+`layout-unlink-schematic` removes it. The link is persisted in the `.ovlay`
 cell file.
 
 `layout-get-script` and `layout-set-script` read and replace a procedural
@@ -255,7 +255,7 @@ generation hashes, parameter values, and stale state. `layout-review` applies
 optional utilization, row-gap, composition, and plan checks to that stored
 metadata without regenerating the layout. `layout-set-parameter` edits a
 declared parameter without regenerating. `layout-export-gds` projects each
-visible port as a boundary plus a TEXT label on the ICE annotation stream layer
+visible port as a boundary plus a TEXT label on the OpenVLSI annotation stream layer
 when the port has no process-layer hint, and preserves reachable cell hierarchy
 by default; `--flatten` writes one structure instead. The output extension selects
 GDSII (`.gds`/`.gdsii`) or OASIS (`.oas`/`.oasis`); both are written natively
@@ -283,11 +283,11 @@ project unless `--force` is passed.
 
 `implementation-*` commands manage RTL-to-GDS runs. A run stores its configured
 top module, PDK, stack, RTL sources, constraints, and physical policy in
-`impl/*.iceimpl`; generated configuration and stage scripts are written under
+`impl/*.ovimpl`; generated configuration and stage scripts are written under
 `build/impl/<run>/`.
 
 ```sh
-ice-cli implementation-create <project> <name> --top <module> --pdk <pdk> \
+openvlsi-cli implementation-create <project> <name> --top <module> --pdk <pdk> \
   [--stack <stack>] [--source <file>]... [--source-cell <cell>]... \
   [--sdc <file>] [--std-cell-lib <name>] [--corner <corner>] \
   [--utilization <value>] [--aspect-ratio <value>] \
@@ -299,18 +299,18 @@ ice-cli implementation-create <project> <name> --top <module> --pdk <pdk> \
   [--cts-root-buffer <cell>] [--cts-buffers <a,b>] \
   [--routing-min-layer <layer>] [--routing-max-layer <layer>] [--no-antenna-repair] \
   [--seed <n>] [--timeout <seconds>]
-ice-cli implementation-update <project> <run> [--from <stage>] [implementation options]
-ice-cli implementation-list <project>
-ice-cli implementation-status <project> <run>
-ice-cli implementation-prepare <project> <run>
-ice-cli implementation-run <project> <run> [--from <stage>] [--to <stage>] [--timeout <seconds>] [--verbose]
-ice-cli implementation-map <project> <run> [--output <path>] [--verbose]
-ice-cli implementation-log <project> <run> [--stage <stage>] [--tail <lines>]
-ice-cli implementation-cancel <project> <run>
-ice-cli implementation-import <project> <run> [--layout-name <name>] [--replace]
-ice-cli implementation-export-gds <project> <run> [--output <path>]
-ice-cli implementation-toolchain
-ice-cli implementation-delete <project> <run> [--purge] [--dry-run]
+openvlsi-cli implementation-update <project> <run> [--from <stage>] [implementation options]
+openvlsi-cli implementation-list <project>
+openvlsi-cli implementation-status <project> <run>
+openvlsi-cli implementation-prepare <project> <run>
+openvlsi-cli implementation-run <project> <run> [--from <stage>] [--to <stage>] [--timeout <seconds>] [--verbose]
+openvlsi-cli implementation-map <project> <run> [--output <path>] [--verbose]
+openvlsi-cli implementation-log <project> <run> [--stage <stage>] [--tail <lines>]
+openvlsi-cli implementation-cancel <project> <run>
+openvlsi-cli implementation-import <project> <run> [--layout-name <name>] [--replace]
+openvlsi-cli implementation-export-gds <project> <run> [--output <path>]
+openvlsi-cli implementation-toolchain
+openvlsi-cli implementation-delete <project> <run> [--purge] [--dry-run]
 ```
 
 `implementation-create` resolves the package default stack when `--stack` is
@@ -333,17 +333,17 @@ generates:
 - `scripts/05-final.tcl`.
 
 `implementation-run` executes Yosys synthesis and then runs every physical
-stage through the required `ice-openroad` helper (next to `ice-cli`, or set
-through `ICE_OPENROAD_HELPER`), which uses the OpenROAD C++ APIs instead of
+stage through the required `openvlsi-openroad` helper (next to `openvlsi-cli`, or set
+through `OPENVLSI_OPENROAD_HELPER`), which uses the OpenROAD C++ APIs instead of
 generated Tcl. The Tcl stage scripts are still written for inspection, but they
-are not executed. The same helper provides read-only ODB tooling (`ice-openroad
-odb-info`, `ice-openroad odb-preview`) and native heat-map CSV export
-(`ice-openroad heatmap --kind placement|routing|power|pin|rudy|irdrop`). It is
-built with `xmake build ice-openroad` (also pulled in by `ice`, `ice-cli`, and
-`ice-mcp` on Linux) from the pinned OpenROAD/OpenSTA revisions; use
-`scripts/build-ice-openroad.sh --sdk-install <prefix>` for an SDK install. See
+are not executed. The same helper provides read-only ODB tooling (`openvlsi-openroad
+odb-info`, `openvlsi-openroad odb-preview`) and native heat-map CSV export
+(`openvlsi-openroad heatmap --kind placement|routing|power|pin|rudy|irdrop`). It is
+built with `xmake build openvlsi-openroad` (also pulled in by `openvlsi`, `openvlsi-cli`, and
+`openvlsi-mcp` on Linux) from the pinned OpenROAD/OpenSTA revisions; use
+`scripts/build-openvlsi-openroad.sh --sdk-install <prefix>` for an SDK install. See
 `openroad_sdk/README.md`. The helper is Linux-only by default; on Windows and
-macOS build with `ICE_ENABLE_OPENROAD=0`, which leaves the physical
+macOS build with `OPENVLSI_ENABLE_OPENROAD=0`, which leaves the physical
 implementation commands unavailable but keeps schematics, layout editing,
 simulation, packages, and MCP fully functional. Yosys synthesis is technology-independent and writes
 the generic `synth/1_synth.v` netlist. `implementation-map` then maps it to the platform
@@ -361,7 +361,7 @@ start/finish timestamps, status, merged log, artifact paths, and OpenROAD
 keeps the preceding ODB checkpoint intact, and rerunning from a stage resets
 only that stage and the stages after it.
 
-After `final`, ICE attempts to stream `def/6_final.def` plus the platform
+After `final`, OpenVLSI attempts to stream `def/6_final.def` plus the platform
 standard-cell GDS decks to `final/6_final.gds` with KLayout. Package stacks can
 declare a merged `gds` file and a `layer_map` that maps LEF/DEF layer names to
 the PDK's real GDS numbers; OpenROAD-flow-scripts platform fallbacks discover
@@ -391,21 +391,21 @@ reports the imported shape, port, net, and instance counts plus any pin
 extraction warnings.
 
 `implementation-toolchain` reports the resolved `openroad`, `yosys`, and
-`klayout` executables. Set `ICE_OPENROAD`, `ICE_YOSYS`, or `ICE_KLAYOUT` to
+`klayout` executables. Set `OPENVLSI_OPENROAD`, `OPENVLSI_YOSYS`, or `OPENVLSI_KLAYOUT` to
 override discovery.
 
-When a package declares `[pdk.implementation.orfs]`, ICE resolves missing LEF,
+When a package declares `[pdk.implementation.orfs]`, OpenVLSI resolves missing LEF,
 Liberty, site, IO-layer, routing, and OpenRCX rule defaults from
-`OPENROAD_FLOW_SCRIPTS`/`ICE_OPENROAD_FLOW_SCRIPTS`. The helper falls back to
+`OPENROAD_FLOW_SCRIPTS`/`OPENVLSI_OPENROAD_FLOW_SCRIPTS`. The helper falls back to
 `$HOME/repositories/OpenROAD-flow-scripts` for local development.
 
 ## Verification
 
 ```sh
-ice-cli lvs <project> <schematic> <layout>
-ice-cli lvs-auto <project> <layout>
-ice-cli pex <project> <layout> [schematic-name]
-ice-cli drc <project> <layout> [--no-flatten] [--output <dir>] [--suite <name>] \
+openvlsi-cli lvs <project> <schematic> <layout>
+openvlsi-cli lvs-auto <project> <layout>
+openvlsi-cli pex <project> <layout> [schematic-name]
+openvlsi-cli drc <project> <layout> [--no-flatten] [--output <dir>] [--suite <name>] \
   [--top-cell <name>] [--timeout <seconds>]
 ```
 
@@ -415,7 +415,7 @@ saved again. Use it when a hand-edited or partially written `sch/`, `lay/`,
 `impl/`, or `sim/` file prevents normal loading. Strict load errors now include the exact
 repair/recovery hint instead of requiring the user to guess.
 
-`ice-mcp --project <path> --recover` provides the same recovery at MCP startup.
+`openvlsi-mcp --project <path> --recover` provides the same recovery at MCP startup.
 Without `--recover`, a malformed startup project leaves the server running in a
 degraded state so `project_repair` and `project_open(recover=true)` remain
 callable.
@@ -470,17 +470,17 @@ generated cell name.
 
 ## PDK setup
 
-`ice-cli doctor [project]` reports installed PDK packages and whether each one
-is simulation-ready. `ice-cli pdk-info <pdk> --probe` shows the exact package
+`openvlsi-cli doctor [project]` reports installed PDK packages and whether each one
+is simulation-ready. `openvlsi-cli pdk-info <pdk> --probe` shows the exact package
 model directory, section names, OSDI/OpenVAF status, recommended setup lines,
 example device names, and runs a minimal transistor load check.
 
-Simulation PDKs come from ICE packages only. Volare, CIEL, `PDK_ROOT`, `PDK`,
+Simulation PDKs come from OpenVLSI packages only. Volare, CIEL, `PDK_ROOT`, `PDK`,
 and global `~/.spiceinit` files are not used. Install a PDK package with
-`ice-pkg`; if it uses Verilog-A models, build the OSDI cache once:
+`openvlsi-pkg`; if it uses Verilog-A models, build the OSDI cache once:
 
 ```sh
-ice-cli pdk-build ihp-sg13g2
+openvlsi-cli pdk-build ihp-sg13g2
 ```
 
 PDKs use different ngspice layouts: IHP has `models/cornerMOSlv.lib`, Sky130 has
@@ -494,54 +494,54 @@ root. The probe handles all three:
 - IHP SG13G2: `.lib ".../cornerMOSlv.lib" mos_tt`; devices such as
   `sg13_lv_nmos`. Do not `.include` `cornerMOSlv.lib`; its internal `.LIB`
   sections must be selected by a `.lib` call. PSP devices also need the
-  package's OSDI models; `pdk-build` compiles them and ICE loads them
+  package's OSDI models; `pdk-build` compiles them and OpenVLSI loads them
   explicitly for each simulation.
 
-If `doctor` reports `pdk_ready: false`, install or build the ICE PDK package
+If `doctor` reports `pdk_ready: false`, install or build the OpenVLSI PDK package
 before trying to simulate a transistor-level circuit.
 
 ## Simulation
 
 ```sh
-ice-cli simulation-add <project> <name> <schematic> [analysis] [stop] [step] [signals]
-ice-cli simulation-list <project>
-ice-cli simulation-remove <project> <simulation> [--dry-run]
-ice-cli simulation-configure <project> <simulation> [analysis options]
-ice-cli simulation-run <project> <simulation> [timeout-ms] [output.json]
-ice-cli simulation-experiment <project> <simulation> [timeout-ms] [--no-store] [--output file]
-ice-cli simulation-corner-defaults <project> <simulation>
-ice-cli simulation-corner-add <project> <simulation> <name> [--section s] [--temperature c] [--supply n=v]...
-ice-cli simulation-corner-list <project> <simulation>
-ice-cli simulation-corner-remove <project> <simulation> <name>
-ice-cli simulation-sweep-add <project> <simulation> <parameter> <value...>
-ice-cli simulation-sweep-list <project> <simulation>
-ice-cli simulation-sweep-remove <project> <simulation> <parameter>
-ice-cli simulation-monte-carlo <project> <simulation> [--samples n] [--temperature-sigma c] ...
-ice-cli simulation-measure-add <project> <simulation> <name> <metric> [--signal s] [--input s] ...
-ice-cli simulation-measure-list <project> <simulation>
-ice-cli simulation-measure-remove <project> <simulation> <name>
-ice-cli simulation-trace <project> <simulation> [signals] [max-points]
-ice-cli simulation-measure <project> <simulation> [signal] [threshold] \
+openvlsi-cli simulation-add <project> <name> <schematic> [analysis] [stop] [step] [signals]
+openvlsi-cli simulation-list <project>
+openvlsi-cli simulation-remove <project> <simulation> [--dry-run]
+openvlsi-cli simulation-configure <project> <simulation> [analysis options]
+openvlsi-cli simulation-run <project> <simulation> [timeout-ms] [output.json]
+openvlsi-cli simulation-experiment <project> <simulation> [timeout-ms] [--no-store] [--output file]
+openvlsi-cli simulation-corner-defaults <project> <simulation>
+openvlsi-cli simulation-corner-add <project> <simulation> <name> [--section s] [--temperature c] [--supply n=v]...
+openvlsi-cli simulation-corner-list <project> <simulation>
+openvlsi-cli simulation-corner-remove <project> <simulation> <name>
+openvlsi-cli simulation-sweep-add <project> <simulation> <parameter> <value...>
+openvlsi-cli simulation-sweep-list <project> <simulation>
+openvlsi-cli simulation-sweep-remove <project> <simulation> <parameter>
+openvlsi-cli simulation-monte-carlo <project> <simulation> [--samples n] [--temperature-sigma c] ...
+openvlsi-cli simulation-measure-add <project> <simulation> <name> <metric> [--signal s] [--input s] ...
+openvlsi-cli simulation-measure-list <project> <simulation>
+openvlsi-cli simulation-measure-remove <project> <simulation> <name>
+openvlsi-cli simulation-trace <project> <simulation> [signals] [max-points]
+openvlsi-cli simulation-measure <project> <simulation> [signal] [threshold] \
   [--metric gain|bandwidth|phase_margin|slew_rate|settling_time|power] \
   [--signal s] [--input s] [--voltage v] [--tolerance v]
-ice-cli simulation-graph-add <project> <simulation> <name> [x-axis] [y-signals]
-ice-cli simulation-graph-list <project> <simulation>
-ice-cli simulation-graph-info <project> <simulation> <graph>
-ice-cli simulation-graph-update <project> <simulation> <graph> [name] [x-axis] [y-signals] \
+openvlsi-cli simulation-graph-add <project> <simulation> <name> [x-axis] [y-signals]
+openvlsi-cli simulation-graph-list <project> <simulation>
+openvlsi-cli simulation-graph-info <project> <simulation> <graph>
+openvlsi-cli simulation-graph-update <project> <simulation> <graph> [name] [x-axis] [y-signals] \
   [--view linear|db|phase] [--fft on|off] [--fft-window w] [--fft-points n] \
   [--show-measurements on|off] [--derived name=expr] [--overlay run-id[=label]] \
   [--clear-derived] [--clear-overlays] [--clear-markers]
-ice-cli simulation-graph-derive <project> <simulation> <graph> <name> <expression>
-ice-cli simulation-graph-derive-remove <project> <simulation> <graph> <name>
-ice-cli simulation-graph-overlay <project> <simulation> <graph> <run-id> [label]
-ice-cli simulation-graph-overlay-remove <project> <simulation> <graph> <run-id>
-ice-cli simulation-graph-marker-add <project> <simulation> <graph> <label> <x> [--y v] [--signal s]
-ice-cli simulation-graph-marker-remove <project> <simulation> <graph> <label>
-ice-cli simulation-runs <project> [simulation]
-ice-cli simulation-graph-limits <project> <simulation> <graph> [x-min] [x-max] [y-min] [y-max]
-ice-cli simulation-graph-delete <project> <simulation> <graph>
-ice-cli simulate <project> <schematic> [stop] [step] [timeout-ms] [signals] [output.json]
-ice-cli simulate-netlist <netlist-file> [stop] [step] [timeout-ms] [signals] [output.json]
+openvlsi-cli simulation-graph-derive <project> <simulation> <graph> <name> <expression>
+openvlsi-cli simulation-graph-derive-remove <project> <simulation> <graph> <name>
+openvlsi-cli simulation-graph-overlay <project> <simulation> <graph> <run-id> [label]
+openvlsi-cli simulation-graph-overlay-remove <project> <simulation> <graph> <run-id>
+openvlsi-cli simulation-graph-marker-add <project> <simulation> <graph> <label> <x> [--y v] [--signal s]
+openvlsi-cli simulation-graph-marker-remove <project> <simulation> <graph> <label>
+openvlsi-cli simulation-runs <project> [simulation]
+openvlsi-cli simulation-graph-limits <project> <simulation> <graph> [x-min] [x-max] [y-min] [y-max]
+openvlsi-cli simulation-graph-delete <project> <simulation> <graph>
+openvlsi-cli simulate <project> <schematic> [stop] [step] [timeout-ms] [signals] [output.json]
+openvlsi-cli simulate-netlist <netlist-file> [stop] [step] [timeout-ms] [signals] [output.json]
 ```
 
 Time values accept SPICE-style engineering suffixes such as `1u`, `100n`, and
@@ -595,11 +595,11 @@ removed because the simulation definition supplies the analysis.
 `simulation-add` on a SystemVerilog cell stores the `iverilog` simulator and
 `digital` analysis automatically. `simulation-run` compiles the source with
 `iverilog`, runs `vvp`, and returns VCD-derived traces. The selected cell may
-instantiate modules defined in other project SystemVerilog cells; ICE follows
+instantiate modules defined in other project SystemVerilog cells; OpenVLSI follows
 those references and compiles the combined source. `digital` is accepted as
 an analysis alias when creating a simulation explicitly. Direct `simulate` on a
 SystemVerilog cell, and `simulate-netlist` on a `.sv` file, use the same backend.
-If the source has no `$dumpfile`/`$dumpvars`, ICE adds a wrapper module that
+If the source has no `$dumpfile`/`$dumpvars`, OpenVLSI adds a wrapper module that
 dumps the design; a testbench that never calls `$finish` is stopped after 10
 seconds and the partial VCD is kept.
 
@@ -640,17 +640,17 @@ CLI, and MCP display the same analysis.
 ## Simulation scripts
 
 ```sh
-ice-cli script-add <project> <name> [source-file]
-ice-cli script-list <project>
-ice-cli script-info <project> <script>
-ice-cli script-read <project> <script>
-ice-cli script-write <project> <script> <source-file|->
-ice-cli script-run <project> <script> [timeout-ms]
-ice-cli script-delete <project> <script> [--purge] [--dry-run]
+openvlsi-cli script-add <project> <name> [source-file]
+openvlsi-cli script-list <project>
+openvlsi-cli script-info <project> <script>
+openvlsi-cli script-read <project> <script>
+openvlsi-cli script-write <project> <script> <source-file|->
+openvlsi-cli script-run <project> <script> [timeout-ms]
+openvlsi-cli script-delete <project> <script> [--purge] [--dry-run]
 ```
 
 `script-add` creates a new Python file under `scripts/` from the built-in
-template, records it in `project.icepro`, and saves the project. An optional
+template, records it in `project.ovpro`, and saves the project. An optional
 source file replaces the template. Use `-` to read the source from stdin.
 
 `script-write` replaces an existing simulation script's source without changing
@@ -663,11 +663,11 @@ disk.
 The typical agent feedback loop is:
 
 ```sh
-ice-cli schematic-add-cell project top
-ice-cli simulation-add project tran1 top transient 1m 1u 'v(n1)'
-ice-cli simulation-graph-add project tran1 "Response" time 'v(n1)'
-ice-cli simulation-run project tran1
-ice-cli script-add project "RLC Comparison"
-ice-cli script-write project "RLC Comparison" script.py
-ice-cli script-run project "RLC Comparison"
+openvlsi-cli schematic-add-cell project top
+openvlsi-cli simulation-add project tran1 top transient 1m 1u 'v(n1)'
+openvlsi-cli simulation-graph-add project tran1 "Response" time 'v(n1)'
+openvlsi-cli simulation-run project tran1
+openvlsi-cli script-add project "RLC Comparison"
+openvlsi-cli script-write project "RLC Comparison" script.py
+openvlsi-cli script-run project "RLC Comparison"
 ```

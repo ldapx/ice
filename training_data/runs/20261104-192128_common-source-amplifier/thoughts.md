@@ -4,19 +4,19 @@
 - **Catalogue**: circuits.txt
 - **Model**: nvidia/nemotron-3-ultra-550b-a55b:free
 - **Started**: 2026-11-04 19:21:28 -03
-- **Run directory**: /home/gan/repos/ice/Training-data/runs/20261104-192128_common-source-amplifier
+- **Run directory**: /home/gan/repos/openvlsi/Training-data/runs/20261104-192128_common-source-amplifier
 
 This file is appended while the agent works, so an interrupted run keeps its reasoning on disk.
 
 ## Task
 
-Design **Common-source amplifier** as an ICE text-SPICE schematic, simulate it, and meet the proposed specifications. The harness builds the schematic, runs the simulation, measures every specification from the waveforms, and gives the agent the results.
+Design **Common-source amplifier** as an OpenVLSI text-SPICE schematic, simulate it, and meet the proposed specifications. The harness builds the schematic, runs the simulation, measures every specification from the waveforms, and gives the agent the results.
 
 ### System prompt
 
 ```
 You are an analogue and mixed-signal circuit design agent.
-ICE (an open-source schematic/layout/simulation tool) will store your netlist as
+OpenVLSI (an open-source schematic/layout/simulation tool) will store your netlist as
 a text-SPICE schematic and simulate it with ngspice.
 
 Design constraints:
@@ -27,7 +27,7 @@ Design constraints:
    behavioural blocks.
 3. Node 0 is ground. Every node needs a DC path to ground and a parallel
    capacitance when that is needed for convergence.
-4. Do not include .tran, .ac, .dc, .op, .end, .control or .meas cards: ICE
+4. Do not include .tran, .ac, .dc, .op, .end, .control or .meas cards: OpenVLSI
    supplies the transient analysis and computes measurements from the
    waveforms.
 5. Stimuli must be transient-friendly: SIN, PULSE, PWL or EXP. Oscillators need
@@ -230,7 +230,7 @@ Let me write the netlist.
 {
   "circuit": "Common-source amplifier",
   "topology_summary": "Single-stage NMOS common-source amplifier with voltage-divider bias (R1=100k, R2=200k), source degeneration resistor RS=1k bypassed by 10uF for AC gain, drain load RD=10k, and 10k load resistor. Coupling capacitors 1uF at input/output. Generic NMOS model with Kp=1mA/V², Vth=0.5V biased at 150uA for ~38dB midband gain.",
-  "design_notes": "1.8V supply limits headroom; bias set for VD=1.65V, VG=1.2V. Input amplitude 10mV at 1kHz keeps output within ~1.5Vpp swing. Source bypass capacitor sets low-frequency pole ~16Hz. Gain measured from sine-wave RMS ratio. No .tran/.ac cards included; ICE will run transient.",
+  "design_notes": "1.8V supply limits headroom; bias set for VD=1.65V, VG=1.2V. Input amplitude 10mV at 1kHz keeps output within ~1.5Vpp swing. Source bypass capacitor sets low-frequency pole ~16Hz. Gain measured from sine-wave RMS ratio. No .tran/.ac cards included; OpenVLSI will run transient.",
   "netlist": "* Common-source amplifier\nVDD vdd 0 1.8\nVin in 0 SIN(0 10m 1k)\n\n* Bias network\nR1 vdd gate 100k\nR2 gate 0 200k\n\n* Source degeneration with AC bypass\nRS source 0 1k\nCS source 0 10u\n\n* Drain load\nRD vdd drain 10k\n\n* Load resistor\nRL out 0 10k\n\n* Coupling capacitors\nCin in gate 1u\nCout drain out 1u\n\n* NMOS transistor\nM1 drain gate source 0 nmos\n\n.model nmos nmos(level=1 vto=0.5 kp=1m lambda=0.02 gamma=0.5 phi=0.7)\n\n.ic v(gate)=1.2 v(source)=1.05 v(drain)=1.65\n",
   "analysis": {"stop": "5m", "step": "1u"},
   "signals": ["v(in)", "v(out)", "v(gate)", "v(drain)", "v(source)"],
@@ -251,7 +251,7 @@ prompt_tokens=956, completion_tokens=3068, total_tokens=4024, cost=0, is_byok=Fa
 
 **Topology:** Single-stage NMOS common-source amplifier with voltage-divider bias (R1=100k, R2=200k), source degeneration resistor RS=1k bypassed by 10uF for AC gain, drain load RD=10k, and 10k load resistor. Coupling capacitors 1uF at input/output. Generic NMOS model with Kp=1mA/V², Vth=0.5V biased at 150uA for ~38dB midband gain.
 
-**Notes:** 1.8V supply limits headroom; bias set for VD=1.65V, VG=1.2V. Input amplitude 10mV at 1kHz keeps output within ~1.5Vpp swing. Source bypass capacitor sets low-frequency pole ~16Hz. Gain measured from sine-wave RMS ratio. No .tran/.ac cards included; ICE will run transient.
+**Notes:** 1.8V supply limits headroom; bias set for VD=1.65V, VG=1.2V. Input amplitude 10mV at 1kHz keeps output within ~1.5Vpp swing. Source bypass capacitor sets low-frequency pole ~16Hz. Gain measured from sine-wave RMS ratio. No .tran/.ac cards included; OpenVLSI will run transient.
 
 Netlist saved to `netlist_attempt1.sp`.
 
@@ -297,38 +297,38 @@ M1 drain gate source 0 nmos
 | DC drain voltage | steady_state | ~ 1.65 | n/a | measured |
 | DC gate voltage | steady_state | ~ 1.2 | n/a | measured |
 
-### ICE command
+### OpenVLSI command
 
 ```sh
-$ ice-cli project-create project project
+$ openvlsi-cli project-create project project
 ```
 
 exit 0 in 0.01s
 
 stderr:
 ```
-[2026-11-04 19:22:18.853] [ice-cli] [info] Saved project project/project.icepro
+[2026-11-04 19:22:18.853] [openvlsi-cli] [info] Saved project project/project.ovpro
 ```
 
 stdout:
 ```
 {
   "name": "project",
-  "path": "project/project.icepro"
+  "path": "project/project.ovpro"
 }
 ```
 
-### ICE command
+### OpenVLSI command
 
 ```sh
-$ ice-cli schematic-add-text project design_a1 generic /home/gan/repos/ice/Training-data/runs/20261104-192128_common-source-amplifier/netlist_attempt1.sp
+$ openvlsi-cli schematic-add-text project design_a1 generic /home/gan/repos/openvlsi/Training-data/runs/20261104-192128_common-source-amplifier/netlist_attempt1.sp
 ```
 
 exit 0 in 0.00s
 
 stderr:
 ```
-[2026-11-04 19:22:18.858] [ice-cli] [info] Saved project project/project.icepro
+[2026-11-04 19:22:18.858] [openvlsi-cli] [info] Saved project project/project.ovpro
 ```
 
 stdout:
@@ -341,17 +341,17 @@ stdout:
 }
 ```
 
-### ICE command
+### OpenVLSI command
 
 ```sh
-$ ice-cli simulation-add project sim_a1 design_a1 transient 5m 1u 'v(in),v(out),v(gate),v(drain),v(source)'
+$ openvlsi-cli simulation-add project sim_a1 design_a1 transient 5m 1u 'v(in),v(out),v(gate),v(drain),v(source)'
 ```
 
 exit 0 in 0.00s
 
 stderr:
 ```
-[2026-11-04 19:22:18.862] [ice-cli] [info] Saved project project/project.icepro
+[2026-11-04 19:22:18.862] [openvlsi-cli] [info] Saved project project/project.ovpro
 ```
 
 stdout:
@@ -365,10 +365,10 @@ stdout:
 }
 ```
 
-### ICE command
+### OpenVLSI command
 
 ```sh
-$ ice-cli simulation-run project sim_a1 120000
+$ openvlsi-cli simulation-run project sim_a1 120000
 ```
 
 exit 0 in 0.03s
@@ -601,7 +601,7 @@ Let's craft the JSON.
 {
   "circuit": "Common-source amplifier",
   "topology_summary": "Single-stage NMOS common-source amplifier with PMOS current-mirror active load. NMOS biased via voltage divider (R1=33k, R2=100k) and source resistor RS=1k bypassed by 10uF. PMOS mirror reference set by Rref=2k from bias node to ground. Output AC-coupled through 1uF to 1Meg load. Generic NMOS (Kp=1mA/V², Vth=0.5V) and PMOS (Kp=0.5mA/V², Vth=-0.5V) models. Bias current ~208uA, giving gm=0.65mS and output impedance ~120k for ~38dB gain.",
-  "design_notes": "Active load enables high gain (>30dB) and large swing (~1.5Vpp) within 1.8V supply. DC operating point: Vgate~1.35V, Vsource~0.2V, Vdrain~0.9V, Vbias~0.4V. Input amplitude 10mV at 1kHz. Coupling capacitors sized for <10Hz low-frequency poles. No .tran/.ac cards; ICE runs transient.",
+  "design_notes": "Active load enables high gain (>30dB) and large swing (~1.5Vpp) within 1.8V supply. DC operating point: Vgate~1.35V, Vsource~0.2V, Vdrain~0.9V, Vbias~0.4V. Input amplitude 10mV at 1kHz. Coupling capacitors sized for <10Hz low-frequency poles. No .tran/.ac cards; OpenVLSI runs transient.",
   "netlist": "* Common-source amplifier with PMOS active load\nVDD vdd 0 1.8\nVin in 0 SIN(0 10m 1k)\n\n* NMOS bias divider\nR1 vdd gate 33k\nR2 gate 0 100k\n\n* NMOS source degeneration with AC bypass\nRS source 0 1k\nCS source 0 10u\n\n* Input coupling capacitor\nCin in gate 1u\n\n* PMOS current mirror load\nRref bias 0 2k\nM2 bias bias vdd vdd pmos\nM3 drain bias vdd vdd pmos\n\n* NMOS amplifier\nM1 drain gate source 0 nmos\n\n* Output coupling and high-impedance load\nCout drain out 1u\nRL out 0 1Meg\n\n.model nmos nmos(level=1 vto=0.5 kp=1m lambda=0.02 gamma=0.5 phi=0.7)\n.model pmos pmos(level=1 vto=-0.5 kp=0.5m lambda=0.02 gamma=0.5 phi=0.7)\n\n.ic v(gate)=1.35 v(source)=0.2 v(drain)=0.9 v(bias)=0.4\n",
   "analysis": {"stop": "5m", "step": "1u"},
   "signals": ["v(in)", "v(out)", "v(gate)", "v(drain)", "v(source)", "v(bias)"],
@@ -622,7 +622,7 @@ prompt_tokens=1802, completion_tokens=11176, total_tokens=12978, cost=0, is_byok
 
 **Topology:** Single-stage NMOS common-source amplifier with PMOS current-mirror active load. NMOS biased via voltage divider (R1=33k, R2=100k) and source resistor RS=1k bypassed by 10uF. PMOS mirror reference set by Rref=2k from bias node to ground. Output AC-coupled through 1uF to 1Meg load. Generic NMOS (Kp=1mA/V², Vth=0.5V) and PMOS (Kp=0.5mA/V², Vth=-0.5V) models. Bias current ~208uA, giving gm=0.65mS and output impedance ~120k for ~38dB gain.
 
-**Notes:** Active load enables high gain (>30dB) and large swing (~1.5Vpp) within 1.8V supply. DC operating point: Vgate~1.35V, Vsource~0.2V, Vdrain~0.9V, Vbias~0.4V. Input amplitude 10mV at 1kHz. Coupling capacitors sized for <10Hz low-frequency poles. No .tran/.ac cards; ICE runs transient.
+**Notes:** Active load enables high gain (>30dB) and large swing (~1.5Vpp) within 1.8V supply. DC operating point: Vgate~1.35V, Vsource~0.2V, Vdrain~0.9V, Vbias~0.4V. Input amplitude 10mV at 1kHz. Coupling capacitors sized for <10Hz low-frequency poles. No .tran/.ac cards; OpenVLSI runs transient.
 
 Netlist saved to `netlist_attempt2.sp`.
 
@@ -671,17 +671,17 @@ RL out 0 1Meg
 | DC drain voltage | steady_state | ~ 0.9 | n/a | measured |
 | DC gate voltage | steady_state | ~ 1.35 | n/a | measured |
 
-### ICE command
+### OpenVLSI command
 
 ```sh
-$ ice-cli schematic-add-text project design_a2 generic /home/gan/repos/ice/Training-data/runs/20261104-192128_common-source-amplifier/netlist_attempt2.sp
+$ openvlsi-cli schematic-add-text project design_a2 generic /home/gan/repos/openvlsi/Training-data/runs/20261104-192128_common-source-amplifier/netlist_attempt2.sp
 ```
 
 exit 0 in 0.00s
 
 stderr:
 ```
-[2026-11-04 19:24:53.086] [ice-cli] [info] Saved project project/project.icepro
+[2026-11-04 19:24:53.086] [openvlsi-cli] [info] Saved project project/project.ovpro
 ```
 
 stdout:
@@ -694,17 +694,17 @@ stdout:
 }
 ```
 
-### ICE command
+### OpenVLSI command
 
 ```sh
-$ ice-cli simulation-add project sim_a2 design_a2 transient 5m 1u 'v(in),v(out),v(gate),v(drain),v(source),v(bias)'
+$ openvlsi-cli simulation-add project sim_a2 design_a2 transient 5m 1u 'v(in),v(out),v(gate),v(drain),v(source),v(bias)'
 ```
 
 exit 0 in 0.00s
 
 stderr:
 ```
-[2026-11-04 19:24:53.091] [ice-cli] [info] Saved project project/project.icepro
+[2026-11-04 19:24:53.091] [openvlsi-cli] [info] Saved project project/project.ovpro
 ```
 
 stdout:
@@ -718,10 +718,10 @@ stdout:
 }
 ```
 
-### ICE command
+### OpenVLSI command
 
 ```sh
-$ ice-cli simulation-run project sim_a2 120000
+$ openvlsi-cli simulation-run project sim_a2 120000
 ```
 
 exit 0 in 0.04s

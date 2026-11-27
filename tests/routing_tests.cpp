@@ -1,4 +1,4 @@
-#include "icelib/routing.hpp"
+#include "openvlsilib/routing.hpp"
 
 #include <doctest/doctest.h>
 
@@ -10,11 +10,11 @@
 namespace {
 constexpr double epsilon = 1.0e-6;
 
-bool samePoint(const ice::RoutePoint &first, const ice::RoutePoint &second) {
+bool samePoint(const openvlsi::RoutePoint &first, const openvlsi::RoutePoint &second) {
     return std::abs(first.x - second.x) <= epsilon && std::abs(first.y - second.y) <= epsilon;
 }
 
-int turnCount(const std::vector<ice::RoutePoint> &points) {
+int turnCount(const std::vector<openvlsi::RoutePoint> &points) {
     int turns = 0;
     int previousDirection = -1;
     for (std::size_t index = 1; index < points.size(); ++index) {
@@ -34,7 +34,7 @@ int turnCount(const std::vector<ice::RoutePoint> &points) {
     return turns;
 }
 
-bool orthogonal(const std::vector<ice::RoutePoint> &points) {
+bool orthogonal(const std::vector<openvlsi::RoutePoint> &points) {
     for (std::size_t index = 1; index < points.size(); ++index)
         if (std::abs(points[index].x - points[index - 1].x) > epsilon &&
             std::abs(points[index].y - points[index - 1].y) > epsilon)
@@ -42,7 +42,7 @@ bool orthogonal(const std::vector<ice::RoutePoint> &points) {
     return true;
 }
 
-bool segmentCrossesRect(const ice::RoutePoint &first, const ice::RoutePoint &second, const ice::RouteRect &rect) {
+bool segmentCrossesRect(const openvlsi::RoutePoint &first, const openvlsi::RoutePoint &second, const openvlsi::RouteRect &rect) {
     const double left = std::min(rect.left, rect.right);
     const double right = std::max(rect.left, rect.right);
     const double top = std::min(rect.top, rect.bottom);
@@ -62,19 +62,19 @@ bool segmentCrossesRect(const ice::RoutePoint &first, const ice::RoutePoint &sec
     return true;
 }
 
-bool pathCrossesRect(const std::vector<ice::RoutePoint> &points, const ice::RouteRect &rect) {
+bool pathCrossesRect(const std::vector<openvlsi::RoutePoint> &points, const openvlsi::RouteRect &rect) {
     for (std::size_t index = 1; index < points.size(); ++index)
         if (segmentCrossesRect(points[index - 1], points[index], rect))
             return true;
     return false;
 }
 
-double cross(const ice::RoutePoint &first, const ice::RoutePoint &second, const ice::RoutePoint &third) {
+double cross(const openvlsi::RoutePoint &first, const openvlsi::RoutePoint &second, const openvlsi::RoutePoint &third) {
     return (second.x - first.x) * (third.y - first.y) - (second.y - first.y) * (third.x - first.x);
 }
 
-bool segmentsIntersect(const ice::RoutePoint &a, const ice::RoutePoint &b, const ice::RoutePoint &c,
-                       const ice::RoutePoint &d) {
+bool segmentsIntersect(const openvlsi::RoutePoint &a, const openvlsi::RoutePoint &b, const openvlsi::RoutePoint &c,
+                       const openvlsi::RoutePoint &d) {
     const double first = cross(a, b, c);
     const double second = cross(a, b, d);
     const double third = cross(c, d, a);
@@ -82,7 +82,7 @@ bool segmentsIntersect(const ice::RoutePoint &a, const ice::RoutePoint &b, const
     if (((first > epsilon && second < -epsilon) || (first < -epsilon && second > epsilon)) &&
         ((third > epsilon && fourth < -epsilon) || (third < -epsilon && fourth > epsilon)))
         return true;
-    const auto onSegment = [](const ice::RoutePoint &start, const ice::RoutePoint &end, const ice::RoutePoint &point) {
+    const auto onSegment = [](const openvlsi::RoutePoint &start, const openvlsi::RoutePoint &end, const openvlsi::RoutePoint &point) {
         return point.x >= std::min(start.x, end.x) - epsilon && point.x <= std::max(start.x, end.x) + epsilon &&
                point.y >= std::min(start.y, end.y) - epsilon && point.y <= std::max(start.y, end.y) + epsilon;
     };
@@ -95,15 +95,15 @@ bool segmentsIntersect(const ice::RoutePoint &a, const ice::RoutePoint &b, const
     return std::abs(fourth) <= epsilon && onSegment(c, d, b);
 }
 
-bool pathCrossesSegment(const std::vector<ice::RoutePoint> &points, const ice::RouteSegment &segment) {
+bool pathCrossesSegment(const std::vector<openvlsi::RoutePoint> &points, const openvlsi::RouteSegment &segment) {
     for (std::size_t index = 1; index < points.size(); ++index)
         if (segmentsIntersect(points[index - 1], points[index], segment.start, segment.end))
             return true;
     return false;
 }
 
-bool pathCrossesStartExtension(const std::vector<ice::RoutePoint> &points, const ice::RoutePoint &pin,
-                               const ice::RoutePoint &exit) {
+bool pathCrossesStartExtension(const std::vector<openvlsi::RoutePoint> &points, const openvlsi::RoutePoint &pin,
+                               const openvlsi::RoutePoint &exit) {
     // The first segment is the extension itself. Every later segment must stay
     // clear of its interior; touching the exit endpoint is expected.
     for (std::size_t index = 2; index < points.size(); ++index) {
@@ -146,8 +146,8 @@ bool pathCrossesStartExtension(const std::vector<ice::RoutePoint> &points, const
     return false;
 }
 
-ice::SchematicRouteRequest horizontalRequest() {
-    ice::SchematicRouteRequest request;
+openvlsi::SchematicRouteRequest horizontalRequest() {
+    openvlsi::SchematicRouteRequest request;
     request.start = {0.0, 0.0};
     request.startExit = {30.0, 0.0};
     request.target = {100.0, 0.0};
@@ -163,7 +163,7 @@ TEST_CASE("schematic routing preserves pin extensions and uses right-angle segme
     request.target = {100.0, 0.0};
     request.targetExit = {70.0, 0.0};
 
-    const auto result = ice::routeSchematicWire(request);
+    const auto result = openvlsi::routeSchematicWire(request);
     CHECK(result.routed);
     CHECK(result.points.size() >= 4);
     CHECK(samePoint(result.points.front(), request.start));
@@ -179,7 +179,7 @@ TEST_CASE("schematic routing preserves pin extensions and uses right-angle segme
 
 TEST_CASE("schematic routing uses a straight line when the extensions face each other") {
     const auto request = horizontalRequest();
-    const auto result = ice::routeSchematicWire(request);
+    const auto result = openvlsi::routeSchematicWire(request);
     CHECK(result.routed);
     CHECK(orthogonal(result.points));
     CHECK(turnCount(result.points) == 0);
@@ -193,7 +193,7 @@ TEST_CASE("schematic routing avoids rectangular symbol bodies") {
     auto request = horizontalRequest();
     request.obstacleRects.push_back({40.0, -10.0, 60.0, 10.0});
 
-    const auto result = ice::routeSchematicWire(request);
+    const auto result = openvlsi::routeSchematicWire(request);
     CHECK(result.routed);
     CHECK(orthogonal(result.points));
     CHECK(!pathCrossesRect(result.points, request.obstacleRects.front()));
@@ -207,14 +207,14 @@ TEST_CASE("schematic routing treats symbol extension lines as obstacles") {
     auto request = horizontalRequest();
     request.obstacleSegments.push_back({{50.0, -50.0}, {50.0, 50.0}});
 
-    const auto result = ice::routeSchematicWire(request);
+    const auto result = openvlsi::routeSchematicWire(request);
     CHECK(result.routed);
     CHECK(orthogonal(result.points));
     CHECK(!pathCrossesSegment(result.points, request.obstacleSegments.front()));
 }
 
 TEST_CASE("schematic routing falls back when the start extension is enclosed") {
-    ice::SchematicRouteRequest request;
+    openvlsi::SchematicRouteRequest request;
     request.start = {0.0, 0.0};
     request.startExit = {0.0, 0.0};
     request.target = {100.0, 0.0};
@@ -222,7 +222,7 @@ TEST_CASE("schematic routing falls back when the start extension is enclosed") {
     request.obstacleRects = {
         {-20.0, -20.0, -10.0, 20.0}, {10.0, -20.0, 20.0, 20.0}, {-20.0, 10.0, 20.0, 20.0}, {-20.0, -20.0, 20.0, -10.0}};
 
-    const auto result = ice::routeSchematicWire(request);
+    const auto result = openvlsi::routeSchematicWire(request);
     CHECK(!result.routed);
     CHECK(result.points.size() >= 2);
     CHECK(samePoint(result.points.front(), request.start));
@@ -230,7 +230,7 @@ TEST_CASE("schematic routing falls back when the start extension is enclosed") {
 }
 
 TEST_CASE("schematic routing does not cross its own start extension") {
-    ice::SchematicRouteRequest request;
+    openvlsi::SchematicRouteRequest request;
     request.start = {0.0, 0.0};
     request.startExit = {-30.0, 0.0};
     request.target = {-15.0, 100.0};
@@ -239,20 +239,20 @@ TEST_CASE("schematic routing does not cross its own start extension") {
     // previously tempted the router to loop over the extension and cross it.
     request.obstacleRects.push_back({-40.0, 10.0, -20.0, 80.0});
 
-    const auto result = ice::routeSchematicWire(request);
+    const auto result = openvlsi::routeSchematicWire(request);
     CHECK(result.routed);
     CHECK(orthogonal(result.points));
     CHECK(!pathCrossesStartExtension(result.points, request.start, request.startExit));
 }
 
 TEST_CASE("schematic routing does not run along the destination extension to its pin") {
-    ice::SchematicRouteRequest request;
+    openvlsi::SchematicRouteRequest request;
     request.start = {84.0, 0.0};
     request.startExit = {54.0, 0.0};
     request.target = {-11.0, 0.0};
     request.targetExit = {-41.0, 0.0};
 
-    const auto result = ice::routeSchematicWire(request);
+    const auto result = openvlsi::routeSchematicWire(request);
     CHECK(result.routed);
     CHECK(orthogonal(result.points));
     // The route may pass behind the target pin, but it must not terminate on
@@ -262,7 +262,7 @@ TEST_CASE("schematic routing does not run along the destination extension to its
 }
 
 TEST_CASE("schematic routing keeps an endpoint reachable near a symbol boundary") {
-    ice::SchematicRouteRequest request;
+    openvlsi::SchematicRouteRequest request;
     request.start = {0.0, -7.0};
     request.startExit = {0.0, -37.0};
     request.target = {-4.0, 36.0};
@@ -274,20 +274,20 @@ TEST_CASE("schematic routing keeps an endpoint reachable near a symbol boundary"
     request.obstacleRects = {{-16.465, -15.41, 16.465, 15.41}, {-36.0, -36.0, 28.0, 44.0}};
     request.obstacleSegments = {{{-4.0, -28.0}, {-4.0, -58.0}}};
 
-    const auto result = ice::routeSchematicWire(request);
+    const auto result = openvlsi::routeSchematicWire(request);
     CHECK(result.routed);
     CHECK(orthogonal(result.points));
     CHECK(result.points[result.points.size() - 3].y > request.targetExit.y - epsilon);
 }
 
 TEST_CASE("schematic routing keeps clear of an extension longer than the pin separation") {
-    ice::SchematicRouteRequest request;
+    openvlsi::SchematicRouteRequest request;
     request.start = {0.0, -7.0};
     request.startExit = {0.0, -37.0};
     request.target = {0.0, 28.0};
     request.targetExit = {0.0, 58.0};
 
-    const auto result = ice::routeSchematicWire(request);
+    const auto result = openvlsi::routeSchematicWire(request);
     CHECK(result.routed);
     CHECK(orthogonal(result.points));
     // The extensions are longer than the vertical pin separation. The route
@@ -303,7 +303,7 @@ TEST_CASE("schematic routing keeps clear of an extension longer than the pin sep
 }
 
 TEST_CASE("schematic routing minimizes turns before distance") {
-    ice::SchematicRouteRequest request;
+    openvlsi::SchematicRouteRequest request;
     request.start = {-130.0, 0.0};
     request.startExit = {-100.0, 0.0};
     request.target = {100.0, 0.0};
@@ -312,7 +312,7 @@ TEST_CASE("schematic routing minimizes turns before distance") {
     // around both walls needs four turns but travels much farther.
     request.obstacleRects = {{-10.0, -100.0, 10.0, 5.0}, {15.0, -5.0, 35.0, 100.0}};
 
-    const auto result = ice::routeSchematicWire(request);
+    const auto result = openvlsi::routeSchematicWire(request);
     CHECK(result.routed);
     CHECK(orthogonal(result.points));
     CHECK(turnCount(result.points) == 4);
@@ -325,13 +325,13 @@ TEST_CASE("schematic routing minimizes turns before distance") {
 }
 
 TEST_CASE("schematic routing works for vertical pin directions") {
-    ice::SchematicRouteRequest request;
+    openvlsi::SchematicRouteRequest request;
     request.start = {0.0, 0.0};
     request.startExit = {0.0, -30.0};
     request.target = {200.0, 100.0};
     request.targetExit = {200.0, 70.0};
 
-    const auto result = ice::routeSchematicWire(request);
+    const auto result = openvlsi::routeSchematicWire(request);
     CHECK(result.routed);
     CHECK(orthogonal(result.points));
     CHECK(result.points.size() >= 4);
@@ -344,9 +344,9 @@ TEST_CASE("schematic routing works for vertical pin directions") {
 }
 
 TEST_CASE("schematic routing rejects invalid coordinates without crashing") {
-    ice::SchematicRouteRequest request = horizontalRequest();
+    openvlsi::SchematicRouteRequest request = horizontalRequest();
     request.start.x = std::numeric_limits<double>::quiet_NaN();
-    const auto invalid = ice::routeSchematicWire(request);
+    const auto invalid = openvlsi::routeSchematicWire(request);
     CHECK(invalid.points.empty());
     CHECK(!invalid.routed);
 
@@ -355,7 +355,7 @@ TEST_CASE("schematic routing rejects invalid coordinates without crashing") {
     inverted.obstacleRects.push_back({60.0, 10.0, 40.0, -10.0});
     inverted.obstacleSegments.push_back({{std::numeric_limits<double>::infinity(), 0.0}, {50.0, 50.0}});
     try {
-        (void)ice::routeSchematicWire(inverted);
+        (void)openvlsi::routeSchematicWire(inverted);
     } catch (...) {
         CHECK(false);
     }

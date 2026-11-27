@@ -1,4 +1,4 @@
-set_project("ice")
+set_project("openvlsi")
 set_version("0.1.0")
 set_languages("c++20")
 add_rules("mode.debug", "mode.release")
@@ -56,7 +56,7 @@ end
 local function pkg_search_dirs()
     local dirs = {}
     local separator = is_host("windows") and ";" or ":"
-    append_path_list(dirs, os.getenv("ICE_PKG_CONFIG_DIR"), separator)
+    append_path_list(dirs, os.getenv("OPENVLSI_PKG_CONFIG_DIR"), separator)
     append_path_list(dirs, os.getenv("PKG_CONFIG_PATH"), separator)
     append_path_list(dirs, os.getenv("PKG_CONFIG_LIBDIR"), separator)
     if is_host("windows") then
@@ -121,12 +121,12 @@ end
 
 -- Opt-in toggles. OpenROAD remains Linux-only by default because its helper is
 -- built with Bazel and the Bash build script; other platforms still build all
--- other ICE components. GUI and Python targets are skipped when their SDKs are
+-- other OpenVLSI components. GUI and Python targets are skipped when their SDKs are
 -- not available.
-local enable_openroad = env_bool("ICE_ENABLE_OPENROAD", is_linux)
-local build_gui = env_bool("ICE_BUILD_GUI", true)
+local enable_openroad = env_bool("OPENVLSI_ENABLE_OPENROAD", is_linux)
+local build_gui = env_bool("OPENVLSI_BUILD_GUI", true)
 
--- Bake a small build fingerprint into icelib so MCP clients can detect a
+-- Bake a small build fingerprint into openvlsilib so MCP clients can detect a
 -- long-lived server that was started before the last install.
 --
 -- The fingerprint must be stable across no-op xmake invocations. Deriving the
@@ -134,10 +134,10 @@ local build_gui = env_bool("ICE_BUILD_GUI", true)
 -- configuration change, invalidating all cached objects. Use the newest
 -- first-party source timestamp instead, and fall back to the clock only when
 -- no source files are available.
--- Set ICE_BUILD_COMMIT/ICE_BUILD_TIME explicitly for reproducible packaging.
-local build_commit = os.getenv("ICE_BUILD_COMMIT") or "unknown"
+-- Set OPENVLSI_BUILD_COMMIT/OPENVLSI_BUILD_TIME explicitly for reproducible packaging.
+local build_commit = os.getenv("OPENVLSI_BUILD_COMMIT") or "unknown"
 
-local build_time = os.getenv("ICE_BUILD_TIME")
+local build_time = os.getenv("OPENVLSI_BUILD_TIME")
 if not build_time then
     local latest_mtime = 0
     local fingerprint_files = {
@@ -167,11 +167,11 @@ local function define_string(name, value)
     return name .. '="' .. value .. '"'
 end
 
-local source_define = {define_string("ICE_SOURCE_DIR", os.projectdir())}
+local source_define = {define_string("OPENVLSI_SOURCE_DIR", os.projectdir())}
 local build_defines = {
-    define_string("ICE_BUILD_COMMIT", build_commit),
-    define_string("ICE_BUILD_TIME", build_time),
-    define_string("ICE_BUILD_TYPE", build_type),
+    define_string("OPENVLSI_BUILD_COMMIT", build_commit),
+    define_string("OPENVLSI_BUILD_TIME", build_time),
+    define_string("OPENVLSI_BUILD_TYPE", build_type),
 }
 
 -- Agent Client Protocol support. The normal build uses the bundled
@@ -229,7 +229,7 @@ end
 local openssl_package = find_pkg({"openssl"})
 append_package(core_packages, openssl_package)
 if not openssl_package then
-    local prefix = os.getenv("ICE_OPENSSL_PREFIX")
+    local prefix = os.getenv("OPENVLSI_OPENSSL_PREFIX")
     if prefix and os.isdir(prefix) then
         table.insert(fallback_includedirs, path.join(prefix, "include"))
         table.insert(fallback_linkdirs, path.join(prefix, "lib"))
@@ -248,7 +248,7 @@ local ngspice_package = find_pkg({"ngspice", "libngspice"})
 append_package(core_packages, ngspice_package)
 if not ngspice_package then
     local candidates = {}
-    local configured = os.getenv("ICE_NGSPICE_PREFIX")
+    local configured = os.getenv("OPENVLSI_NGSPICE_PREFIX")
     if configured and configured ~= "" then
         table.insert(candidates, configured)
     end
@@ -308,7 +308,7 @@ if build_gui and has_qt then
 elseif build_gui then
     -- The official Qt macOS packages are framework builds without .pc
     -- files. Accept an explicit SDK prefix and link the frameworks directly.
-    local prefix = os.getenv("ICE_QT_PREFIX")
+    local prefix = os.getenv("OPENVLSI_QT_PREFIX")
     if prefix and os.isdir(prefix) then
         local framework_dir = path.join(prefix, "lib")
         local modules = {"QtCore", "QtGui", "QtWidgets", "QtSvg", "QtSvgWidgets"}
@@ -331,7 +331,7 @@ elseif build_gui then
     end
 end
 if build_gui and not has_qt then
-    print("warning: Qt 6 (Widgets, Svg, SvgWidgets) was not found; skipping the ice GUI target")
+    print("warning: Qt 6 (Widgets, Svg, SvgWidgets) was not found; skipping the openvlsi GUI target")
     build_gui = false
 end
 
@@ -358,7 +358,7 @@ end
 -- target C headers. Add the sysroot include after the built-in dirs so
 -- <cstdlib>'s #include_next <stdlib.h> still finds it.
 local toolchain_cxxflags = {}
-local mingw_sysroot = os.getenv("ICE_MINGW_SYSROOT")
+local mingw_sysroot = os.getenv("OPENVLSI_MINGW_SYSROOT")
 if is_windows and mingw_sysroot and mingw_sysroot ~= "" then
     -- MSYS2 installs the C headers directly under <prefix>/include; older
     -- MinGW layouts use <prefix>/x86_64-w64-mingw32/include. Add only the
@@ -384,26 +384,26 @@ end
 -- and the ODB-backed previews. It is Linux-only in the default build because
 -- its pinned upstream toolchain is built with Bazel and Bash.
 if enable_openroad then
-    target("ice-openroad")
+    target("openvlsi-openroad")
         set_kind("phony")
         on_build(function (target)
             -- A phony target is never up to date, so this would otherwise re-run the
-            -- full OpenROAD Bazel build on every `xmake build/run ice`. Skip it once
-            -- the helper is installed; `xmake build -r ice-openroad` still forces a
+            -- full OpenROAD Bazel build on every `xmake build/run openvlsi`. Skip it once
+            -- the helper is installed; `xmake build -r openvlsi-openroad` still forces a
             -- rebuild.
-            if os.isfile(path.join(target:targetdir(), "ice-openroad")) then
+            if os.isfile(path.join(target:targetdir(), "openvlsi-openroad")) then
                 return
             end
             os.execv("bash", {
-                path.join(os.projectdir(), "scripts", "build-ice-openroad.sh"),
+                path.join(os.projectdir(), "scripts", "build-openvlsi-openroad.sh"),
                 "--output-dir", target:targetdir()
             })
         end)
 end
 
-target("icelib")
+target("openvlsilib")
     set_kind("static")
-    add_files("src/icelib/*.cpp")
+    add_files("src/openvlsilib/*.cpp")
     add_includedirs("include", {public = true})
     add_defines(source_define, {public = true})
     add_defines(build_defines, {public = true})
@@ -427,7 +427,7 @@ if has_agentsdk then
         set_kind("static")
         set_languages("c++20")
         add_files(path.join(agentsdk_dir, "src", "agentsdk", "**.cpp"))
-        -- The A2A HTTP server is POSIX-socket-only and is not used by ICE.
+        -- The A2A HTTP server is POSIX-socket-only and is not used by OpenVLSI.
         -- ACP and MCP remain available on every platform.
         remove_files(path.join(agentsdk_dir, "src", "agentsdk", "a2a", "server.cpp"))
         remove_files(path.join(agentsdk_dir, "src", "agentsdk", "a2a", "http", "http_listener.cpp"))
@@ -437,7 +437,7 @@ if has_agentsdk then
         for _, package in ipairs(agent_packages) do
             add_packages(package, {public = true})
         end
-        -- spdlog is public already through icelib for ICE targets, but the
+        -- spdlog is public already through openvlsilib for OpenVLSI targets, but the
         -- standalone SDK also needs it when built on its own.
         for _, package in ipairs(core_packages) do
             if package:find("spdlog") then
@@ -456,15 +456,15 @@ if has_agentsdk then
 end
 
 if build_gui then
-    target("ice")
+    target("openvlsi")
         set_kind("binary")
-        add_files("src/ice/*.cpp")
+        add_files("src/openvlsi/*.cpp")
         if is_windows then
-            add_files("assets/ice.rc")
+            add_files("assets/openvlsi.rc")
         end
-        add_deps("icelib")
+        add_deps("openvlsilib")
         if enable_openroad then
-            add_deps("ice-openroad")
+            add_deps("openvlsi-openroad")
         end
         add_defines(source_define)
         add_cxxflags(first_party_warnings)
@@ -485,7 +485,7 @@ if build_gui then
                 add_includedirs(include)
             end
         end
-        add_installfiles("assets/icons/tabs/*.svg", {prefixdir = "share/ice/icons/tabs"})
+        add_installfiles("assets/icons/tabs/*.svg", {prefixdir = "share/openvlsi/icons/tabs"})
         if is_linux then
             add_ldflags("-no-pie", {force = true})
             add_rpathdirs("$ORIGIN/../lib")
@@ -494,19 +494,19 @@ if build_gui then
         end
         if has_agentsdk then
             add_deps("agentsdk")
-            add_defines("ICE_HAVE_AGENTSDK=1")
+            add_defines("OPENVLSI_HAVE_AGENTSDK=1")
             for _, package in ipairs(agent_packages) do
                 add_packages(package)
             end
         end
 end
 
-target("ice-cli")
+target("openvlsi-cli")
     set_kind("binary")
-    add_files("src/ice-cli/main.cpp")
-    add_deps("icelib")
+    add_files("src/openvlsi-cli/main.cpp")
+    add_deps("openvlsilib")
     if enable_openroad then
-        add_deps("ice-openroad")
+        add_deps("openvlsi-openroad")
     end
     add_cxxflags(first_party_warnings)
     add_includedirs("include")
@@ -517,10 +517,10 @@ target("ice-cli")
         add_packages(package)
     end
 
-target("ice-pkg")
+target("openvlsi-pkg")
     set_kind("binary")
-    add_files("src/ice-pkg/main.cpp")
-    add_deps("icelib")
+    add_files("src/openvlsi-pkg/main.cpp")
+    add_deps("openvlsilib")
     add_cxxflags(first_party_warnings)
     add_includedirs("include")
     apply_toolchain_flags()
@@ -529,12 +529,12 @@ target("ice-pkg")
         add_packages(package)
     end
 
-target("ice-mcp")
+target("openvlsi-mcp")
     set_kind("binary")
-    add_files("src/ice-mcp/main.cpp")
-    add_deps("icelib")
+    add_files("src/openvlsi-mcp/main.cpp")
+    add_deps("openvlsilib")
     if enable_openroad then
-        add_deps("ice-openroad")
+        add_deps("openvlsi-openroad")
     end
     add_cxxflags(first_party_warnings)
     add_includedirs("include")
@@ -546,7 +546,7 @@ target("ice-mcp")
     end
     if has_agentsdk then
         add_deps("agentsdk")
-        add_defines("ICE_HAVE_AGENTSDK=1")
+        add_defines("OPENVLSI_HAVE_AGENTSDK=1")
         for _, package in ipairs(agent_packages) do
             add_packages(package)
         end
@@ -558,7 +558,7 @@ if not is_windows then
     target("doctest")
         set_kind("binary")
         add_files("tests/*.cpp")
-        add_deps("icelib")
+        add_deps("openvlsilib")
         add_cxxflags(first_party_warnings)
         add_includedirs("include")
         add_defines(source_define)
@@ -568,30 +568,30 @@ if not is_windows then
         end
 end
 
--- Optional Python bindings. Set ICE_PYTHON_INCLUDE, ICE_PYTHON_LIBDIR,
--- ICE_PYTHON_LIB, and NANOBIND_ROOT (or install nanobind into the selected
+-- Optional Python bindings. Set OPENVLSI_PYTHON_INCLUDE, OPENVLSI_PYTHON_LIBDIR,
+-- OPENVLSI_PYTHON_LIB, and NANOBIND_ROOT (or install nanobind into the selected
 -- Python) to enable this target on macOS/Windows as well.
-local python_version = os.getenv("ICE_PYTHON_VERSION") or "3.14"
-local python_include = os.getenv("ICE_PYTHON_INCLUDE") or ("/usr/include/python" .. python_version)
-local python_libdir = os.getenv("ICE_PYTHON_LIBDIR")
-local python_lib = os.getenv("ICE_PYTHON_LIB") or
+local python_version = os.getenv("OPENVLSI_PYTHON_VERSION") or "3.14"
+local python_include = os.getenv("OPENVLSI_PYTHON_INCLUDE") or ("/usr/include/python" .. python_version)
+local python_libdir = os.getenv("OPENVLSI_PYTHON_LIBDIR")
+local python_lib = os.getenv("OPENVLSI_PYTHON_LIB") or
                        (is_windows and ("python" .. python_version:gsub("%.", "")) or ("python" .. python_version))
 local nanobind_root = os.getenv("NANOBIND_ROOT") or
                           ("/usr/lib/python" .. python_version .. "/site-packages/nanobind")
 local has_python = os.isdir(python_include) and os.isdir(path.join(nanobind_root, "include")) and
                        os.isdir(path.join(nanobind_root, "src"))
-local build_python = env_bool("ICE_BUILD_PYTHON", has_python)
+local build_python = env_bool("OPENVLSI_BUILD_PYTHON", has_python)
 if build_python and not has_python then
-    print("warning: Python/nanobind headers were not found; skipping the icepy target")
+    print("warning: Python/nanobind headers were not found; skipping the openvlsipy target")
     build_python = false
 end
 
 if build_python then
-    target("icepy")
+    target("openvlsipy")
         set_kind("shared")
         set_prefixname("")
-        add_files("src/icepy/module.cpp", path.join(nanobind_root, "src", "nb_combined.cpp"))
-        add_deps("icelib")
+        add_files("src/openvlsipy/module.cpp", path.join(nanobind_root, "src", "nb_combined.cpp"))
+        add_deps("openvlsilib")
         add_defines(source_define)
         add_includedirs("include", python_include, path.join(nanobind_root, "include"), path.join(nanobind_root, "src"))
         apply_toolchain_flags()
@@ -606,11 +606,11 @@ if build_python then
         if is_linux then
             add_links("dl")
         end
-        add_installfiles("python/icepy_pcells.py", {prefixdir = "share/ice/python"})
-        add_installfiles("python/icepy_sim.py", {prefixdir = "share/ice/python"})
-        add_installfiles("assets/simulation/report_runner.py", {prefixdir = "share/ice/assets/simulation"})
-        add_installfiles("assets/layout/procedural_runner.py", {prefixdir = "share/ice/assets/layout"})
-        add_installfiles("assets/layout/generators/*.py", {prefixdir = "share/ice/assets/layout/generators"})
+        add_installfiles("python/openvlsipy_pcells.py", {prefixdir = "share/openvlsi/python"})
+        add_installfiles("python/openvlsipy_sim.py", {prefixdir = "share/openvlsi/python"})
+        add_installfiles("assets/simulation/report_runner.py", {prefixdir = "share/openvlsi/assets/simulation"})
+        add_installfiles("assets/layout/procedural_runner.py", {prefixdir = "share/openvlsi/assets/layout"})
+        add_installfiles("assets/layout/generators/*.py", {prefixdir = "share/openvlsi/assets/layout/generators"})
 end
 
 task("test")
@@ -622,16 +622,16 @@ task("test")
         os.exec("xmake build doctest")
         os.exec("xmake run doctest")
     end)
-    set_menu {usage = "Run the doctest-compatible icelib test target"}
+    set_menu {usage = "Run the doctest-compatible openvlsilib test target"}
 
 task("test-python")
     on_run(function ()
-        local python = os.getenv("ICE_PYTHON") or (is_host("windows") and "python" or "python3")
+        local python = os.getenv("OPENVLSI_PYTHON") or (is_host("windows") and "python" or "python3")
         local builddir = path.join(os.projectdir(), "build", os.host(), os.arch(), "release")
         os.exec(python .. " tests/mcp_tools_smoke.py")
-        os.exec("env PYTHONPATH=" .. builddir .. ":python " .. python .. " tests/icepy_api_tests.py")
-        os.exec("env PYTHONPATH=" .. builddir .. ":python " .. python .. " tests/icepy_smoke.py")
-        os.exec("env PYTHONPATH=" .. builddir .. ":python " .. python .. " tests/icepy_sim_tests.py")
+        os.exec("env PYTHONPATH=" .. builddir .. ":python " .. python .. " tests/openvlsipy_api_tests.py")
+        os.exec("env PYTHONPATH=" .. builddir .. ":python " .. python .. " tests/openvlsipy_smoke.py")
+        os.exec("env PYTHONPATH=" .. builddir .. ":python " .. python .. " tests/openvlsipy_sim_tests.py")
         os.exec("env PYTHONPATH=" .. builddir .. ":python " .. python .. " tests/package_pcells_test.py")
         os.exec(python .. " tests/procedural_composition_test.py")
         os.exec(python .. " tests/procedural_router_test.py")
@@ -653,7 +653,7 @@ task("docs")
 
 task("openroad-sdk")
     on_run(function ()
-        os.exec("bash scripts/build-ice-openroad.sh")
+        os.exec("bash scripts/build-openvlsi-openroad.sh")
     end)
     set_menu {usage = "Build the pinned C++ OpenROAD backend"}
 
@@ -661,9 +661,9 @@ task("openroad-sdk")
 -- Release packaging
 -- ---------------------------------------------------------------------------
 
-local xpack_targets = {"ice-cli", "ice-mcp", "ice-pkg"}
+local xpack_targets = {"openvlsi-cli", "openvlsi-mcp", "openvlsi-pkg"}
 if build_gui then
-    table.insert(xpack_targets, 1, "ice")
+    table.insert(xpack_targets, 1, "openvlsi")
 end
 
 local xpack_formats
@@ -675,32 +675,32 @@ else
     xpack_formats = {"targz", "zip"}
 end
 
-xpack("ice")
+xpack("openvlsi")
     set_formats(xpack_formats)
-    set_title("ICE - Integrated Circuits Electronics Design Automation")
+    set_title("OpenVLSI - Programmable Integrated-Circuit Design Environment")
     set_description("Schematic capture, IC layout, analog simulation, analysis, and programmable design workflows.")
-    set_homepage("https://github.com/ldapx/ice")
-    set_author("ICE contributors")
+    set_homepage("https://github.com/openvlsi/openvlsi")
+    set_author("OpenVLSI contributors")
     set_license("MIT")
     set_licensefile("LICENSE")
-    set_basename("ice-v$(version)-$(plat)-$(arch)")
-    set_iconfile("assets/ice.ico")
+    set_basename("openvlsi-v$(version)-$(plat)-$(arch)")
+    set_iconfile("assets/openvlsi.ico")
     add_targets(xpack_targets)
-    add_installfiles("symbols/*.svg", {prefixdir = "share/ice/symbols"})
-    add_installfiles("symbols/*.toml", {prefixdir = "share/ice/symbols"})
-    add_installfiles("assets/icons/(**)", {prefixdir = "share/ice/assets/icons"})
-    add_installfiles("assets/layout/(*.py)", {prefixdir = "share/ice/assets/layout"})
-    add_installfiles("assets/layout/generators/(*.py)", {prefixdir = "share/ice/assets/layout/generators"})
-    add_installfiles("assets/simulation/(*.py)", {prefixdir = "share/ice/assets/simulation"})
-    add_installfiles("assets/logo.png", {prefixdir = "share/ice/assets"})
-    add_installfiles("python/*.py", {prefixdir = "share/ice/python"})
-    add_installfiles("README.md", {prefixdir = "share/doc/ice"})
-    add_installfiles("LICENSE", {prefixdir = "share/doc/ice"})
+    add_installfiles("symbols/*.svg", {prefixdir = "share/openvlsi/symbols"})
+    add_installfiles("symbols/*.toml", {prefixdir = "share/openvlsi/symbols"})
+    add_installfiles("assets/icons/(**)", {prefixdir = "share/openvlsi/assets/icons"})
+    add_installfiles("assets/layout/(*.py)", {prefixdir = "share/openvlsi/assets/layout"})
+    add_installfiles("assets/layout/generators/(*.py)", {prefixdir = "share/openvlsi/assets/layout/generators"})
+    add_installfiles("assets/simulation/(*.py)", {prefixdir = "share/openvlsi/assets/simulation"})
+    add_installfiles("assets/logo.png", {prefixdir = "share/openvlsi/assets"})
+    add_installfiles("python/*.py", {prefixdir = "share/openvlsi/python"})
+    add_installfiles("README.md", {prefixdir = "share/doc/openvlsi"})
+    add_installfiles("LICENSE", {prefixdir = "share/doc/openvlsi"})
     if is_windows then
         -- Bundle the MSYS2/vcpkg runtime DLLs and Qt plugins next to the
         -- executables. Use the MSYS2 bash explicitly: Windows ships a WSL
         -- bash.exe in System32 that cannot run these scripts.
-        local windows_bash = os.getenv("ICE_BASH") or "bash"
+        local windows_bash = os.getenv("OPENVLSI_BASH") or "bash"
         after_installcmd(function (package, batchcmds)
             batchcmds:runv(windows_bash, {path.join(os.projectdir(), "scripts", "bundle-windows-runtime.sh"),
                                           package:installdir()})

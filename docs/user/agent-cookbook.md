@@ -1,7 +1,7 @@
-# ICE Agent Cookbook
+# OpenVLSI Agent Cookbook
 
-Practical recipes for agents using `ice-mcp` and `ice-cli`. For the full tool
-catalog, use `ice_help(topic=...)` or `ice-cli --help`.
+Practical recipes for agents using `openvlsi-mcp` and `openvlsi-cli`. For the full tool
+catalog, use `openvlsi_help(topic=...)` or `openvlsi-cli --help`.
 
 ## Open an existing project
 
@@ -10,18 +10,18 @@ MCP:
 ```text
 project_summary()
 project_open()                 # uses cwd/parent search when one candidate exists
-project_open(path="/work/design/project.icepro")
+project_open(path="/work/design/project.ovpro")
 ```
 
 `project_summary` returns `open:false`, candidate paths, and suggested calls
-when no project is loaded. Set `ICE_PROJECT` or pass `path` if more than one
+when no project is loaded. Set `OPENVLSI_PROJECT` or pass `path` if more than one
 project exists nearby.
 
 CLI:
 
 ```sh
-ICE_PROJECT=/work/design/project.icepro ice-cli project-info
-ice-cli project-info /work/design/project.icepro
+OPENVLSI_PROJECT=/work/design/project.ovpro openvlsi-cli project-info
+openvlsi-cli project-info /work/design/project.ovpro
 ```
 
 ## Build a small drawn RC circuit
@@ -52,12 +52,12 @@ simulation_trace(simulation="rc_tran", signals=["v(out)"], max_points=2000)
 CLI equivalent:
 
 ```sh
-ice-cli schematic-add-cell design top
-ice-cli schematic-add-circuit design top circuit.json
-ice-cli schematic-validate design top
-ice-cli simulation-add design rc_tran top transient 1u 1n v(out)
-ice-cli simulation-run design rc_tran
-ice-cli simulation-trace design rc_tran v(out) 2000
+openvlsi-cli schematic-add-cell design top
+openvlsi-cli schematic-add-circuit design top circuit.json
+openvlsi-cli schematic-validate design top
+openvlsi-cli simulation-add design rc_tran top transient 1u 1n v(out)
+openvlsi-cli simulation-run design rc_tran
+openvlsi-cli simulation-trace design rc_tran v(out) 2000
 ```
 
 `circuit.json`:
@@ -210,9 +210,9 @@ schematic_create(name="rc_text", kind="text", pdk="ihp-sg13g2",
                  text="* RC\nV1 in 0 PULSE(0 1 1n 1n 1n 10n 20n)\nR1 in out 1k\nC1 out 0 1n\n.end\n")
 ```
 
-ICE applies the package PDK setup automatically from the cell PDK. Do not copy
+OpenVLSI applies the package PDK setup automatically from the cell PDK. Do not copy
 another PDK's `.include`/`.lib` lines into the source. `simulation_run` returns
-the applied `pdk_setup` so you can verify what ICE injected.
+the applied `pdk_setup` so you can verify what OpenVLSI injected.
 
 You can also import a SPICE file:
 
@@ -388,7 +388,7 @@ annotations on the plot.
 
 ## PDK setup matrix
 
-ICE applies the package PDK setup automatically. `pdk_info` is authoritative;
+OpenVLSI applies the package PDK setup automatically. `pdk_info` is authoritative;
 this table is a quick reference.
 
 | PDK | Recommended entry | Notes |
@@ -399,7 +399,7 @@ this table is a quick reference.
 
 Do not copy one PDK’s include pattern into another PDK’s text schematic.
 `schematic_validate` warns about manual `.include`/`.lib` lines in text cells,
-and `simulation_run` returns the `pdk_setup` ICE actually applied.
+and `simulation_run` returns the `pdk_setup` OpenVLSI actually applied.
 
 ## Validate before simulating
 
@@ -440,8 +440,8 @@ them and cleans the removed HDL symbol pins from parent nets. Use
 | `schematic.component.value` | R/C/L/source has no value. | `schematic_set_parameter` with `resistance`, `capacitance`, `inductance`, or `value`. |
 | `schematic.symbol.pins` | A symbol has no pins; it cannot be wired or drawn usefully. | Recreate it with `schematic_add_component` or `schematic_add_hdl_instance`, or add pins explicitly. |
 | `schematic.symbol.artwork` | A symbol has no artwork and renders as a white placeholder. | Recreate it with `schematic_add_component`; known names auto-load library artwork. |
-| `schematic.pdk.missing` | The cell PDK is not installed. | `pdk_info`, install the ICE package, then `pdk_build` if OSDI is needed. |
-| `schematic.spice.pdk_manual` | Text SPICE contains manual `.include`/`.lib` setup. | Remove it; ICE applies the package setup from the cell PDK. |
+| `schematic.pdk.missing` | The cell PDK is not installed. | `pdk_info`, install the OpenVLSI package, then `pdk_build` if OSDI is needed. |
+| `schematic.spice.pdk_manual` | Text SPICE contains manual `.include`/`.lib` setup. | Remove it; OpenVLSI applies the package setup from the cell PDK. |
 | `hdl.mixed` | Mixed port/bit mapping is invalid. | Run `schematic_validate_hierarchy`; use `bus_mode="flatten"` or fix pin names. |
 | `simulation.result` | No stored run is available. | Run `simulation_run` without an external-only output path, then retry. |
 | `implementation.stage` | A Yosys/OpenROAD stage failed or a required artifact is missing. | Call `implementation_log` for that stage, fix the first actionable error, then rerun from the stage. |

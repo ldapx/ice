@@ -1,6 +1,6 @@
-#include "icelib/interchange.hpp"
-#include "icelib/operations.hpp"
-#include "icelib/process.hpp"
+#include "openvlsilib/interchange.hpp"
+#include "openvlsilib/operations.hpp"
+#include "openvlsilib/process.hpp"
 
 #include <doctest/doctest.h>
 
@@ -17,30 +17,30 @@
 
 namespace {
 struct InterchangeFixture {
-    ice::Project project;
-    ice::ObjectId cell = 0;
-    ice::ObjectId layer = 0;
-    ice::ObjectId net = 0;
-    ice::ObjectId input = 0;
-    ice::ObjectId output = 0;
+    openvlsi::Project project;
+    openvlsi::ObjectId cell = 0;
+    openvlsi::ObjectId layer = 0;
+    openvlsi::ObjectId net = 0;
+    openvlsi::ObjectId input = 0;
+    openvlsi::ObjectId output = 0;
 };
 
 InterchangeFixture makeFixture() {
     InterchangeFixture fixture;
     fixture.project.identity = "interchange";
     fixture.project.name = "interchange";
-    fixture.cell = ice::createLayoutCell(fixture.project, "top");
-    fixture.layer = ice::addLayer(fixture.project, "Metal1", 10);
-    fixture.net = ice::createLayoutNet(fixture.project, fixture.cell, "VIN");
-    fixture.input = ice::addPort(fixture.project, fixture.cell, "VIN", fixture.layer, {0, 0, 1000, 500},
-                                 ice::PortDirection::input, ice::PortSide::left, fixture.net, "VIN");
-    fixture.output = ice::addPort(fixture.project, fixture.cell, "VOUT", fixture.layer, {2000, 0, 500, 1000},
-                                  ice::PortDirection::output, ice::PortSide::right, 0, "VOUT");
+    fixture.cell = openvlsi::createLayoutCell(fixture.project, "top");
+    fixture.layer = openvlsi::addLayer(fixture.project, "Metal1", 10);
+    fixture.net = openvlsi::createLayoutNet(fixture.project, fixture.cell, "VIN");
+    fixture.input = openvlsi::addPort(fixture.project, fixture.cell, "VIN", fixture.layer, {0, 0, 1000, 500},
+                                 openvlsi::PortDirection::input, openvlsi::PortSide::left, fixture.net, "VIN");
+    fixture.output = openvlsi::addPort(fixture.project, fixture.cell, "VOUT", fixture.layer, {2000, 0, 500, 1000},
+                                  openvlsi::PortDirection::output, openvlsi::PortSide::right, 0, "VOUT");
     return fixture;
 }
 
 std::filesystem::path temporaryPath(const std::string &name) {
-    return std::filesystem::temp_directory_path() / ("ice-" + name);
+    return std::filesystem::temp_directory_path() / ("openvlsi-" + name);
 }
 
 std::optional<std::filesystem::path> findTool(const std::string &name) {
@@ -50,7 +50,7 @@ std::optional<std::filesystem::path> findTool(const std::string &name) {
             return path;
         return std::nullopt;
     };
-    std::string environmentName = "ICE_";
+    std::string environmentName = "OPENVLSI_";
     for (const char character : name)
         environmentName.push_back(static_cast<char>(std::toupper(static_cast<unsigned char>(character))));
     if (const auto *overridePath = std::getenv(environmentName.c_str()); overridePath && *overridePath) {
@@ -74,11 +74,11 @@ bool runKlayoutScript(const std::filesystem::path &script) {
     const auto klayout = findTool("klayout");
     if (!klayout)
         return false;
-    ice::ProcessOptions options;
+    openvlsi::ProcessOptions options;
     options.arguments = {klayout->string(), "-b", "-z", "-r", script.string()};
     options.logPath = script.parent_path() / (script.stem().string() + ".log");
     options.timeoutSeconds = 300;
-    return ice::runProcess(options).succeeded();
+    return openvlsi::runProcess(options).succeeded();
 }
 
 std::filesystem::path writeKlayoutScript(const std::string &name, const std::string &body) {
@@ -93,7 +93,7 @@ std::string readFile(const std::filesystem::path &path) {
     return std::string((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
 }
 
-const ice::Port *portNamed(const ice::Project &project, ice::ObjectId cell, const std::string &name) {
+const openvlsi::Port *portNamed(const openvlsi::Project &project, openvlsi::ObjectId cell, const std::string &name) {
     const auto &ports = project.layoutCells.at(cell).ports;
     const auto found =
         std::find_if(ports.begin(), ports.end(), [&](const auto &entry) { return entry.second.name == name; });
@@ -104,7 +104,7 @@ const ice::Port *portNamed(const ice::Project &project, ice::ObjectId cell, cons
 TEST_CASE("LEF export and import round-trip pin metadata") {
     auto fixture = makeFixture();
     const auto path = temporaryPath("pins.lef");
-    ice::LayoutInterchange::exportLef(fixture.project, fixture.cell, path);
+    openvlsi::LayoutInterchange::exportLef(fixture.project, fixture.cell, path);
     const auto text = readFile(path);
 
     CHECK(text.find("MACRO top") != std::string::npos);
@@ -113,7 +113,7 @@ TEST_CASE("LEF export and import round-trip pin metadata") {
     CHECK(text.find("LAYER Metal1") != std::string::npos);
     CHECK(text.find("RECT 0 0 1 0.5") != std::string::npos);
 
-    const auto imported = ice::LayoutInterchange::importLef(path);
+    const auto imported = openvlsi::LayoutInterchange::importLef(path);
     std::filesystem::remove(path);
     CHECK(imported.layoutCells.size() == 1);
     if (imported.layoutCells.size() != 1)
@@ -129,8 +129,8 @@ TEST_CASE("LEF export and import round-trip pin metadata") {
     CHECK(output != nullptr);
     if (!input || !output)
         return;
-    CHECK(input->direction == ice::PortDirection::input);
-    CHECK(output->direction == ice::PortDirection::output);
+    CHECK(input->direction == openvlsi::PortDirection::input);
+    CHECK(output->direction == openvlsi::PortDirection::output);
     CHECK(input->rectangle.x == 0);
     CHECK(input->rectangle.y == 0);
     CHECK(input->rectangle.width == 1000);
@@ -140,15 +140,15 @@ TEST_CASE("LEF export and import round-trip pin metadata") {
 }
 
 TEST_CASE("LEF exports purpose-layer pins on the base layer") {
-    ice::Project project;
+    openvlsi::Project project;
     project.identity = "lef-purpose";
     project.name = "lef-purpose";
-    const auto cell = ice::createLayoutCell(project, "top");
-    const auto layer = ice::addLayer(project, "Metal1.pin", 8, 0, {}, 2);
-    ice::addPort(project, cell, "A", layer, {0, 0, 1000, 1000}, ice::PortDirection::input, ice::PortSide::left);
+    const auto cell = openvlsi::createLayoutCell(project, "top");
+    const auto layer = openvlsi::addLayer(project, "Metal1.pin", 8, 0, {}, 2);
+    openvlsi::addPort(project, cell, "A", layer, {0, 0, 1000, 1000}, openvlsi::PortDirection::input, openvlsi::PortSide::left);
 
     const auto path = temporaryPath("purpose.lef");
-    ice::LayoutInterchange::exportLef(project, cell, path);
+    openvlsi::LayoutInterchange::exportLef(project, cell, path);
     const auto text = readFile(path);
     std::filesystem::remove(path);
     CHECK(text.find("LAYER Metal1 ;") != std::string::npos);
@@ -158,7 +158,7 @@ TEST_CASE("LEF exports purpose-layer pins on the base layer") {
 TEST_CASE("DEF export and import round-trip pins and nets") {
     auto fixture = makeFixture();
     const auto path = temporaryPath("pins.def");
-    ice::LayoutInterchange::exportDef(fixture.project, fixture.cell, path);
+    openvlsi::LayoutInterchange::exportDef(fixture.project, fixture.cell, path);
     const auto text = readFile(path);
 
     CHECK(text.find("DESIGN top") != std::string::npos);
@@ -166,7 +166,7 @@ TEST_CASE("DEF export and import round-trip pins and nets") {
     CHECK(text.find("- VIN + NET VIN") != std::string::npos);
     CHECK(text.find("+ DIRECTION OUTPUT") != std::string::npos);
 
-    const auto imported = ice::LayoutInterchange::importDef(path);
+    const auto imported = openvlsi::LayoutInterchange::importDef(path);
     std::filesystem::remove(path);
     CHECK(imported.layoutCells.size() == 1);
     if (imported.layoutCells.size() != 1)
@@ -182,8 +182,8 @@ TEST_CASE("DEF export and import round-trip pins and nets") {
     CHECK(output != nullptr);
     if (!input || !output)
         return;
-    CHECK(input->direction == ice::PortDirection::input);
-    CHECK(output->direction == ice::PortDirection::output);
+    CHECK(input->direction == openvlsi::PortDirection::input);
+    CHECK(output->direction == openvlsi::PortDirection::output);
     CHECK(input->net != 0);
     CHECK(cell.nets.at(input->net).name == "VIN");
     CHECK(input->rectangle.width == 1000);
@@ -193,16 +193,16 @@ TEST_CASE("DEF export and import round-trip pins and nets") {
 }
 
 TEST_CASE("GDS export and import preserve layer datatypes") {
-    ice::Project project;
+    openvlsi::Project project;
     project.identity = "gds-datatype";
     project.name = "gds-datatype";
-    const auto cell = ice::createLayoutCell(project, "top");
-    const auto layer = ice::addLayer(project, "Metal1.pin", 8, 0, {}, 2);
-    ice::addRectangle(project, cell, layer, {0, 0, 1000, 1000});
+    const auto cell = openvlsi::createLayoutCell(project, "top");
+    const auto layer = openvlsi::addLayer(project, "Metal1.pin", 8, 0, {}, 2);
+    openvlsi::addRectangle(project, cell, layer, {0, 0, 1000, 1000});
 
     const auto path = temporaryPath("datatype.gds");
-    ice::LayoutInterchange::exportGds(project, cell, path);
-    const auto imported = ice::LayoutInterchange::importGds(path);
+    openvlsi::LayoutInterchange::exportGds(project, cell, path);
+    const auto imported = openvlsi::LayoutInterchange::importGds(path);
     std::filesystem::remove(path);
 
     CHECK(imported.layoutCells.size() == 1);
@@ -219,19 +219,19 @@ TEST_CASE("GDS export and import preserve layer datatypes") {
 TEST_CASE("GDS import recovers pin labels when a label layer is configured") {
     auto fixture = makeFixture();
     const auto path = temporaryPath("pins.gds");
-    ice::LayoutInterchange::exportGds(fixture.project, fixture.cell, path);
+    openvlsi::LayoutInterchange::exportGds(fixture.project, fixture.cell, path);
 
-    const auto withoutPins = ice::LayoutInterchange::importGds(path);
+    const auto withoutPins = openvlsi::LayoutInterchange::importGds(path);
     CHECK(withoutPins.layoutCells.size() == 1);
     if (withoutPins.layoutCells.size() != 1)
         return;
     CHECK(withoutPins.layoutCells.begin()->second.ports.empty());
 
-    ice::LayoutImportOptions options;
+    openvlsi::LayoutImportOptions options;
     options.portLabelLayer = 10;
     options.portWidth = 2000;
     options.portHeight = 3000;
-    const auto withPins = ice::LayoutInterchange::importGds(path, options);
+    const auto withPins = openvlsi::LayoutInterchange::importGds(path, options);
     std::filesystem::remove(path);
     CHECK(withPins.layoutCells.size() == 1);
     if (withPins.layoutCells.size() != 1)
@@ -271,7 +271,7 @@ TEST_CASE("GDS import preserves paths, boxes, SREF, and AREF hierarchy") {
          << "layout.write(\"" << gds.generic_string() << "\")\n";
     const auto script = writeKlayoutScript("external-hierarchy", body.str());
     REQUIRE(runKlayoutScript(script));
-    const auto imported = ice::LayoutInterchange::importGds(gds);
+    const auto imported = openvlsi::LayoutInterchange::importGds(gds);
     std::filesystem::remove(gds);
     std::filesystem::remove(script);
     std::filesystem::remove(script.parent_path() / (script.stem().string() + ".log"));
@@ -292,7 +292,7 @@ TEST_CASE("GDS import preserves paths, boxes, SREF, and AREF hierarchy") {
     }
     CHECK(foundPath);
     CHECK(foundBox);
-    std::multiset<std::pair<ice::Coordinate, ice::Coordinate>> positions;
+    std::multiset<std::pair<openvlsi::Coordinate, openvlsi::Coordinate>> positions;
     for (const auto &[_, instance] : top.instances)
         positions.emplace(instance.x, instance.y);
     CHECK(positions.contains({4000, 0}));
@@ -315,7 +315,7 @@ TEST_CASE("GDS import scales database units to nanometres") {
          << "layout.write(\"" << gds.generic_string() << "\")\n";
     const auto script = writeKlayoutScript("units", body.str());
     REQUIRE(runKlayoutScript(script));
-    const auto imported = ice::LayoutInterchange::importGds(gds);
+    const auto imported = openvlsi::LayoutInterchange::importGds(gds);
     std::filesystem::remove(gds);
     std::filesystem::remove(script);
     std::filesystem::remove(script.parent_path() / (script.stem().string() + ".log"));
@@ -327,39 +327,39 @@ TEST_CASE("GDS import scales database units to nanometres") {
 }
 
 TEST_CASE("OASIS import and export preserve hierarchy and pins") {
-    ice::Project project;
+    openvlsi::Project project;
     project.identity = "oasis-hierarchy";
     project.name = "oasis-hierarchy";
-    const auto layer = ice::addLayer(project, "Metal1", 34);
-    const auto leaf = ice::createLayoutCell(project, "leaf");
-    ice::addRectangle(project, leaf, layer, ice::Rect{0, 0, 100, 100});
-    ice::addPort(project, leaf, "IN", layer, {0, 0, 10, 10}, ice::PortDirection::input, ice::PortSide::left, 0, "IN");
-    const auto parent = ice::createLayoutCell(project, "parent");
-    ice::addLayoutInstance(project, parent, leaf, "U1", 1000, 2000, ice::Orientation::r90);
+    const auto layer = openvlsi::addLayer(project, "Metal1", 34);
+    const auto leaf = openvlsi::createLayoutCell(project, "leaf");
+    openvlsi::addRectangle(project, leaf, layer, openvlsi::Rect{0, 0, 100, 100});
+    openvlsi::addPort(project, leaf, "IN", layer, {0, 0, 10, 10}, openvlsi::PortDirection::input, openvlsi::PortSide::left, 0, "IN");
+    const auto parent = openvlsi::createLayoutCell(project, "parent");
+    openvlsi::addLayoutInstance(project, parent, leaf, "U1", 1000, 2000, openvlsi::Orientation::r90);
 
     const auto oasis = temporaryPath("hierarchy.oas");
-    ice::LayoutInterchange::exportStream(project, parent, oasis, false);
-    ice::LayoutImportOptions options;
+    openvlsi::LayoutInterchange::exportStream(project, parent, oasis, false);
+    openvlsi::LayoutImportOptions options;
     options.portLabelLayer = 34;
-    const auto imported = ice::LayoutInterchange::importOasis(oasis, options);
+    const auto imported = openvlsi::LayoutInterchange::importOasis(oasis, options);
     CHECK(imported.layoutCells.size() == 2);
     const auto &top = imported.layoutCells.begin()->second;
     CHECK(top.name == "parent");
     REQUIRE(top.instances.size() == 1);
-    CHECK(top.instances.begin()->second.orientation == ice::Orientation::r90);
+    CHECK(top.instances.begin()->second.orientation == openvlsi::Orientation::r90);
     const auto child = imported.layoutCells.find(top.instances.begin()->second.cell);
     REQUIRE(child != imported.layoutCells.end());
     CHECK(child->second.name == "leaf");
     CHECK(child->second.ports.size() == 1);
 
-    const auto inMemoryFlat = ice::LayoutInterchange::flattenProject(imported, top.id);
+    const auto inMemoryFlat = openvlsi::LayoutInterchange::flattenProject(imported, top.id);
     REQUIRE(inMemoryFlat.layoutCells.size() == 1);
     CHECK(inMemoryFlat.layoutCells.begin()->second.instances.empty());
     CHECK(!inMemoryFlat.layoutCells.begin()->second.shapes.empty());
 
     const auto flat = temporaryPath("hierarchy-flat.oas");
-    ice::LayoutInterchange::exportStream(project, parent, flat, true);
-    const auto flattened = ice::LayoutInterchange::importStream(flat, options);
+    openvlsi::LayoutInterchange::exportStream(project, parent, flat, true);
+    const auto flattened = openvlsi::LayoutInterchange::importStream(flat, options);
     CHECK(flattened.layoutCells.size() == 1);
     CHECK(flattened.layoutCells.begin()->second.instances.empty());
     bool foundLeaf = false;
@@ -373,20 +373,20 @@ TEST_CASE("OASIS import and export preserve hierarchy and pins") {
 }
 
 TEST_CASE("OASIS instance orientations round-trip") {
-    const std::array<ice::Orientation, 8> orientations = {
-        ice::Orientation::r0, ice::Orientation::r90, ice::Orientation::r180, ice::Orientation::r270,
-        ice::Orientation::mx, ice::Orientation::my,  ice::Orientation::m45,  ice::Orientation::m135,
+    const std::array<openvlsi::Orientation, 8> orientations = {
+        openvlsi::Orientation::r0, openvlsi::Orientation::r90, openvlsi::Orientation::r180, openvlsi::Orientation::r270,
+        openvlsi::Orientation::mx, openvlsi::Orientation::my,  openvlsi::Orientation::m45,  openvlsi::Orientation::m135,
     };
     for (const auto orientation : orientations) {
-        ice::Project project;
+        openvlsi::Project project;
         project.identity = "oasis-orientation";
         project.name = "oasis-orientation";
-        const auto child = ice::createLayoutCell(project, "child");
-        const auto parent = ice::createLayoutCell(project, "parent");
-        ice::addLayoutInstance(project, parent, child, "U1", 100, 200, orientation);
+        const auto child = openvlsi::createLayoutCell(project, "child");
+        const auto parent = openvlsi::createLayoutCell(project, "parent");
+        openvlsi::addLayoutInstance(project, parent, child, "U1", 100, 200, orientation);
         const auto oasis = temporaryPath("orientation.oas");
-        ice::LayoutInterchange::exportStream(project, parent, oasis, false);
-        const auto imported = ice::LayoutInterchange::importStream(oasis);
+        openvlsi::LayoutInterchange::exportStream(project, parent, oasis, false);
+        const auto imported = openvlsi::LayoutInterchange::importStream(oasis);
         std::filesystem::remove(oasis);
         REQUIRE(imported.layoutCells.size() == 2);
         const auto &top = imported.layoutCells.begin()->second;
@@ -398,20 +398,20 @@ TEST_CASE("OASIS instance orientations round-trip") {
 }
 
 TEST_CASE("GDS export and import preserve simple path records") {
-    ice::Project project;
+    openvlsi::Project project;
     project.identity = "gds-path";
     project.name = "gds-path";
-    const auto layer = ice::addLayer(project, "Metal1", 34);
-    const auto cell = ice::createLayoutCell(project, "top");
+    const auto layer = openvlsi::addLayer(project, "Metal1", 34);
+    const auto cell = openvlsi::createLayoutCell(project, "top");
     const auto pathId = project.nextId();
-    ice::Shape path{pathId, layer, std::nullopt, {0, 0, 1000, 500}, {}};
+    openvlsi::Shape path{pathId, layer, std::nullopt, {0, 0, 1000, 500}, {}};
     path.centerline = {{0, 0}, {1000, 0}, {1000, 500}};
     path.width = 100;
     project.layoutCells.at(cell).shapes.emplace(pathId, path);
 
     const auto gds = temporaryPath("path.gds");
-    ice::LayoutInterchange::exportGds(project, cell, gds);
-    const auto imported = ice::LayoutInterchange::importGds(gds);
+    openvlsi::LayoutInterchange::exportGds(project, cell, gds);
+    const auto imported = openvlsi::LayoutInterchange::importGds(gds);
     std::filesystem::remove(gds);
     REQUIRE(imported.layoutCells.size() == 1);
     const auto &importedCell = imported.layoutCells.begin()->second;
@@ -425,20 +425,20 @@ TEST_CASE("GDS export and import preserve simple path records") {
 }
 
 TEST_CASE("GDS instance orientations round-trip") {
-    const std::array<ice::Orientation, 8> orientations = {
-        ice::Orientation::r0, ice::Orientation::r90, ice::Orientation::r180, ice::Orientation::r270,
-        ice::Orientation::mx, ice::Orientation::my,  ice::Orientation::m45,  ice::Orientation::m135,
+    const std::array<openvlsi::Orientation, 8> orientations = {
+        openvlsi::Orientation::r0, openvlsi::Orientation::r90, openvlsi::Orientation::r180, openvlsi::Orientation::r270,
+        openvlsi::Orientation::mx, openvlsi::Orientation::my,  openvlsi::Orientation::m45,  openvlsi::Orientation::m135,
     };
     for (const auto orientation : orientations) {
-        ice::Project project;
+        openvlsi::Project project;
         project.identity = "gds-orientation";
         project.name = "gds-orientation";
-        const auto child = ice::createLayoutCell(project, "child");
-        const auto parent = ice::createLayoutCell(project, "parent");
-        ice::addLayoutInstance(project, parent, child, "U1", 100, 200, orientation);
+        const auto child = openvlsi::createLayoutCell(project, "child");
+        const auto parent = openvlsi::createLayoutCell(project, "parent");
+        openvlsi::addLayoutInstance(project, parent, child, "U1", 100, 200, orientation);
         const auto gds = temporaryPath("orientation.gds");
-        ice::LayoutInterchange::exportGds(project, parent, gds);
-        const auto imported = ice::LayoutInterchange::importGds(gds);
+        openvlsi::LayoutInterchange::exportGds(project, parent, gds);
+        const auto imported = openvlsi::LayoutInterchange::importGds(gds);
         std::filesystem::remove(gds);
         REQUIRE(imported.layoutCells.size() == 2);
         const auto &top = imported.layoutCells.begin()->second;

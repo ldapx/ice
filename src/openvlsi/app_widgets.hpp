@@ -1,0 +1,478 @@
+#pragma once
+
+#include "agent_transcript.hpp"
+#include "openvlsilib/core.hpp"
+#include "openvlsilib/verification.hpp"
+
+#include <QAction>
+#include <QColor>
+#include <QDialog>
+#include <QElapsedTimer>
+#include <QSize>
+#include <QStackedWidget>
+#include <QStatusBar>
+#include <QStringList>
+#include <QWidget>
+
+#include <atomic>
+#include <deque>
+#include <filesystem>
+#include <functional>
+#include <map>
+#include <memory>
+#include <string>
+#include <utility>
+#include <vector>
+
+class QButtonGroup;
+class QComboBox;
+class QCheckBox;
+class QLabel;
+class QLineEdit;
+class QListWidget;
+class QPaintEvent;
+class QPlainTextEdit;
+class QProgressBar;
+class QPushButton;
+class QTableWidget;
+class QTabWidget;
+
+namespace openvlsi {
+struct DrcViolation;
+struct LvsMismatch;
+struct LvsReport;
+struct VerificationReport;
+} // namespace openvlsi
+
+struct LayerStyle;
+
+class DiagnosticsPanel : public QWidget {
+  public:
+    explicit DiagnosticsPanel(QWidget *parent = nullptr);
+};
+
+class ActivityPanel : public QWidget {
+  public:
+    explicit ActivityPanel(QWidget *parent = nullptr);
+    ~ActivityPanel() override;
+
+    void setProjectPath(const QString &path);
+    void setProjectChangedCallback(std::function<void()> callback);
+    void setOnDrcViolationActivated(std::function<void(const openvlsi::DrcViolation &)> callback);
+    void setDrcReport(const openvlsi::VerificationReport &report, const QString &reportPath = {});
+    void setDrcPreviewReport(const openvlsi::VerificationReport &report, const QString &stageLabel);
+    void setDrcRunning(const QString &message = {});
+    void setDrcError(const QString &message);
+    void showDrcTab();
+    void setLvsReport(const openvlsi::LvsReport &report);
+    void setOnLvsMismatchActivated(std::function<void(const openvlsi::LvsMismatch &)> callback);
+    void setOnLvsObjectActivated(std::function<void(const openvlsi::LvsObjectRef &)> callback) {
+        onLvsObjectActivated_ = std::move(callback);
+    }
+    void setOnLvsBindDevice(std::function<void(const openvlsi::LvsDeviceMatch &)> callback) {
+        onLvsBindDevice_ = std::move(callback);
+    }
+    void setOnLvsUnbindDevice(std::function<void(const openvlsi::LvsDeviceMatch &)> callback) {
+        onLvsUnbindDevice_ = std::move(callback);
+    }
+    void setOnLvsPromoteDevice(std::function<void(const openvlsi::LvsDeviceMatch &)> callback) {
+        onLvsPromoteDevice_ = std::move(callback);
+    }
+    void setLvsError(const QString &message);
+    void showLvsTab();
+    void setOnGenerateTimingReport(std::function<void()> callback) { onGenerateTimingReport_ = std::move(callback); }
+    void setTimingMetrics(const std::vector<std::pair<QString, QString>> &metrics);
+    void setTimingReport(const QString &report, const QString &error = {});
+    void showTimingTab();
+    void showAgentTab();
+    void appendMessage(const QString &message);
+    void showMessagesTab();
+    QString startJob(const QString &title, const QString &stage, const QString &detail = {});
+    void updateJobStatus(const QString &id, const QString &status, const QString &detail = {});
+    void updateJobStage(const QString &id, const QString &stage);
+    void updateJobDetail(const QString &id, const QString &detail);
+    void finishJob(const QString &id, bool success, const QString &detail = {});
+    void showJobsTab();
+    void setOnCancelJob(std::function<void(const QString &)> callback) { onCancelJob_ = std::move(callback); }
+
+  private:
+    struct AgentBackend;
+    struct AgentToolCall {
+        QString title;
+        QString kind;
+        QString command;
+        QString output;
+        QString path;
+        QVector<AgentQuestion> questions;
+    };
+    struct AgentSession {
+        std::string acpSessionId;
+        QString label;
+        AgentTranscriptView *transcript = nullptr;
+        QString configOptionsJson;
+        QString modelConfigId;
+        QString pendingUserText;
+        std::map<std::string, AgentToolCall> toolCalls;
+        std::map<QString, qint64> countedToolChars;
+        QElapsedTimer turnTimer;
+        int pendingReads = 0;
+        qint64 used = 0;
+        qint64 size = 0;
+        // Live progress for the running turn.  ACP agents commonly report
+        // `usage_update` only at the end of a turn, so the panel estimates
+        // the context growth from the streamed text and reconciles it with
+        // the authoritative value when the agent reports one.
+        qint64 turnBaseUsed = 0;
+        qint64 streamedChars = 0;
+        bool turnUsageReported = false;
+        bool modelAvailable = false;
+        bool promptRunning = false;
+        bool loading = false;
+    };
+    struct AgentSessionSummary {
+        std::string acpSessionId;
+        QString title;
+        QString updatedAt;
+    };
+
+    void applyAgentSelection();
+    void connectAgent();
+    void disconnectAgent();
+    void sendPrompt();
+    void cancelPrompt();
+    void updateAgentControls();
+    void appendTranscript(const QString &text);
+    void handleAgentUpdate(const std::string &acpSessionId, const std::string &params);
+    std::string handleAgentPermission(const std::string &params);
+    std::string handleAgentElicitation(const std::string &params);
+    void updateAgentUsage(qint64 used, qint64 size, bool estimated = false);
+    void addStreamedUsage(AgentSession &session, qint64 chars);
+    QString agentUsageKey(const std::string &acpSessionId) const;
+    void restoreAgentUsage(AgentSession &session);
+    void persistAgentUsage(const AgentSession &session) const;
+    void setAgentStatus(const QString &text);
+    void populateModelSelector();
+    void applyModelSelection();
+    AgentSession *activeAgentSession();
+    AgentSession *findAgentSession(const std::string &acpSessionId);
+    int findAgentSessionIndex(const std::string &acpSessionId) const;
+    void addAgentSession(const std::string &acpSessionId, const QString &configOptionsJson);
+    void removeAgentSession(const std::string &acpSessionId);
+    void refreshSessionSelector();
+    void switchAgentSession(int index);
+    void showSessionTranscript();
+    void appendSessionTranscript(const std::string &acpSessionId, const QString &text);
+    void flushPendingReads(AgentSession &session);
+    void handleToolCallUpdate(AgentSession &session, const AgentToolUpdate &update);
+    void setSessionPromptRunning(const std::string &acpSessionId, bool running);
+    QString agentModeLabel(const AgentSession &session) const;
+    QString agentModelLabel(const AgentSession &session) const;
+    void installMessageSinks();
+    void populateDrcTable(const openvlsi::VerificationReport &report);
+    void showReportPage(int index);
+    void appendLogEntry(const QString &time, int level, const QString &category, const QString &message);
+    void rebuildMessageView();
+    bool messagePassesFilters(const QString &category, int level) const;
+    void refreshJobsTable();
+    void updateJobsFooter();
+    QString selectedJobId() const;
+    void newAgentSession();
+    void closeActiveAgentSession();
+    void refreshPastAgentSessions();
+    void loadAgentSession(const std::string &acpSessionId);
+
+    QLabel *drcSummary_ = nullptr;
+    QTableWidget *drcTable_ = nullptr;
+    QTabWidget *tabs_ = nullptr;
+    QTableWidget *messagesTable_ = nullptr;
+    QComboBox *messageCategoryFilter_ = nullptr;
+    QComboBox *messageSeverityFilter_ = nullptr;
+    QLabel *messagesCount_ = nullptr;
+    QPushButton *copyMessagesButton_ = nullptr;
+    QLabel *lvsSummary_ = nullptr;
+    QTableWidget *lvsTable_ = nullptr;
+    QTabWidget *lvsTabs_ = nullptr;
+    QTableWidget *lvsDevicesTable_ = nullptr;
+    QTableWidget *lvsNetsTable_ = nullptr;
+    QTableWidget *lvsPortsTable_ = nullptr;
+    QTableWidget *timingTable_ = nullptr;
+    QPlainTextEdit *timingReport_ = nullptr;
+    std::vector<openvlsi::DrcViolation> drcViolations_;
+    std::vector<openvlsi::LvsMismatch> lvsMismatches_;
+    std::vector<openvlsi::LvsDeviceMatch> lvsDevices_;
+    std::vector<openvlsi::LvsNetMatch> lvsNets_;
+    std::vector<openvlsi::LvsPortMatch> lvsPorts_;
+    std::function<void(const openvlsi::DrcViolation &)> onDrcViolationActivated_;
+    std::function<void(const openvlsi::LvsMismatch &)> onLvsMismatchActivated_;
+    std::function<void(const openvlsi::LvsObjectRef &)> onLvsObjectActivated_;
+    std::function<void(const openvlsi::LvsDeviceMatch &)> onLvsBindDevice_;
+    std::function<void(const openvlsi::LvsDeviceMatch &)> onLvsUnbindDevice_;
+    std::function<void(const openvlsi::LvsDeviceMatch &)> onLvsPromoteDevice_;
+    std::function<void()> onGenerateTimingReport_;
+    QComboBox *reportSelector_ = nullptr;
+    QStackedWidget *reportStack_ = nullptr;
+    int reportsTabIndex_ = -1;
+    int drcPageIndex_ = -1;
+    int lvsPageIndex_ = -1;
+    int timingPageIndex_ = -1;
+    int agentTabIndex_ = -1;
+    int messagesTabIndex_ = -1;
+    struct MessageEntry {
+        QString time;
+        int level = 0;
+        QString category;
+        QString message;
+    };
+    std::deque<MessageEntry> messageEntries_;
+    std::shared_ptr<std::atomic<bool>> messageSinkAlive_;
+
+    struct JobEntry {
+        QString id;
+        QString title;
+        QString stage;
+        QString status;
+        QString detail;
+        qint64 startedMs = 0;
+        qint64 finishedMs = 0;
+        bool running = false;
+    };
+    std::vector<JobEntry> jobs_;
+    QString nextJobId_;
+    QTableWidget *jobsTable_ = nullptr;
+    QLabel *jobsSummary_ = nullptr;
+    QProgressBar *jobsProgress_ = nullptr;
+    QPushButton *cancelJobButton_ = nullptr;
+    QPushButton *clearJobsButton_ = nullptr;
+    QTimer *jobsTimer_ = nullptr;
+    int nextJobNumber_ = 1;
+    int jobsTabIndex_ = -1;
+    std::function<void(const QString &)> onCancelJob_;
+
+    QComboBox *agentSelector_ = nullptr;
+    QComboBox *sessionSelector_ = nullptr;
+    QComboBox *modelSelector_ = nullptr;
+    QLabel *agentStatus_ = nullptr;
+    QLabel *tokens_ = nullptr;
+    QProgressBar *contextUsage_ = nullptr;
+    QStackedWidget *agentTranscriptStack_ = nullptr;
+    AgentTranscriptView *agentTranscriptPlaceholder_ = nullptr;
+    QLineEdit *prompt_ = nullptr;
+    QPushButton *newSessionButton_ = nullptr;
+    QPushButton *closeSessionButton_ = nullptr;
+    QPushButton *sendButton_ = nullptr;
+    QPushButton *cancelButton_ = nullptr;
+    QLabel *agentActivity_ = nullptr;
+    QListWidget *mcpServers_ = nullptr;
+    std::unique_ptr<AgentBackend> agentBackend_;
+    std::vector<AgentSession> agentSessions_;
+    std::vector<AgentSessionSummary> pastAgentSessions_;
+    QString projectPath_;
+    QString connectedAgentCommand_;
+    int activeAgentSession_ = -1;
+    int nextAgentSessionNumber_ = 1;
+    bool agentConnected_ = false;
+    bool agentConnecting_ = false;
+    bool sessionCreating_ = false;
+    bool sessionClosing_ = false;
+    bool sessionLoading_ = false;
+    bool sessionListLoading_ = false;
+    bool loadSupported_ = false;
+    bool refreshingSessionSelector_ = false;
+    bool modelChanging_ = false;
+    bool updatingModelSelector_ = false;
+    std::function<void()> projectChangedCallback_;
+};
+
+class CommandPalette : public QDialog {
+  public:
+    explicit CommandPalette(const QList<QAction *> &actions, QWidget *parent = nullptr);
+
+  private:
+    QLineEdit *search_ = nullptr;
+    QListWidget *list_ = nullptr;
+};
+
+class StatusBar : public QStatusBar {
+  public:
+    explicit StatusBar(QWidget *parent = nullptr);
+    void setProjectName(const QString &name);
+
+  protected:
+    void paintEvent(QPaintEvent *event) override;
+
+  private:
+    QString projectName_;
+};
+
+class StartupView : public QWidget {
+  public:
+    using CreateProjectCallback = std::function<void(const QString &name, const QString &folder, bool createFolder)>;
+    using OpenProjectCallback = std::function<void()>;
+    using OpenRecentCallback = std::function<void(const QString &path)>;
+    using RemoveRecentCallback = std::function<void(const QString &path)>;
+
+    explicit StartupView(QWidget *parent = nullptr);
+    void setOnCreateProject(CreateProjectCallback callback);
+    void setOnOpenProject(OpenProjectCallback callback);
+    void setOnOpenRecent(OpenRecentCallback callback);
+    void setOnRemoveRecent(RemoveRecentCallback callback);
+    void setRecentProjects(const QStringList &paths);
+    void clearCreateForm();
+    void refreshAppearance();
+
+  private:
+    static QLabel *makeLink(const QString &text, const QString &url);
+
+    QLineEdit *name_ = nullptr;
+    QLineEdit *location_ = nullptr;
+    QCheckBox *createFolder_ = nullptr;
+    QPushButton *createButton_ = nullptr;
+    QListWidget *recent_ = nullptr;
+    QLabel *subtitle_ = nullptr;
+    QLabel *newsPlaceholder_ = nullptr;
+    CreateProjectCallback onCreateProject_;
+    OpenProjectCallback onOpenProject_;
+    OpenRecentCallback onOpenRecent_;
+    RemoveRecentCallback onRemoveRecent_;
+};
+
+class CreateProjectDialog : public QDialog {
+  public:
+    explicit CreateProjectDialog(QWidget *parent = nullptr);
+
+    QString projectName() const;
+    QString projectFolder() const;
+    bool createFolder() const;
+
+  private:
+    QLineEdit *name_ = nullptr;
+    QLineEdit *folder_ = nullptr;
+    QCheckBox *createFolder_ = nullptr;
+};
+
+class EmptySchematicPanel : public QWidget {
+  public:
+    enum class Kind { SchematicDrawing, TextSpice, SystemVerilog };
+    using CreateCallback = std::function<void(Kind kind, const QString &name, const std::string &pdk)>;
+    using OpenCallback = std::function<void(openvlsi::ObjectId)>;
+    explicit EmptySchematicPanel(QWidget *parent = nullptr);
+    void setOnCreate(CreateCallback callback);
+    void setOnOpen(OpenCallback callback);
+    // `schematicsExist` hides the create controls, which are only offered when
+    // the project has no schematics yet.
+    void setOpenCandidates(const std::vector<std::pair<openvlsi::ObjectId, QString>> &candidates,
+                           bool schematicsExist = false);
+    void refreshPdks(const std::filesystem::path &installDirectory);
+    void prepareForDisplay();
+    // Fills the name field with the suggested default unless the user typed
+    // their own name since the panel was last shown.
+    void setDefaultName(const QString &name);
+
+  private:
+    void submit();
+    void selectKind(Kind kind);
+    void updateKindUi();
+
+    QLabel *heading_ = nullptr;
+    QWidget *createSection_ = nullptr;
+    QLabel *description_ = nullptr;
+    QWidget *openSection_ = nullptr;
+    QComboBox *open_ = nullptr;
+    QLabel *kindDescription_ = nullptr;
+    QLineEdit *name_ = nullptr;
+    QComboBox *pdk_ = nullptr;
+    QPushButton *createButton_ = nullptr;
+    QButtonGroup *kindGroup_ = nullptr;
+    Kind kind_ = Kind::SchematicDrawing;
+    bool nameEdited_ = false;
+    CreateCallback onCreate_;
+    OpenCallback onOpen_;
+};
+
+class EmptyLayoutPanel : public QWidget {
+  public:
+    enum class Kind { StaticLayout, ProceduralLayout };
+    using CreateCallback =
+        std::function<void(Kind kind, const QString &name, const std::string &pdk, const std::string &stack)>;
+    using OpenCallback = std::function<void(openvlsi::ObjectId)>;
+    explicit EmptyLayoutPanel(QWidget *parent = nullptr);
+    void setOnCreate(CreateCallback callback);
+    void setOnOpen(OpenCallback callback);
+    // `layoutsExist` hides the create controls, which are only offered when
+    // the project has no layout cells yet.
+    void setOpenCandidates(const std::vector<std::pair<openvlsi::ObjectId, QString>> &candidates, bool layoutsExist = false);
+    void refreshPdks(const std::filesystem::path &installDirectory);
+    void prepareForDisplay();
+    // Fills the name field with the suggested default unless the user typed
+    // their own name since the panel was last shown.
+    void setDefaultName(const QString &name);
+
+  private:
+    void submit();
+    void selectKind(Kind kind);
+    void updateKindUi();
+    void refreshStacks();
+
+    QLabel *heading_ = nullptr;
+    QWidget *createSection_ = nullptr;
+    QLabel *description_ = nullptr;
+    QWidget *openSection_ = nullptr;
+    QComboBox *open_ = nullptr;
+    QLabel *kindDescription_ = nullptr;
+    QLineEdit *name_ = nullptr;
+    QComboBox *pdk_ = nullptr;
+    QLabel *stackLabel_ = nullptr;
+    QComboBox *stack_ = nullptr;
+    QPushButton *createButton_ = nullptr;
+    QButtonGroup *kindGroup_ = nullptr;
+    std::filesystem::path installDirectory_;
+    Kind kind_ = Kind::StaticLayout;
+    bool nameEdited_ = false;
+    CreateCallback onCreate_;
+    OpenCallback onOpen_;
+};
+
+class CreateLayoutDialog : public QDialog {
+  public:
+    explicit CreateLayoutDialog(const std::filesystem::path &installDirectory, const QString &defaultName,
+                                QWidget *parent = nullptr);
+    QString layoutName() const;
+    std::string pdkId() const;
+    std::string stackId() const;
+
+  private:
+    void updateStacks();
+
+    QLineEdit *name_ = nullptr;
+    QComboBox *pdk_ = nullptr;
+    QLabel *pdkDescription_ = nullptr;
+    QLabel *stackLabel_ = nullptr;
+    QComboBox *stack_ = nullptr;
+    std::filesystem::path installDirectory_;
+};
+
+class CreateLayerDialog : public QDialog {
+  public:
+    explicit CreateLayerDialog(const QString &defaultName, int layerNumber, const LayerStyle &suggestedStyle,
+                               QWidget *parent = nullptr);
+    QString layerName() const;
+    QColor color() const;
+    int patternIndex() const;
+
+  private:
+    void updateColorButton();
+    void updatePreview();
+
+    QLineEdit *name_ = nullptr;
+    QPushButton *colorButton_ = nullptr;
+    QComboBox *pattern_ = nullptr;
+    QLabel *preview_ = nullptr;
+    QColor color_;
+    Qt::BrushStyle autoPattern_ = Qt::SolidPattern;
+};
+
+class WorkspaceStack : public QStackedWidget {
+  public:
+    using QStackedWidget::QStackedWidget;
+    QSize minimumSizeHint() const override;
+};

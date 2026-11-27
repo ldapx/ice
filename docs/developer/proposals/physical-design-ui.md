@@ -20,14 +20,14 @@ Implemented in the first pass:
   and module hierarchy.
 - Final layout import and an "Open in OpenROAD GUI" action.
 
-This document compares ICE's Physical Design workspace with the OpenROAD GUI
-layout and records the implementation plan. The goal is to keep ICE's guided
+This document compares OpenVLSI's Physical Design workspace with the OpenROAD GUI
+layout and records the implementation plan. The goal is to keep OpenVLSI's guided
 stage flow while adding the inspection tools users expect from a physical
 design environment.
 
 ## Summary
 
-ICE already has a good stage-oriented workflow:
+OpenVLSI already has a good stage-oriented workflow:
 
 - Floorplan, Placement, CTS, Routing, and Final checkpoints are explicit.
 - Prerequisites are enforced.
@@ -38,7 +38,7 @@ The main weakness is that the physical workspace currently behaves like a run
 monitor with a static preview. OpenROAD's GUI is a design-inspection
 environment: it exposes object-level display controls, selection and
 cross-probing, DRC markers, timing paths, clock trees, and configurable heat
-maps. ICE should preserve its stage workflow while adopting those inspection
+maps. OpenVLSI should preserve its stage workflow while adopting those inspection
 patterns.
 
 ## OpenROAD GUI reference
@@ -71,10 +71,10 @@ Relevant reference files:
 - `src/gui/src/renderThread.cpp`: background layout rendering and loading
   indication.
 
-## Current ICE physical UI
+## Current OpenVLSI physical UI
 
-ICE's physical workspace is built from `ImplementationPage` instances stacked
-by `PhysicalDesignPage` in `src/ice/implementation_ui.cpp`:
+OpenVLSI's physical workspace is built from `ImplementationPage` instances stacked
+by `PhysicalDesignPage` in `src/openvlsi/implementation_ui.cpp`:
 
 - Left: Runs tree, optional Netlists explorer, a Display tree, and an Artifacts
   list.
@@ -100,8 +100,8 @@ canvas and diagnostics are where the largest improvements are needed.
    - Expose final Verilog, SPEF, SDC, DRC, timing, and power artifacts.
 
 2. Make preview truncation explicit.
-   - `ice-openroad odb-preview` has a global 250,000-shape limit.
-   - The preview JSON already contains a `truncated` flag; ICE must surface it.
+   - `openvlsi-openroad odb-preview` has a global 250,000-shape limit.
+   - The preview JSON already contains a `truncated` flag; OpenVLSI must surface it.
    - Prefer per-category shape budgets so a large PDN cannot consume the entire
      budget and hide signal routing.
    - Show a warning on the canvas and in the stage details when geometry is

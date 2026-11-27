@@ -1,0 +1,2737 @@
+#include "openvlsilib/core.hpp"
+
+#include "openvlsilib/implementation.hpp"
+
+#include <algorithm>
+#include <cctype>
+#include <cerrno>
+#include <cmath>
+#include <cstdint>
+#include <fstream>
+#include <locale>
+#include <nlohmann/json.hpp>
+#include <set>
+#include <spdlog/spdlog.h>
+#include <sstream>
+#include <stdexcept>
+#include <unordered_map>
+#include <unordered_set>
+#include <utility>
+
+#ifndef _WIN32
+#include <fcntl.h>
+#include <sys/file.h>
+#include <unistd.h>
+#else
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#endif
+
+namespace openvlsi {
+using json = nlohmann::ordered_json;
+
+ProjectError::ProjectError(std::string code, std::string message)
+    : std::runtime_error(message), code_(std::move(code)) {}
+const std::string &ProjectError::code() const noexcept { return code_; }
+
+double DatabaseUnits::toNanometers(Coordinate value) const {
+    if (denominator == 0)
+        throw ProjectError("project.units", "Database unit denominator must not be zero");
+    return static_cast<double>(value) * static_cast<double>(nanometers_per_unit) / static_cast<double>(denominator);
+}
+bool DatabaseUnits::valid() const { return nanometers_per_unit > 0 && denominator > 0; }
+bool Rect::valid() const { return width > 0 && height > 0; }
+
+std::string orientationName(Orientation value) {
+    switch (value) {
+    case Orientation::r0:
+        return "r0";
+    case Orientation::r90:
+        return "r90";
+    case Orientation::r180:
+        return "r180";
+    case Orientation::r270:
+        return "r270";
+    case Orientation::mx:
+        return "mx";
+    case Orientation::my:
+        return "my";
+    case Orientation::m45:
+        return "m45";
+    case Orientation::m135:
+        return "m135";
+    }
+    throw ProjectError("project.orientation", "Unknown orientation value");
+}
+
+ObjectId Project::nextId() {
+    ObjectId highest = 0;
+    auto update = [&highest](ObjectId id) { highest = std::max(highest, id); };
+    for (const auto &[id, cell] : schematicCells) {
+        update(id);
+        for (const auto &parameter : cell.parameters)
+            update(parameter.id);
+        for (const auto &[symbolId, symbol] : cell.symbols) {
+            update(symbolId);
+            for (const auto &pin : symbol.pins)
+                update(pin.id);
+        }
+        for (const auto &[instanceId, instance] : cell.instances) {
+            update(instanceId);
+            for (const auto &parameter : instance.parameters)
+                update(parameter.id);
+        }
+        for (const auto &[netId, net] : cell.nets)
+            update(netId);
+        for (const auto &[commentId, _] : cell.comments)
+            update(commentId);
+    }
+    for (const auto &[id, _] : layers)
+        highest = std::max(highest, id);
+    for (const auto &[id, cell] : layoutCells) {
+        update(id);
+        for (const auto &parameter : cell.parameters)
+            update(parameter.id);
+        for (const auto &[shapeId, shape] : cell.shapes)
+            update(shapeId);
+        for (const auto &[portId, port] : cell.ports)
+            update(portId);
+        for (const auto &[netId, net] : cell.nets)
+            update(netId);
+        for (const auto &[instanceId, instance] : cell.instances)
+            update(instanceId);
+        for (const auto &[deviceId, device] : cell.plannedDevices) {
+            update(deviceId);
+            for (const auto &parameter : device.parameters)
+                update(parameter.id);
+        }
+        for (const auto &[connectionId, connection] : cell.plannedConnections)
+            update(connectionId);
+    }
+    for (const auto &[id, layout] : proceduralLayouts) {
+        update(id);
+        for (const auto &parameter : layout.parameters)
+            update(parameter.id);
+    }
+    for (const auto &[id, _] : implementationRuns)
+        update(id);
+    for (const auto &[id, sim] : simulations) {
+        update(id);
+        for (const auto &graph : sim.graphs)
+            update(graph.id);
+    }
+    for (const auto &[id, _] : reports)
+        update(id);
+    lastIssuedId_ = std::max(lastIssuedId_, highest) + 1;
+    return lastIssuedId_;
+}
+
+Coordinate Project::snap(Coordinate value) const {
+    if (grid <= 0)
+        throw ProjectError("project.grid", "Grid spacing must be positive");
+    Coordinate quotient = value / grid;
+    Coordinate remainder = value % grid;
+    if (remainder < 0) {
+        quotient -= 1;
+        remainder += grid;
+    }
+    return remainder * 2 < grid ? quotient * grid : (quotient + 1) * grid;
+}
+
+std::vector<Diagnostic> Project::validate() const {
+    std::vector<Diagnostic> result;
+    if (identity.empty())
+        result.push_back(
+            {Diagnostic::Severity::error, "project.identity", "Project identity is required", std::nullopt});
+    if (name.empty())
+        result.push_back({Diagnostic::Severity::error, "project.name", "Project name is required", std::nullopt});
+    if (!units.valid())
+        result.push_back(
+            {Diagnostic::Severity::error, "project.units", "Database units must be positive", std::nullopt});
+    if (grid <= 0)
+        result.push_back({Diagnostic::Severity::error, "project.grid", "Grid spacing must be positive", std::nullopt});
+    {
+        std::unordered_set<std::string> simulationNames;
+        for (const auto &[simulationId, simulation] : simulations) {
+            std::string key = simulation.name;
+            for (auto &character : key)
+                character = static_cast<char>(std::tolower(static_cast<unsigned char>(character)));
+            if (simulation.name.empty())
+                result.push_back({Diagnostic::Severity::error, "simulation.name", "Simulation name must not be empty",
+                                  simulationId});
+            else if (!simulationNames.insert(key).second)
+                result.push_back({Diagnostic::Severity::error, "simulation.name.duplicate",
+                                  "Simulation name '" + simulation.name + "' is used more than once", simulationId});
+        }
+    }
+    const auto normalizedName = [](std::string value) {
+        std::transform(value.begin(), value.end(), value.begin(),
+                       [](unsigned char character) { return static_cast<char>(std::tolower(character)); });
+        return value;
+    };
+    std::unordered_set<std::string> schematicNames;
+    std::unordered_set<std::string> layoutNames;
+    std::unordered_set<std::string> proceduralNames;
+    std::unordered_set<std::string> dependencyNames;
+    for (const auto &dependency : packageDependencies) {
+        if (dependency.empty()) {
+            result.push_back({Diagnostic::Severity::error, "project.packages.name",
+                              "Package dependency names must not be empty", std::nullopt});
+            continue;
+        }
+        if (!dependencyNames.insert(dependency).second)
+            result.push_back({Diagnostic::Severity::error, "project.packages.duplicate",
+                              "Package dependency is listed more than once: " + dependency, std::nullopt});
+    }
+    std::unordered_set<std::string> trustedNames;
+    for (const auto &package : trustedPackages) {
+        if (package.empty()) {
+            result.push_back({Diagnostic::Severity::error, "project.trust.name",
+                              "Trusted package names must not be empty", std::nullopt});
+            continue;
+        }
+        if (package.find_first_of("/\\") != std::string::npos) {
+            result.push_back({Diagnostic::Severity::error, "project.trust.name",
+                              "Trusted package names must not contain path separators: " + package,
+                              std::nullopt});
+            continue;
+        }
+        if (!trustedNames.insert(package).second)
+            result.push_back({Diagnostic::Severity::error, "project.trust.duplicate",
+                              "Package is trusted more than once: " + package, std::nullopt});
+    }
+    for (const auto &[cellId, cell] : schematicCells) {
+        if (cell.name.empty())
+            result.push_back({Diagnostic::Severity::error, "schematic.name", "Schematic name is required", cellId});
+        else if (!schematicNames.insert(normalizedName(cell.name)).second)
+            result.push_back({Diagnostic::Severity::error, "schematic.name.duplicate",
+                              "Schematic name is listed more than once: " + cell.name, cellId});
+        if (cell.pdk.empty() || cell.pdk.find_first_of("/\\") != std::string::npos)
+            result.push_back({Diagnostic::Severity::error, "schematic.pdk", "Schematic PDK is invalid", cellId});
+        if (cell.textSchematic && cell.systemVerilogSchematic)
+            result.push_back({Diagnostic::Severity::error, "schematic.source",
+                              "A schematic cell cannot be both SPICE text and SystemVerilog", cellId});
+        std::unordered_set<std::string> instanceNames;
+        for (const auto &[instanceId, instance] : cell.instances) {
+            if (instance.name.empty())
+                result.push_back(
+                    {Diagnostic::Severity::error, "schematic.instance.name", "Instance name is required", instanceId});
+            else if (!instanceNames.insert(normalizedName(instance.name)).second)
+                result.push_back({Diagnostic::Severity::error, "schematic.instance.name.duplicate",
+                                  "Instance name is listed more than once: " + instance.name, instanceId});
+            if (!cell.symbols.contains(instance.symbol))
+                result.push_back({Diagnostic::Severity::error, "schematic.instance.symbol",
+                                  "Instance references a missing symbol", instanceId});
+        }
+        for (const auto &[netId, net] : cell.nets) {
+            std::unordered_set<ObjectId> pinIds;
+            pinIds.reserve(cell.symbols.size() * 2);
+            for (const auto &[_, symbol] : cell.symbols)
+                for (const auto &pin : symbol.pins)
+                    pinIds.insert(pin.id);
+            for (auto pinId : net.pins) {
+                if (!pinIds.contains(pinId))
+                    result.push_back(
+                        {Diagnostic::Severity::error, "schematic.net.pin", "Net references a missing pin", netId});
+            }
+            if (net.labelAnchor) {
+                if (net.labelAnchor->fromPin == net.labelAnchor->toPin)
+                    result.push_back({Diagnostic::Severity::error, "schematic.net.label_anchor",
+                                      "Net label anchor must reference two different pins", netId});
+                if (!std::isfinite(net.labelAnchor->fraction) || net.labelAnchor->fraction < 0.0 ||
+                    net.labelAnchor->fraction > 1.0)
+                    result.push_back({Diagnostic::Severity::error, "schematic.net.label_anchor",
+                                      "Net label anchor fraction must be between 0 and 1", netId});
+            }
+        }
+        (void)cellId;
+    }
+    const auto layoutNameKey = [](std::string value) {
+        std::transform(value.begin(), value.end(), value.begin(),
+                       [](unsigned char character) { return static_cast<char>(std::tolower(character)); });
+        return value;
+    };
+    std::unordered_set<ObjectId> schematicInstanceIds;
+    for (const auto &[_, schematic] : schematicCells) {
+        for (const auto &[instanceId, __] : schematic.instances)
+            schematicInstanceIds.insert(instanceId);
+    }
+    for (const auto &[cellId, cell] : layoutCells) {
+        if (cell.name.empty())
+            result.push_back({Diagnostic::Severity::error, "layout.name", "Layout name is required", cellId});
+        else if (!layoutNames.insert(normalizedName(cell.name)).second)
+            result.push_back({Diagnostic::Severity::error, "layout.name.duplicate",
+                              "Layout name is listed more than once: " + cell.name, cellId});
+        if (cell.schematicCell != 0 && !schematicCells.contains(cell.schematicCell))
+            result.push_back({Diagnostic::Severity::warning, "layout.schematic_link.stale",
+                              "Layout links to a missing schematic cell", cellId});
+        std::unordered_set<std::string> instanceNames;
+        std::unordered_map<ObjectId, int> instanceLinkCounts;
+        std::unordered_map<ObjectId, int> plannedLinkCounts;
+        for (const auto &[instanceId, instance] : cell.instances) {
+            if (instance.name.empty())
+                result.push_back({Diagnostic::Severity::error, "layout.instance.name",
+                                  "Layout instance name is required", instanceId});
+            else if (!instanceNames.insert(normalizedName(instance.name)).second)
+                result.push_back({Diagnostic::Severity::error, "layout.instance.name.duplicate",
+                                  "Layout instance name is listed more than once: " + instance.name, instanceId});
+            if (!layoutCells.contains(instance.cell))
+                result.push_back({Diagnostic::Severity::error, "layout.instance.cell",
+                                  "Layout instance references a missing cell", instanceId});
+            else if (instance.cell == cellId)
+                result.push_back({Diagnostic::Severity::error, "layout.instance.cycle",
+                                  "Layout cell cannot instantiate itself", instanceId});
+            if (instance.schematicInstance != 0) {
+                if (!schematicInstanceIds.contains(instance.schematicInstance))
+                    result.push_back({Diagnostic::Severity::warning, "layout.device_link.stale",
+                                      "Layout instance '" + instance.name + "' links to a missing schematic instance",
+                                      instanceId});
+                else
+                    ++instanceLinkCounts[instance.schematicInstance];
+            }
+        }
+        for (const auto &[deviceId, device] : cell.plannedDevices) {
+            if (device.schematicInstance != 0) {
+                if (!schematicInstanceIds.contains(device.schematicInstance))
+                    result.push_back({Diagnostic::Severity::warning, "layout.device_link.stale",
+                                      "Planned device '" + device.name + "' links to a missing schematic instance",
+                                      deviceId});
+                else
+                    ++plannedLinkCounts[device.schematicInstance];
+            }
+        }
+        for (const auto &[schematicInstance, count] : instanceLinkCounts) {
+            if (count < 2)
+                continue;
+            for (const auto &[instanceId, instance] : cell.instances) {
+                if (instance.schematicInstance == schematicInstance)
+                    result.push_back({Diagnostic::Severity::warning, "layout.device_link.duplicate",
+                                      "Layout instance '" + instance.name +
+                                          "' shares its schematic link with another layout instance",
+                                      instanceId});
+            }
+        }
+        for (const auto &[schematicInstance, count] : plannedLinkCounts) {
+            if (count < 2)
+                continue;
+            for (const auto &[deviceId, device] : cell.plannedDevices) {
+                if (device.schematicInstance == schematicInstance)
+                    result.push_back(
+                        {Diagnostic::Severity::warning, "layout.device_link.duplicate",
+                         "Planned device '" + device.name + "' shares its schematic link with another planned device",
+                         deviceId});
+            }
+        }
+        if (cell.reference) {
+            if (cell.reference->path.empty())
+                result.push_back({Diagnostic::Severity::error, "layout.reference.path",
+                                  "Layout reference path is required", cellId});
+            if (cell.reference->format != "gds" && cell.reference->format != "oasis")
+                result.push_back({Diagnostic::Severity::error, "layout.reference.format",
+                                  "Layout reference format must be gds or oasis", cellId});
+        }
+        std::set<std::string> layoutNetNames;
+        for (const auto &[netId, net] : cell.nets) {
+            if (net.name.empty())
+                result.push_back(
+                    {Diagnostic::Severity::error, "layout.net.name", "Layout net name is required", netId});
+            else if (!layoutNetNames.insert(layoutNameKey(net.name)).second)
+                result.push_back({Diagnostic::Severity::error, "layout.net.name.duplicate",
+                                  "Layout net name is listed more than once: " + net.name, netId});
+        }
+        std::set<std::string> portNames;
+        for (const auto &[portId, port] : cell.ports) {
+            if (port.name.empty())
+                result.push_back({Diagnostic::Severity::error, "layout.port.name", "Port name is required", portId});
+            else if (!portNames.insert(layoutNameKey(port.name)).second)
+                result.push_back({Diagnostic::Severity::error, "layout.port.name.duplicate",
+                                  "Port name is listed more than once: " + port.name, portId});
+            if (port.label.empty())
+                result.push_back({Diagnostic::Severity::error, "layout.port.label", "Port label is required", portId});
+            if (port.net != 0 && !cell.nets.contains(port.net))
+                result.push_back(
+                    {Diagnostic::Severity::error, "layout.port.net", "Port references a missing layout net", portId});
+            if (port.sourceInstance != 0 || port.sourcePort != 0) {
+                const auto instance = cell.instances.find(port.sourceInstance);
+                if (instance == cell.instances.end())
+                    result.push_back({Diagnostic::Severity::error, "layout.port.source_instance",
+                                      "Promoted port references a missing layout instance", portId});
+                else {
+                    const auto child = layoutCells.find(instance->second.cell);
+                    if (child == layoutCells.end() || !child->second.ports.contains(port.sourcePort))
+                        result.push_back({Diagnostic::Severity::error, "layout.port.source_port",
+                                          "Promoted port references a missing child port", portId});
+                }
+            }
+        }
+        for (const auto &[shapeId, shape] : cell.shapes) {
+            if (shape.net && *shape.net != 0 && !cell.nets.contains(*shape.net))
+                result.push_back({Diagnostic::Severity::error, "layout.shape.net",
+                                  "Shape references a missing layout net", shapeId});
+            if (!layers.contains(shape.layer))
+                result.push_back(
+                    {Diagnostic::Severity::error, "layout.shape.layer", "Shape references a missing layer", shapeId});
+            if (shape.routedConnection != 0 && !cell.plannedConnections.contains(shape.routedConnection))
+                result.push_back({Diagnostic::Severity::error, "layout.shape.routed_connection",
+                                  "Routed path references a missing planned connection", shapeId});
+            if ((!shape.polygon.empty() && shape.polygon.size() < 3) ||
+                (shape.polygon.empty() && !shape.rectangle.valid()))
+                result.push_back({Diagnostic::Severity::error, "layout.shape.geometry",
+                                  "Shape rectangle must have positive dimensions", shapeId});
+            if (!shape.text.empty() && !shape.centerline.empty())
+                result.push_back({Diagnostic::Severity::error, "layout.text.geometry",
+                                  "Text cannot also be a routed path", shapeId});
+            if (!shape.centerline.empty()) {
+                if (shape.centerline.size() < 2 || shape.width <= 0)
+                    result.push_back({Diagnostic::Severity::error, "layout.path.geometry",
+                                      "Path must have at least two points and a positive width", shapeId});
+                if (!shape.segmentLayers.empty() && shape.segmentLayers.size() != shape.centerline.size() - 1)
+                    result.push_back({Diagnostic::Severity::error, "layout.path.layers",
+                                      "Path segment layer count does not match its points", shapeId});
+                if (!shape.segmentWidths.empty() && shape.segmentWidths.size() != shape.centerline.size() - 1)
+                    result.push_back({Diagnostic::Severity::error, "layout.path.widths",
+                                      "Path segment width count does not match its points", shapeId});
+                if (std::any_of(shape.segmentWidths.begin(), shape.segmentWidths.end(),
+                                [](Coordinate width) { return width <= 0; }))
+                    result.push_back({Diagnostic::Severity::error, "layout.path.widths",
+                                      "Path segment widths must be positive", shapeId});
+                if (!shape.pointVias.empty() && shape.pointVias.size() != shape.centerline.size())
+                    result.push_back({Diagnostic::Severity::error, "layout.path.vias",
+                                      "Path via count does not match its points", shapeId});
+                for (std::size_t index = 0; index + 1 < shape.centerline.size(); ++index) {
+                    if (!layers.contains(shape.layerForSegment(index))) {
+                        result.push_back({Diagnostic::Severity::error, "layout.path.layer",
+                                          "Path segment references a missing layer", shapeId});
+                        break;
+                    }
+                }
+                for (const auto &vias : shape.pointVias) {
+                    bool missing = false;
+                    for (const auto layer : vias) {
+                        if (!layers.contains(layer)) {
+                            missing = true;
+                            break;
+                        }
+                    }
+                    if (missing) {
+                        result.push_back({Diagnostic::Severity::error, "layout.path.via",
+                                          "Path via references a missing layer", shapeId});
+                        break;
+                    }
+                }
+            }
+        }
+        for (const auto &[portId, port] : cell.ports) {
+            if (port.layer == 0 || !layers.contains(port.layer))
+                result.push_back(
+                    {Diagnostic::Severity::error, "layout.port.layer", "Port references a missing layer", portId});
+            if (!port.rectangle.valid())
+                result.push_back({Diagnostic::Severity::error, "layout.port.geometry",
+                                  "Port rectangle must have positive dimensions", portId});
+        }
+        for (const auto &[deviceId, device] : cell.plannedDevices) {
+            if (device.width <= 0 || device.height <= 0)
+                result.push_back({Diagnostic::Severity::error, "layout.planned_device.geometry",
+                                  "Planned device must have positive dimensions", deviceId});
+            for (const auto &[_, netId] : device.terminals) {
+                if (netId != 0 && !cell.nets.contains(netId))
+                    result.push_back({Diagnostic::Severity::error, "layout.planned_device.terminal",
+                                      "Planned device terminal references a missing layout net", deviceId});
+            }
+        }
+        const auto endpointExists = [&](ObjectId endpoint, ObjectId port) {
+            if (cell.plannedDevices.contains(endpoint) || cell.ports.contains(endpoint))
+                return true;
+            const auto instance = cell.instances.find(endpoint);
+            if (instance == cell.instances.end())
+                return false;
+            if (port == 0)
+                return true;
+            const auto child = layoutCells.find(instance->second.cell);
+            return child != layoutCells.end() && child->second.ports.contains(port);
+        };
+        for (const auto &[connectionId, connection] : cell.plannedConnections) {
+            if (!endpointExists(connection.from, connection.fromPort) ||
+                !endpointExists(connection.to, connection.toPort))
+                result.push_back({Diagnostic::Severity::error, "layout.planned_connection.device",
+                                  "Planned connection references a missing device or layout instance", connectionId});
+            if (connection.from == connection.to)
+                result.push_back({Diagnostic::Severity::error, "layout.planned_connection.self",
+                                  "Planned connection must join two different devices", connectionId});
+            if (connection.net != 0 && !cell.nets.contains(connection.net))
+                result.push_back({Diagnostic::Severity::error, "layout.planned_connection.net",
+                                  "Planned connection references a missing layout net", connectionId});
+        }
+        (void)cellId;
+    }
+    for (const auto &[layoutId, layout] : proceduralLayouts) {
+        if (layout.name.empty())
+            result.push_back({Diagnostic::Severity::error, "layout.procedural.name",
+                              "Procedural layout name is required", layoutId});
+        else if (!proceduralNames.insert(normalizedName(layout.name)).second ||
+                 layoutNames.contains(normalizedName(layout.name)))
+            result.push_back({Diagnostic::Severity::error, "layout.name.duplicate",
+                              "Layout name is listed more than once: " + layout.name, layoutId});
+        if (layout.pdk.empty() || layout.pdk.find_first_of("/\\") != std::string::npos)
+            result.push_back(
+                {Diagnostic::Severity::error, "layout.procedural.pdk", "Procedural layout PDK is invalid", layoutId});
+        if (!layoutCells.contains(layout.generatedCell))
+            result.push_back({Diagnostic::Severity::error, "layout.procedural.generated",
+                              "Procedural layout references a missing generated layout cell", layoutId});
+    }
+    std::unordered_set<std::string> implementationNames;
+    for (const auto &[runId, run] : implementationRuns) {
+        if (run.name.empty()) {
+            result.push_back(
+                {Diagnostic::Severity::error, "implementation.name", "Implementation run name is required", runId});
+        } else if (!implementationNames.insert(run.name).second) {
+            result.push_back({Diagnostic::Severity::error, "implementation.name.duplicate",
+                              "Implementation run name is listed more than once: " + run.name, runId});
+        }
+        for (auto diagnostic : validateImplementationConfig(*this, run.config)) {
+            diagnostic.object = runId;
+            result.push_back(std::move(diagnostic));
+        }
+        if (run.resultLayout != 0 && !layoutCells.contains(run.resultLayout))
+            result.push_back({Diagnostic::Severity::error, "implementation.result_layout",
+                              "Implementation run references a missing result layout", runId});
+        const auto normalized = std::filesystem::path(run.directory).lexically_normal();
+        if (!run.directory.empty() && (normalized.empty() || normalized.is_absolute() ||
+                                       (normalized.begin() != normalized.end() && *normalized.begin() == "..")))
+            result.push_back({Diagnostic::Severity::error, "implementation.directory",
+                              "Implementation run directory must stay inside the project", runId});
+    }
+    std::unordered_set<std::string> reportNames;
+    for (const auto &[reportId, report] : reports) {
+        if (report.name.empty())
+            result.push_back(
+                {Diagnostic::Severity::error, "report.name", "Simulation script name is required", reportId});
+        else if (!reportNames.insert(report.name).second)
+            result.push_back({Diagnostic::Severity::error, "report.name.duplicate",
+                              "Simulation script name is listed more than once: " + report.name, reportId});
+        const auto normalized = std::filesystem::path(report.path).lexically_normal();
+        const auto first = normalized.begin();
+        const bool inScriptsDirectory = first != normalized.end() && first->string() == "scripts";
+        if (report.path.empty() || normalized.empty() || normalized.is_absolute() || !inScriptsDirectory ||
+            normalized.extension() != ".py")
+            result.push_back({Diagnostic::Severity::error, "script.path",
+                              "Simulation script path must be a relative Python file inside scripts/", reportId});
+    }
+    return result;
+}
+
+bool Project::trustsPackage(const std::string &package) const {
+    return !package.empty() &&
+           std::find(trustedPackages.begin(), trustedPackages.end(), package) != trustedPackages.end();
+}
+
+static const char *pinDirectionName(PinDirection direction);
+static PinDirection parsePinDirection(const std::string &value);
+
+static void put(json &j, const Pin &v) {
+    j = {{"id", v.id},
+         {"name", v.name},
+         {"x", v.x},
+         {"y", v.y},
+         {"direction", pinDirectionName(v.direction)},
+         {"width", v.width},
+         {"width_known", v.widthKnown}};
+}
+static void put(json &j, const Parameter &v) { j = {{"id", v.id}, {"name", v.name}, {"value", v.value}}; }
+static void put(json &j, const Rect &v) { j = {{"x", v.x}, {"y", v.y}, {"width", v.width}, {"height", v.height}}; }
+
+std::string Project::serialize() const {
+    json j;
+    j["format"] = "openvlsi-project";
+    j["schema_version"] = schemaVersion;
+    j["identity"] = identity;
+    j["name"] = name;
+    j["grid"] = grid;
+    j["units"] = {{"nanometers_per_unit", units.nanometers_per_unit}, {"denominator", units.denominator}};
+    j["package_dependencies"] = packageDependencies;
+    j["trusted_packages"] = trustedPackages;
+    j["schematic_cells"] = json::array();
+    for (const auto &[id, cell] : schematicCells) {
+        json c = {{"id", id},
+                  {"name", cell.name},
+                  {"pdk", cell.pdk},
+                  {"parameters", json::array()},
+                  {"symbols", json::array()},
+                  {"instances", json::array()},
+                  {"nets", json::array()}};
+        if (cell.textSchematic)
+            c["text_schematic"] = true;
+        if (!cell.spiceText.empty())
+            c["spice_text"] = cell.spiceText;
+        if (!cell.spiceSourcePath.empty())
+            c["spice_source_path"] = cell.spiceSourcePath;
+        if (cell.systemVerilogSchematic)
+            c["systemverilog"] = true;
+        if (!cell.systemVerilogText.empty())
+            c["systemverilog_text"] = cell.systemVerilogText;
+        for (const auto &parameter : cell.parameters) {
+            json entry;
+            put(entry, parameter);
+            c["parameters"].push_back(std::move(entry));
+        }
+        for (const auto &[sid, symbol] : cell.symbols) {
+            json s = {{"id", sid}, {"name", symbol.name}, {"artwork", symbol.artwork}, {"pins", json::array()}};
+            if (symbol.sourceCell != 0)
+                s["cell"] = symbol.sourceCell;
+            if (symbol.label)
+                s["label"] = {{"x", symbol.label->x}, {"y", symbol.label->y}};
+            for (const auto &pin : symbol.pins) {
+                json p;
+                put(p, pin);
+                s["pins"].push_back(p);
+            }
+            c["symbols"].push_back(s);
+        }
+        for (const auto &[iid, instance] : cell.instances) {
+            json item = {{"id", iid},
+                         {"symbol", instance.symbol},
+                         {"name", instance.name},
+                         {"x", instance.x},
+                         {"y", instance.y},
+                         {"orientation", orientationName(instance.orientation)},
+                         {"parameters", json::array()}};
+            for (const auto &parameter : instance.parameters) {
+                json entry;
+                put(entry, parameter);
+                item["parameters"].push_back(std::move(entry));
+            }
+            c["instances"].push_back(std::move(item));
+        }
+        for (const auto &[nid, net] : cell.nets) {
+            json item = {{"id", nid}, {"name", net.name}, {"pins", net.pins}, {"x", net.x}, {"y", net.y}};
+            if (net.labelAnchor) {
+                item["label_anchor"] = {{"from_pin", net.labelAnchor->fromPin},
+                                        {"to_pin", net.labelAnchor->toPin},
+                                        {"fraction", net.labelAnchor->fraction},
+                                        {"side_b", net.labelAnchor->sideB}};
+            }
+            c["nets"].push_back(std::move(item));
+        }
+        c["comments"] = json::array();
+        for (const auto &[cid, comment] : cell.comments)
+            c["comments"].push_back({{"id", cid}, {"text", comment.text}, {"x", comment.x}, {"y", comment.y}});
+        j["schematic_cells"].push_back(c);
+    }
+    j["layers"] = json::array();
+    for (const auto &[id, layer] : layers) {
+        json entry = {{"id", id},
+                      {"name", layer.name},
+                      {"number", layer.number},
+                      {"datatype", layer.datatype},
+                      {"color", layer.color},
+                      {"pattern", layer.pattern},
+                      {"visible", layer.visible},
+                      {"layout", layer.layout},
+                      {"pdk", layer.pdk},
+                      {"minimum_width", layer.minimumWidth}};
+        if (!layer.stack.empty())
+            entry["stack"] = layer.stack;
+        j["layers"].push_back(std::move(entry));
+    }
+    j["layout_cells"] = json::array();
+    for (const auto &[id, cell] : layoutCells) {
+        json c = {{"id", id},
+                  {"name", cell.name},
+                  {"pdk", cell.pdk},
+                  {"shapes", json::array()},
+                  {"ports", json::array()},
+                  {"instances", json::array()},
+                  {"planned_devices", json::array()},
+                  {"planned_connections", json::array()}};
+        if (!cell.stack.empty())
+            c["stack"] = cell.stack;
+        if (cell.library)
+            c["library"] = true;
+        if (cell.readOnly)
+            c["read_only"] = true;
+        if (cell.reference) {
+            c["reference"] = {{"path", cell.reference->path},
+                              {"format", cell.reference->format},
+                              {"top_cell", cell.reference->topCell}};
+        }
+        if (!cell.device.empty())
+            c["device"] = cell.device;
+        if (cell.generatedBy != 0)
+            c["generated_by"] = cell.generatedBy;
+        if (cell.schematicCell != 0)
+            c["schematic_cell"] = cell.schematicCell;
+        if (!cell.parameters.empty()) {
+            c["parameters"] = json::array();
+            for (const auto &parameter : cell.parameters) {
+                json entry;
+                put(entry, parameter);
+                c["parameters"].push_back(std::move(entry));
+            }
+        }
+        for (const auto &[sid, shape] : cell.shapes) {
+            json s = {{"id", sid}, {"layer", shape.layer}, {"rectangle", json::object()}};
+            if (shape.net)
+                s["net"] = *shape.net;
+            put(s["rectangle"], shape.rectangle);
+            if (!shape.polygon.empty()) {
+                s["polygon"] = json::array();
+                for (const auto &point : shape.polygon)
+                    s["polygon"].push_back({{"x", point.x}, {"y", point.y}});
+            }
+            if (!shape.centerline.empty()) {
+                s["centerline"] = json::array();
+                for (const auto &point : shape.centerline)
+                    s["centerline"].push_back({{"x", point.x}, {"y", point.y}});
+                if (!shape.segmentLayers.empty()) {
+                    s["segment_layers"] = json::array();
+                    for (const auto layer : shape.segmentLayers)
+                        s["segment_layers"].push_back(layer);
+                }
+                if (!shape.pointVias.empty()) {
+                    s["point_vias"] = json::array();
+                    for (const auto &vias : shape.pointVias) {
+                        json entry = json::array();
+                        for (const auto layer : vias)
+                            entry.push_back(layer);
+                        s["point_vias"].push_back(std::move(entry));
+                    }
+                }
+                s["path_width"] = shape.width;
+                if (!shape.segmentWidths.empty()) {
+                    s["segment_widths"] = json::array();
+                    for (const auto width : shape.segmentWidths)
+                        s["segment_widths"].push_back(width);
+                }
+            }
+            if (!shape.text.empty())
+                s["text"] = shape.text;
+            if (!shape.name.empty())
+                s["name"] = shape.name;
+            if (shape.textPolygon)
+                s["text_polygon"] = true;
+            if (shape.textGroup != 0)
+                s["text_group"] = shape.textGroup;
+            if (!shape.textSource.empty())
+                s["text_source"] = shape.textSource;
+            if (shape.routedConnection != 0)
+                s["routed_connection"] = shape.routedConnection;
+            c["shapes"].push_back(s);
+        }
+        for (const auto &[pid, port] : cell.ports) {
+            json p = {{"id", pid},
+                      {"name", port.name},
+                      {"rectangle", json::object()},
+                      {"direction", portDirectionName(port.direction)},
+                      {"side", portSideName(port.side)},
+                      {"net", port.net == 0 ? json(nullptr) : json(port.net)},
+                      {"label", port.label},
+                      {"visible", port.visible},
+                      {"locked", port.locked},
+                      {"source_instance", port.sourceInstance},
+                      {"source_port", port.sourcePort}};
+            p["layer"] = port.layer;
+            if (port.internal)
+                p["internal"] = true;
+            if (port.schematicInstance != 0)
+                p["schematic_instance"] = port.schematicInstance;
+            put(p["rectangle"], port.rectangle);
+            c["ports"].push_back(p);
+        }
+        c["nets"] = json::array();
+        for (const auto &[netId, net] : cell.nets)
+            c["nets"].push_back({{"id", netId}, {"name", net.name}});
+        for (const auto &[iid, instance] : cell.instances) {
+            json item = {
+                {"id", iid},       {"cell", instance.cell}, {"name", instance.name},
+                {"x", instance.x}, {"y", instance.y},       {"orientation", orientationName(instance.orientation)}};
+            if (instance.schematicInstance != 0)
+                item["schematic_instance"] = instance.schematicInstance;
+            c["instances"].push_back(std::move(item));
+        }
+        for (const auto &[did, device] : cell.plannedDevices) {
+            json d = {{"id", did},     {"name", device.name},   {"x", device.x},
+                      {"y", device.y}, {"width", device.width}, {"height", device.height}};
+            if (device.schematicInstance != 0)
+                d["schematic_instance"] = device.schematicInstance;
+            if (!device.device.empty())
+                d["device"] = device.device;
+            if (!device.model.empty())
+                d["model"] = device.model;
+            if (!device.parameters.empty()) {
+                d["parameters"] = json::array();
+                for (const auto &parameter : device.parameters) {
+                    json entry;
+                    put(entry, parameter);
+                    d["parameters"].push_back(std::move(entry));
+                }
+            }
+            if (!device.terminals.empty()) {
+                d["terminals"] = json::object();
+                for (const auto &[terminal, netId] : device.terminals)
+                    d["terminals"][terminal] = netId;
+            }
+            if (!device.placeholder)
+                d["placeholder"] = false;
+            c["planned_devices"].push_back(std::move(d));
+        }
+        for (const auto &[cid, connection] : cell.plannedConnections) {
+            json item = {{"id", cid}, {"from", connection.from}, {"to", connection.to}, {"net", connection.net}};
+            if (connection.fromPort != 0)
+                item["from_port"] = connection.fromPort;
+            if (connection.toPort != 0)
+                item["to_port"] = connection.toPort;
+            if (!connection.fromPin.empty())
+                item["from_pin"] = connection.fromPin;
+            if (!connection.toPin.empty())
+                item["to_pin"] = connection.toPin;
+            if (connection.fromSide)
+                item["from_side"] = portSideName(*connection.fromSide);
+            if (connection.toSide)
+                item["to_side"] = portSideName(*connection.toSide);
+            if (connection.routed)
+                item["routed"] = true;
+            c["planned_connections"].push_back(std::move(item));
+        }
+        j["layout_cells"].push_back(c);
+    }
+    j["procedural_layouts"] = json::array();
+    for (const auto &[id, layout] : proceduralLayouts) {
+        json entry = {{"id", id},
+                      {"name", layout.name},
+                      {"pdk", layout.pdk},
+                      {"script", layout.script},
+                      {"generated_cell", layout.generatedCell}};
+        if (!layout.stack.empty())
+            entry["stack"] = layout.stack;
+        if (!layout.parameters.empty()) {
+            entry["parameters"] = json::array();
+            for (const auto &parameter : layout.parameters) {
+                json item;
+                put(item, parameter);
+                entry["parameters"].push_back(std::move(item));
+            }
+        }
+        if (!layout.generatedScriptHash.empty())
+            entry["generated_script_hash"] = layout.generatedScriptHash;
+        if (!layout.generatedParameterHash.empty())
+            entry["generated_parameter_hash"] = layout.generatedParameterHash;
+        if (!layout.generatedPdkVersion.empty())
+            entry["generated_pdk_version"] = layout.generatedPdkVersion;
+        if (!layout.generatedOutputHash.empty())
+            entry["generated_output_hash"] = layout.generatedOutputHash;
+        if (!layout.generatedLayoutQuality.empty())
+            entry["generated_layout_quality"] = json::parse(layout.generatedLayoutQuality);
+        if (!layout.generatedLayoutPlan.empty())
+            entry["generated_layout_plan"] = json::parse(layout.generatedLayoutPlan);
+        if (!layout.generatedLayoutReview.empty())
+            entry["generated_layout_review"] = json::parse(layout.generatedLayoutReview);
+        j["procedural_layouts"].push_back(std::move(entry));
+    }
+    j["implementation_runs"] = json::array();
+    for (const auto &[_, run] : implementationRuns)
+        j["implementation_runs"].push_back(implementationRunJson(run));
+    j["simulations"] = json::array();
+    for (const auto &[id, sim] : simulations) {
+        json s = {{"id", id},
+                  {"name", sim.name},
+                  {"schematic", sim.schematic},
+                  {"simulator", sim.simulator},
+                  {"analysis", sim.analysis},
+                  {"start", sim.start},
+                  {"stop", sim.stop},
+                  {"step", sim.step},
+                  {"use_initial_conditions", sim.use_initial_conditions},
+                  {"directives", sim.directives},
+                  {"temperature", sim.temperature},
+                  {"signals", sim.captureSignals},
+                  {"graphs", json::array()}};
+        const auto putMap = [](json &target, const char *key, const std::map<std::string, double> &values) {
+            if (values.empty())
+                return;
+            target[key] = values;
+        };
+        if (!sim.modelSection.empty())
+            s["model_section"] = sim.modelSection;
+        putMap(s, "parameters", sim.parameters);
+        putMap(s, "source_overrides", sim.sourceOverrides);
+        if (!sim.dcSource.empty())
+            s["dc_source"] = sim.dcSource;
+        if (sim.dcStart != 0.0 || sim.dcStop != 1.0 || sim.dcStep != 0.01) {
+            s["dc_start"] = sim.dcStart;
+            s["dc_stop"] = sim.dcStop;
+            s["dc_step"] = sim.dcStep;
+        }
+        if (sim.acVariation != "dec" || sim.acPoints != 10 || sim.acStart != 1.0 || sim.acStop != 1e6) {
+            s["ac_variation"] = sim.acVariation;
+            s["ac_points"] = sim.acPoints;
+            s["ac_start"] = sim.acStart;
+            s["ac_stop"] = sim.acStop;
+        }
+        if (!sim.noiseOutput.empty() || !sim.noiseInput.empty() || sim.noiseVariation != "dec" ||
+            sim.noisePoints != 10 || sim.noiseStart != 1.0 || sim.noiseStop != 1e6) {
+            s["noise_output"] = sim.noiseOutput;
+            s["noise_input"] = sim.noiseInput;
+            s["noise_variation"] = sim.noiseVariation;
+            s["noise_points"] = sim.noisePoints;
+            s["noise_start"] = sim.noiseStart;
+            s["noise_stop"] = sim.noiseStop;
+        }
+        if (!sim.tfOutput.empty() || !sim.tfSource.empty()) {
+            s["tf_output"] = sim.tfOutput;
+            s["tf_source"] = sim.tfSource;
+        }
+        if (!sim.corners.empty()) {
+            s["corners"] = json::array();
+            for (const auto &corner : sim.corners) {
+                json entry = {{"name", corner.name}, {"temperature", corner.temperature}};
+                if (!corner.modelSection.empty())
+                    entry["model_section"] = corner.modelSection;
+                putMap(entry, "source_overrides", corner.sourceOverrides);
+                putMap(entry, "parameters", corner.parameters);
+                s["corners"].push_back(std::move(entry));
+            }
+        }
+        if (!sim.sweeps.empty()) {
+            s["sweeps"] = json::array();
+            for (const auto &sweep : sim.sweeps)
+                s["sweeps"].push_back({{"parameter", sweep.parameter}, {"values", sweep.values}});
+        }
+        if (sim.monteCarlo.enabled) {
+            json mc = {{"enabled", true},
+                       {"samples", sim.monteCarlo.samples},
+                       {"temperature_sigma", sim.monteCarlo.temperatureSigma},
+                       {"supply_sigma_percent", sim.monteCarlo.supplySigmaPercent},
+                       {"supply_source", sim.monteCarlo.supplySource},
+                       {"supply_nominal", sim.monteCarlo.supplyNominal},
+                       {"seed", sim.monteCarlo.seed}};
+            putMap(mc, "parameter_sigma_percent", sim.monteCarlo.parameterSigmaPercent);
+            s["monte_carlo"] = std::move(mc);
+        }
+        if (!sim.measurements.empty()) {
+            s["measurements"] = json::array();
+            for (const auto &measurement : sim.measurements) {
+                json entry = {{"name", measurement.name},       {"metric", measurement.metric},
+                              {"signal", measurement.signal},   {"input", measurement.input},
+                              {"voltage", measurement.voltage}, {"tolerance", measurement.tolerance}};
+                if (measurement.threshold)
+                    entry["threshold"] = *measurement.threshold;
+                s["measurements"].push_back(std::move(entry));
+            }
+        }
+        for (const auto &graph : sim.graphs) {
+            json graphJson = {
+                {"id", graph.id}, {"name", graph.name}, {"x_axis", graph.xAxis}, {"y_signals", graph.ySignals}};
+            // Labels and limits are optional so older projects keep the
+            // signal names and auto-scaling.
+            if (!graph.signalLabels.empty())
+                graphJson["signal_labels"] = graph.signalLabels;
+            if (!graph.yAxisLabel.empty())
+                graphJson["y_axis_label"] = graph.yAxisLabel;
+            if (graph.xMin)
+                graphJson["x_min"] = *graph.xMin;
+            if (graph.xMax)
+                graphJson["x_max"] = *graph.xMax;
+            if (graph.yMin)
+                graphJson["y_min"] = *graph.yMin;
+            if (graph.yMax)
+                graphJson["y_max"] = *graph.yMax;
+            if (graph.view != "linear")
+                graphJson["view"] = graph.view;
+            if (graph.fft || graph.fftWindow != "hann" || graph.fftPoints != 0)
+                graphJson["fft"] = {{"enabled", graph.fft}, {"window", graph.fftWindow}, {"points", graph.fftPoints}};
+            if (!graph.showMeasurements)
+                graphJson["show_measurements"] = false;
+            if (!graph.derivedTraces.empty()) {
+                graphJson["derived_traces"] = json::array();
+                for (const auto &trace : graph.derivedTraces)
+                    graphJson["derived_traces"].push_back({{"name", trace.name}, {"expression", trace.expression}});
+            }
+            if (!graph.overlays.empty()) {
+                graphJson["overlays"] = json::array();
+                for (const auto &overlay : graph.overlays)
+                    graphJson["overlays"].push_back({{"run_id", overlay.runId}, {"label", overlay.label}});
+            }
+            if (!graph.markers.empty()) {
+                graphJson["markers"] = json::array();
+                for (const auto &marker : graph.markers) {
+                    json markerJson = {{"label", marker.label}, {"signal", marker.signal}, {"x", marker.x}};
+                    if (marker.hasY)
+                        markerJson["y"] = marker.y;
+                    graphJson["markers"].push_back(std::move(markerJson));
+                }
+            }
+            s["graphs"].push_back(std::move(graphJson));
+        }
+        j["simulations"].push_back(s);
+    }
+    j["simulation_scripts"] = json::array();
+    for (const auto &[id, report] : reports)
+        j["simulation_scripts"].push_back({{"id", id}, {"name", report.name}, {"path", report.path}});
+    return j.dump(2) + "\n";
+}
+
+static Orientation parseOrientation(const std::string &value) {
+    static const std::map<std::string, Orientation> values = {
+        {"r0", Orientation::r0}, {"r90", Orientation::r90}, {"r180", Orientation::r180}, {"r270", Orientation::r270},
+        {"mx", Orientation::mx}, {"my", Orientation::my},   {"m45", Orientation::m45},   {"m135", Orientation::m135}};
+    auto it = values.find(value);
+    if (it == values.end())
+        throw ProjectError("project.orientation", "Unknown orientation: " + value);
+    return it->second;
+}
+
+static const char *pinDirectionName(PinDirection direction) {
+    switch (direction) {
+    case PinDirection::left:
+        return "left";
+    case PinDirection::right:
+        return "right";
+    case PinDirection::up:
+        return "up";
+    case PinDirection::down:
+        return "down";
+    }
+    throw ProjectError("project.pin_direction", "Unknown pin direction value");
+}
+
+static PinDirection parsePinDirection(const std::string &value) {
+    static const std::map<std::string, PinDirection> values = {{"left", PinDirection::left},
+                                                               {"right", PinDirection::right},
+                                                               {"up", PinDirection::up},
+                                                               {"down", PinDirection::down}};
+    auto it = values.find(value);
+    return it == values.end() ? PinDirection::right : it->second;
+}
+
+const char *portDirectionName(PortDirection direction) {
+    switch (direction) {
+    case PortDirection::input:
+        return "input";
+    case PortDirection::output:
+        return "output";
+    case PortDirection::inout:
+        return "inout";
+    case PortDirection::power:
+        return "power";
+    case PortDirection::ground:
+        return "ground";
+    }
+    throw ProjectError("project.port_direction", "Unknown port direction value");
+}
+
+const char *portSideName(PortSide side) {
+    switch (side) {
+    case PortSide::left:
+        return "left";
+    case PortSide::right:
+        return "right";
+    case PortSide::top:
+        return "top";
+    case PortSide::bottom:
+        return "bottom";
+    }
+    throw ProjectError("project.port_side", "Unknown port side value");
+}
+
+std::optional<double> parseDoublePrefix(const std::string &text, std::size_t &consumed) {
+    consumed = 0;
+    std::size_t index = 0;
+    if (index < text.size() && (text[index] == '+' || text[index] == '-'))
+        ++index;
+
+    bool hasDigits = false;
+    while (index < text.size() && std::isdigit(static_cast<unsigned char>(text[index]))) {
+        ++index;
+        hasDigits = true;
+    }
+    if (index < text.size() && text[index] == '.') {
+        ++index;
+        while (index < text.size() && std::isdigit(static_cast<unsigned char>(text[index]))) {
+            ++index;
+            hasDigits = true;
+        }
+    }
+    if (!hasDigits)
+        return std::nullopt;
+
+    const auto mantissaEnd = index;
+    if (index < text.size() && (text[index] == 'e' || text[index] == 'E')) {
+        auto exponent = index + 1;
+        if (exponent < text.size() && (text[exponent] == '+' || text[exponent] == '-'))
+            ++exponent;
+        const auto exponentDigits = exponent;
+        while (exponent < text.size() && std::isdigit(static_cast<unsigned char>(text[exponent])))
+            ++exponent;
+        index = exponent > exponentDigits ? exponent : mantissaEnd;
+    }
+
+    std::istringstream stream(text.substr(0, index));
+    stream.imbue(std::locale::classic());
+    double value = 0.0;
+    stream >> value;
+    if (!stream || !stream.eof())
+        return std::nullopt;
+    consumed = index;
+    return value;
+}
+
+std::optional<PortDirection> parsePortDirection(const std::string &value) {
+    static const std::map<std::string, PortDirection> values = {
+        {"input", PortDirection::input}, {"output", PortDirection::output}, {"inout", PortDirection::inout},
+        {"power", PortDirection::power}, {"ground", PortDirection::ground},
+    };
+    const auto it = values.find(value);
+    if (it == values.end())
+        return std::nullopt;
+    return it->second;
+}
+
+std::optional<PortSide> parsePortSide(const std::string &value) {
+    static const std::map<std::string, PortSide> values = {
+        {"left", PortSide::left},
+        {"right", PortSide::right},
+        {"top", PortSide::top},
+        {"bottom", PortSide::bottom},
+    };
+    const auto it = values.find(value);
+    if (it == values.end())
+        return std::nullopt;
+    return it->second;
+}
+
+namespace {
+
+template <typename Map, typename Value> void insertUnique(Map &map, ObjectId id, Value &&value, const char *kind) {
+    if (!map.emplace(id, std::forward<Value>(value)).second)
+        throw ProjectError("project.duplicate", std::string("Duplicate ") + kind + " id: " + std::to_string(id));
+}
+
+json inventoryEntry(ObjectId id, const std::string &name, const std::string &file) {
+    return {{"id", id}, {"name", name}, {"file", file}};
+}
+
+} // namespace
+
+Project Project::deserialize(const std::string &text) {
+    try {
+        auto j = json::parse(text);
+        if (j.at("format") != "openvlsi-project")
+            throw ProjectError("project.format", "Unsupported project format");
+        if (j.at("schema_version") != schemaVersion)
+            throw ProjectError("project.schema", "Unsupported project schema version");
+        Project p;
+        p.identity = j.at("identity");
+        p.name = j.at("name");
+        p.grid = j.at("grid");
+        p.units.nanometers_per_unit = j.at("units").at("nanometers_per_unit");
+        p.units.denominator = j.at("units").at("denominator");
+        if (j.contains("package_dependencies")) {
+            for (const auto &dependency : j.at("package_dependencies")) {
+                const auto name = dependency.get<std::string>();
+                if (!name.empty() && std::find(p.packageDependencies.begin(), p.packageDependencies.end(), name) ==
+                                         p.packageDependencies.end())
+                    p.packageDependencies.push_back(name);
+            }
+        }
+        if (j.contains("trusted_packages")) {
+            for (const auto &package : j.at("trusted_packages")) {
+                const auto name = package.get<std::string>();
+                if (!name.empty() &&
+                    std::find(p.trustedPackages.begin(), p.trustedPackages.end(), name) == p.trustedPackages.end())
+                    p.trustedPackages.push_back(name);
+            }
+        }
+        for (const auto &c : j.at("schematic_cells")) {
+            SchematicCell cell{c.at("id"), c.at("name")};
+            cell.pdk = c.value("pdk", std::string{genericPdkId});
+            if (cell.pdk.empty())
+                cell.pdk = genericPdkId;
+            cell.textSchematic = c.value("text_schematic", false);
+            cell.spiceText = c.value("spice_text", std::string{});
+            cell.spiceSourcePath = c.value("spice_source_path", std::string{});
+            cell.systemVerilogSchematic = c.value("systemverilog", false);
+            cell.systemVerilogText = c.value("systemverilog_text", std::string{});
+            if (c.contains("parameters")) {
+                for (const auto &parameter : c.at("parameters"))
+                    cell.parameters.push_back({parameter.at("id"), parameter.at("name"), parameter.at("value")});
+            }
+            for (const auto &s : c.at("symbols")) {
+                Symbol symbol{s.at("id"), s.at("name"), s.at("artwork")};
+                symbol.sourceCell = s.value("cell", ObjectId{0});
+                if (s.contains("label") && s.at("label").is_object()) {
+                    const auto &label = s.at("label");
+                    symbol.label = SymbolLabel{label.value("x", Coordinate{0}), label.value("y", Coordinate{0})};
+                }
+                for (const auto &pin : s.at("pins")) {
+                    Pin parsedPin{pin.at("id"), pin.at("name"), pin.at("x"), pin.at("y"),
+                                  parsePinDirection(pin.value("direction", "right"))};
+                    parsedPin.width = pin.value("width", 1);
+                    parsedPin.widthKnown = pin.value("width_known", true);
+                    symbol.pins.push_back(std::move(parsedPin));
+                }
+                insertUnique(cell.symbols, symbol.id, std::move(symbol), "schematic symbol");
+            }
+            for (const auto &i : c.at("instances")) {
+                SchematicInstance instance{i.at("id"), i.at("symbol"), i.at("name"),
+                                           i.at("x"),  i.at("y"),      parseOrientation(i.at("orientation"))};
+                if (i.contains("parameters")) {
+                    for (const auto &parameter : i.at("parameters"))
+                        instance.parameters.push_back(
+                            {parameter.at("id"), parameter.at("name"), parameter.at("value")});
+                }
+                insertUnique(cell.instances, instance.id, std::move(instance), "schematic instance");
+            }
+            for (const auto &n : c.at("nets")) {
+                Net net{n.at("id"), n.at("name"), n.at("pins").get<std::vector<ObjectId>>(), n.value("x", 0),
+                        n.value("y", 0)};
+                if (n.contains("label_anchor") && n.at("label_anchor").is_object()) {
+                    const auto &anchor = n.at("label_anchor");
+                    NetLabelAnchor parsed;
+                    parsed.fromPin = anchor.value("from_pin", ObjectId{0});
+                    parsed.toPin = anchor.value("to_pin", ObjectId{0});
+                    parsed.fraction = std::clamp(anchor.value("fraction", 0.5), 0.0, 1.0);
+                    parsed.sideB = anchor.value("side_b", false);
+                    if (parsed.fromPin != 0 && parsed.toPin != 0 && parsed.fromPin != parsed.toPin)
+                        net.labelAnchor = parsed;
+                }
+                insertUnique(cell.nets, net.id, std::move(net), "schematic net");
+            }
+            if (c.contains("comments") && c.at("comments").is_array()) {
+                for (const auto &cm : c.at("comments")) {
+                    const auto id = cm.at("id").get<ObjectId>();
+                    insertUnique(cell.comments, id,
+                                 SchematicComment{id, cm.at("text"), cm.value("x", 0), cm.value("y", 0)},
+                                 "schematic comment");
+                }
+            }
+            insertUnique(p.schematicCells, cell.id, std::move(cell), "schematic cell");
+        }
+        for (const auto &l : j.at("layers")) {
+            const auto name = l.at("name").get<std::string>();
+            Layer layer{l.at("id"),
+                        name,
+                        l.at("number"),
+                        l.value("visible", true),
+                        l.value("layout", ObjectId{0}),
+                        l.value("pdk", std::string{}),
+                        l.at("datatype").get<int>(),
+                        l.value("color", std::string{}),
+                        l.value("pattern", -1)};
+            layer.stack = l.value("stack", std::string{});
+            layer.minimumWidth = l.value("minimum_width", Coordinate{0});
+            insertUnique(p.layers, layer.id, std::move(layer), "layer");
+        }
+        for (const auto &c : j.at("layout_cells")) {
+            LayoutCell cell{c.at("id"), c.at("name")};
+            cell.pdk = c.value("pdk", std::string{genericPdkId});
+            if (cell.pdk.empty())
+                cell.pdk = genericPdkId;
+            cell.stack = c.value("stack", std::string{});
+            cell.library = c.value("library", false);
+            cell.readOnly = c.value("read_only", false);
+            if (c.contains("reference")) {
+                const auto &reference = c.at("reference");
+                cell.reference =
+                    LayoutReference{reference.value("path", std::string{}), reference.value("format", std::string{}),
+                                    reference.value("top_cell", std::string{})};
+            }
+            cell.device = c.value("device", std::string{});
+            cell.generatedBy = c.value("generated_by", ObjectId{0});
+            cell.schematicCell = c.value("schematic_cell", ObjectId{0});
+            if (c.contains("parameters")) {
+                for (const auto &parameter : c.at("parameters"))
+                    cell.parameters.push_back({parameter.at("id"), parameter.at("name"), parameter.at("value")});
+            }
+            for (const auto &s : c.at("shapes")) {
+                Shape shape{s.at("id"),
+                            s.at("layer"),
+                            s.contains("net") ? std::optional<ObjectId>(s.at("net")) : std::nullopt,
+                            Rect{s.at("rectangle").at("x"), s.at("rectangle").at("y"), s.at("rectangle").at("width"),
+                                 s.at("rectangle").at("height")},
+                            {}};
+                if (s.contains("polygon"))
+                    for (const auto &point : s.at("polygon"))
+                        shape.polygon.push_back({point.at("x"), point.at("y")});
+                if (s.contains("centerline"))
+                    for (const auto &point : s.at("centerline"))
+                        shape.centerline.push_back({point.at("x"), point.at("y")});
+                if (s.contains("segment_layers"))
+                    for (const auto &layer : s.at("segment_layers"))
+                        shape.segmentLayers.push_back(layer.get<ObjectId>());
+                if (s.contains("point_vias"))
+                    for (const auto &entry : s.at("point_vias")) {
+                        std::vector<ObjectId> vias;
+                        for (const auto &layer : entry)
+                            vias.push_back(layer.get<ObjectId>());
+                        shape.pointVias.push_back(std::move(vias));
+                    }
+                shape.width = s.value("path_width", Coordinate{0});
+                if (s.contains("segment_widths"))
+                    for (const auto &width : s.at("segment_widths"))
+                        shape.segmentWidths.push_back(width.get<Coordinate>());
+                if (shape.width <= 0 && !shape.segmentWidths.empty())
+                    shape.width = *std::max_element(shape.segmentWidths.begin(), shape.segmentWidths.end());
+                shape.text = s.value("text", std::string{});
+                shape.name = s.value("name", std::string{});
+                shape.textPolygon = s.value("text_polygon", false);
+                shape.textGroup = s.value("text_group", ObjectId{0});
+                shape.textSource = s.value("text_source", std::string{});
+                shape.routedConnection = s.value("routed_connection", ObjectId{0});
+                insertUnique(cell.shapes, shape.id, shape, "layout shape");
+            }
+            for (const auto &net : c.at("nets")) {
+                const auto id = net.at("id").get<ObjectId>();
+                insertUnique(cell.nets, id, LayoutNet{id, net.at("name")}, "layout net");
+            }
+            for (const auto &port : c.at("ports")) {
+                Port value{port.at("id"), port.at("name"), port.at("layer"),
+                           Rect{port.at("rectangle").at("x"), port.at("rectangle").at("y"),
+                                port.at("rectangle").at("width"), port.at("rectangle").at("height")}};
+                const auto direction = parsePortDirection(port.at("direction").get<std::string>());
+                const auto side = parsePortSide(port.at("side").get<std::string>());
+                if (!direction || !side)
+                    throw ProjectError("project.port", "Layout port has an unknown direction or side");
+                value.direction = *direction;
+                value.side = *side;
+                value.net = port.at("net").is_null() ? ObjectId{0} : port.at("net").get<ObjectId>();
+                value.label = port.at("label").get<std::string>();
+                value.visible = port.at("visible").get<bool>();
+                value.locked = port.at("locked").get<bool>();
+                value.internal = port.value("internal", false);
+                value.sourceInstance = port.at("source_instance").get<ObjectId>();
+                value.sourcePort = port.at("source_port").get<ObjectId>();
+                value.schematicInstance = port.value("schematic_instance", ObjectId{0});
+                insertUnique(cell.ports, value.id, std::move(value), "layout port");
+            }
+            for (const auto &i : c.at("instances")) {
+                LayoutInstance instance{i.at("id"), i.at("cell"), i.at("name"),
+                                        i.at("x"),  i.at("y"),    parseOrientation(i.at("orientation"))};
+                instance.schematicInstance = i.value("schematic_instance", ObjectId{0});
+                insertUnique(cell.instances, instance.id, std::move(instance), "layout instance");
+            }
+            if (c.contains("planned_devices")) {
+                for (const auto &d : c.at("planned_devices")) {
+                    PlannedDevice device;
+                    device.id = d.at("id");
+                    device.name = d.value("name", std::string{});
+                    device.schematicInstance = d.value("schematic_instance", ObjectId{0});
+                    device.x = d.value("x", Coordinate{0});
+                    device.y = d.value("y", Coordinate{0});
+                    device.width = d.value("width", Coordinate{0});
+                    device.height = d.value("height", Coordinate{0});
+                    device.device = d.value("device", std::string{});
+                    device.model = d.value("model", std::string{});
+                    if (const auto parameters = d.find("parameters"); parameters != d.end() && parameters->is_array()) {
+                        for (const auto &parameter : *parameters) {
+                            Parameter value;
+                            value.id = parameter.value("id", ObjectId{0});
+                            value.name = parameter.value("name", std::string{});
+                            value.value = parameter.value("value", std::string{});
+                            if (!value.name.empty())
+                                device.parameters.push_back(std::move(value));
+                        }
+                    }
+                    if (const auto terminals = d.find("terminals"); terminals != d.end() && terminals->is_object()) {
+                        for (const auto &[terminal, netId] : terminals->items())
+                            device.terminals[terminal] = netId.get<ObjectId>();
+                    }
+                    device.placeholder = d.value("placeholder", true);
+                    insertUnique(cell.plannedDevices, device.id, std::move(device), "planned device");
+                }
+            }
+            if (c.contains("planned_connections")) {
+                for (const auto &connection : c.at("planned_connections")) {
+                    PlannedConnection planned;
+                    planned.id = connection.at("id");
+                    planned.from = connection.at("from").get<ObjectId>();
+                    planned.to = connection.at("to").get<ObjectId>();
+                    planned.net = connection.at("net").get<ObjectId>();
+                    planned.fromPort = connection.value("from_port", ObjectId{0});
+                    planned.toPort = connection.value("to_port", ObjectId{0});
+                    planned.fromPin = connection.value("from_pin", std::string{});
+                    planned.toPin = connection.value("to_pin", std::string{});
+                    if (connection.contains("from_side"))
+                        planned.fromSide = parsePortSide(connection.at("from_side").get<std::string>());
+                    if (connection.contains("to_side"))
+                        planned.toSide = parsePortSide(connection.at("to_side").get<std::string>());
+                    planned.routed = connection.value("routed", false);
+                    insertUnique(cell.plannedConnections, planned.id, std::move(planned), "planned connection");
+                }
+            }
+            insertUnique(p.layoutCells, cell.id, std::move(cell), "layout cell");
+        }
+        if (j.contains("procedural_layouts")) {
+            for (const auto &layout : j.at("procedural_layouts")) {
+                ProceduralLayout entry;
+                entry.id = layout.at("id");
+                entry.name = layout.at("name");
+                entry.pdk = layout.value("pdk", std::string{genericPdkId});
+                if (entry.pdk.empty())
+                    entry.pdk = genericPdkId;
+                entry.stack = layout.value("stack", std::string{});
+                entry.script = layout.value("script", std::string{});
+                entry.generatedCell = layout.value("generated_cell", ObjectId{0});
+                if (const auto parameters = layout.find("parameters");
+                    parameters != layout.end() && parameters->is_array()) {
+                    for (const auto &parameter : *parameters) {
+                        Parameter value;
+                        value.id = parameter.value("id", ObjectId{0});
+                        value.name = parameter.value("name", std::string{});
+                        value.value = parameter.value("value", std::string{});
+                        if (value.id != 0 && !value.name.empty())
+                            entry.parameters.push_back(std::move(value));
+                    }
+                }
+                entry.generatedScriptHash = layout.value("generated_script_hash", std::string{});
+                entry.generatedParameterHash = layout.value("generated_parameter_hash", std::string{});
+                entry.generatedPdkVersion = layout.value("generated_pdk_version", std::string{});
+                entry.generatedOutputHash = layout.value("generated_output_hash", std::string{});
+                if (const auto quality = layout.find("generated_layout_quality");
+                    quality != layout.end() && quality->is_object())
+                    entry.generatedLayoutQuality = quality->dump();
+                if (const auto plan = layout.find("generated_layout_plan"); plan != layout.end() && plan->is_object())
+                    entry.generatedLayoutPlan = plan->dump();
+                if (const auto review = layout.find("generated_layout_review");
+                    review != layout.end() && review->is_object())
+                    entry.generatedLayoutReview = review->dump();
+                const auto layoutId = entry.id;
+                insertUnique(p.proceduralLayouts, layoutId, std::move(entry), "procedural layout");
+            }
+        }
+        if (j.contains("implementation_runs")) {
+            for (const auto &run : j.at("implementation_runs")) {
+                auto entry = implementationRunFromJson(run);
+                const auto runId = entry.id;
+                insertUnique(p.implementationRuns, runId, std::move(entry), "implementation run");
+            }
+        }
+        if (j.contains("simulations")) {
+            for (const auto &s : j.at("simulations")) {
+                SimulationItem sim;
+                sim.id = s.at("id");
+                sim.name = s.at("name");
+                sim.schematic = s.value("schematic", ObjectId{0});
+                sim.simulator = s.value("simulator", std::string{"ngspice"});
+                sim.analysis = s.value("analysis", std::string{"transient"});
+                sim.start = s.value("start", 0.0);
+                sim.stop = s.value("stop", 1.0);
+                sim.step = s.value("step", 0.01);
+                sim.use_initial_conditions = s.value("use_initial_conditions", false);
+                sim.directives = s.value("directives", std::string{});
+                sim.temperature = s.value("temperature", 27.0);
+                sim.modelSection = s.value("model_section", std::string{});
+                const auto readMap = [](const json &source, const char *key, std::map<std::string, double> &target) {
+                    if (!source.contains(key) || !source.at(key).is_object())
+                        return;
+                    for (auto entry = source.at(key).begin(); entry != source.at(key).end(); ++entry) {
+                        if (entry.value().is_number())
+                            target[entry.key()] = entry.value().get<double>();
+                    }
+                };
+                readMap(s, "parameters", sim.parameters);
+                readMap(s, "source_overrides", sim.sourceOverrides);
+                sim.dcSource = s.value("dc_source", std::string{});
+                sim.dcStart = s.value("dc_start", 0.0);
+                sim.dcStop = s.value("dc_stop", 1.0);
+                sim.dcStep = s.value("dc_step", 0.01);
+                sim.acVariation = s.value("ac_variation", std::string{"dec"});
+                sim.acPoints = s.value("ac_points", 10);
+                sim.acStart = s.value("ac_start", 1.0);
+                sim.acStop = s.value("ac_stop", 1e6);
+                sim.noiseOutput = s.value("noise_output", std::string{});
+                sim.noiseInput = s.value("noise_input", std::string{});
+                sim.noiseVariation = s.value("noise_variation", std::string{"dec"});
+                sim.noisePoints = s.value("noise_points", 10);
+                sim.noiseStart = s.value("noise_start", 1.0);
+                sim.noiseStop = s.value("noise_stop", 1e6);
+                sim.tfOutput = s.value("tf_output", std::string{});
+                sim.tfSource = s.value("tf_source", std::string{});
+                if (s.contains("corners") && s.at("corners").is_array()) {
+                    for (const auto &cornerJson : s.at("corners")) {
+                        SimulationCorner corner;
+                        corner.name = cornerJson.value("name", std::string{"tt"});
+                        corner.modelSection = cornerJson.value("model_section", std::string{});
+                        corner.temperature = cornerJson.value("temperature", 27.0);
+                        readMap(cornerJson, "source_overrides", corner.sourceOverrides);
+                        readMap(cornerJson, "parameters", corner.parameters);
+                        sim.corners.push_back(std::move(corner));
+                    }
+                }
+                if (s.contains("sweeps") && s.at("sweeps").is_array()) {
+                    for (const auto &sweepJson : s.at("sweeps")) {
+                        SimulationSweep sweep;
+                        sweep.parameter = sweepJson.value("parameter", std::string{});
+                        if (sweepJson.contains("values") && sweepJson.at("values").is_array())
+                            sweep.values = sweepJson.at("values").get<std::vector<double>>();
+                        if (!sweep.parameter.empty() && !sweep.values.empty())
+                            sim.sweeps.push_back(std::move(sweep));
+                    }
+                }
+                if (s.contains("monte_carlo") && s.at("monte_carlo").is_object()) {
+                    const auto &mc = s.at("monte_carlo");
+                    sim.monteCarlo.enabled = mc.value("enabled", false);
+                    sim.monteCarlo.samples = mc.value("samples", 20);
+                    sim.monteCarlo.temperatureSigma = mc.value("temperature_sigma", 0.0);
+                    sim.monteCarlo.supplySigmaPercent = mc.value("supply_sigma_percent", 0.0);
+                    sim.monteCarlo.supplySource = mc.value("supply_source", std::string{"V1"});
+                    sim.monteCarlo.supplyNominal = mc.value("supply_nominal", 1.0);
+                    sim.monteCarlo.seed = mc.value("seed", std::uint32_t{1});
+                    readMap(mc, "parameter_sigma_percent", sim.monteCarlo.parameterSigmaPercent);
+                }
+                if (s.contains("measurements") && s.at("measurements").is_array()) {
+                    for (const auto &measurementJson : s.at("measurements")) {
+                        SimulationMeasurementSpec measurement;
+                        measurement.name = measurementJson.value("name", std::string{});
+                        measurement.metric = measurementJson.value("metric", std::string{});
+                        measurement.signal = measurementJson.value("signal", std::string{});
+                        measurement.input = measurementJson.value("input", std::string{});
+                        measurement.voltage = measurementJson.value("voltage", 0.0);
+                        measurement.tolerance = measurementJson.value("tolerance", 0.02);
+                        if (measurementJson.contains("threshold") && measurementJson.at("threshold").is_number())
+                            measurement.threshold = measurementJson.at("threshold").get<double>();
+                        if (!measurement.name.empty() && !measurement.metric.empty())
+                            sim.measurements.push_back(std::move(measurement));
+                    }
+                }
+                sim.captureSignals = s.value("signals", std::string{});
+                if (s.contains("graphs")) {
+                    for (const auto &g : s.at("graphs")) {
+                        SimulationGraph graph;
+                        graph.id = g.at("id");
+                        graph.name = g.value("name", std::string{"Graph"});
+                        graph.xAxis = g.value("x_axis", std::string{"time"});
+                        for (const auto &signal : g.at("y_signals").get<std::vector<std::string>>()) {
+                            if (!signal.empty() &&
+                                std::find(graph.ySignals.begin(), graph.ySignals.end(), signal) == graph.ySignals.end())
+                                graph.ySignals.push_back(signal);
+                        }
+                        if (const auto labels = g.find("signal_labels"); labels != g.end() && labels->is_object()) {
+                            for (auto label = labels->begin(); label != labels->end(); ++label) {
+                                if (label.value().is_string() && !label.value().get<std::string>().empty())
+                                    graph.signalLabels[label.key()] = label.value().get<std::string>();
+                            }
+                        }
+                        graph.yAxisLabel = g.value("y_axis_label", std::string{});
+                        if (g.contains("x_min") && !g.at("x_min").is_null())
+                            graph.xMin = g.at("x_min").get<double>();
+                        if (g.contains("x_max") && !g.at("x_max").is_null())
+                            graph.xMax = g.at("x_max").get<double>();
+                        if (g.contains("y_min") && !g.at("y_min").is_null())
+                            graph.yMin = g.at("y_min").get<double>();
+                        if (g.contains("y_max") && !g.at("y_max").is_null())
+                            graph.yMax = g.at("y_max").get<double>();
+                        graph.view = g.value("view", std::string{"linear"});
+                        if (const auto fft = g.find("fft"); fft != g.end() && fft->is_object()) {
+                            graph.fft = fft->value("enabled", false);
+                            graph.fftWindow = fft->value("window", std::string{"hann"});
+                            graph.fftPoints = fft->value("points", 0);
+                        }
+                        graph.showMeasurements = g.value("show_measurements", true);
+                        if (const auto derived = g.find("derived_traces"); derived != g.end() && derived->is_array()) {
+                            for (const auto &entry : *derived) {
+                                if (!entry.is_object())
+                                    continue;
+                                SimulationDerivedTrace trace;
+                                trace.name = entry.value("name", std::string{});
+                                trace.expression = entry.value("expression", std::string{});
+                                if (!trace.expression.empty())
+                                    graph.derivedTraces.push_back(std::move(trace));
+                            }
+                        }
+                        if (const auto overlays = g.find("overlays"); overlays != g.end() && overlays->is_array()) {
+                            for (const auto &entry : *overlays) {
+                                if (!entry.is_object())
+                                    continue;
+                                SimulationOverlayRun overlay;
+                                overlay.runId = entry.value("run_id", std::string{});
+                                overlay.label = entry.value("label", std::string{});
+                                if (!overlay.runId.empty())
+                                    graph.overlays.push_back(std::move(overlay));
+                            }
+                        }
+                        if (const auto markers = g.find("markers"); markers != g.end() && markers->is_array()) {
+                            for (const auto &entry : *markers) {
+                                if (!entry.is_object())
+                                    continue;
+                                SimulationGraphMarker marker;
+                                marker.label = entry.value("label", std::string{});
+                                marker.signal = entry.value("signal", std::string{});
+                                marker.x = entry.value("x", 0.0);
+                                if (entry.contains("y") && entry.at("y").is_number()) {
+                                    marker.y = entry.at("y").get<double>();
+                                    marker.hasY = true;
+                                }
+                                graph.markers.push_back(std::move(marker));
+                            }
+                        }
+                        sim.graphs.push_back(std::move(graph));
+                    }
+                }
+                insertUnique(p.simulations, sim.id, std::move(sim), "simulation");
+            }
+        }
+        for (const auto &report : j.at("simulation_scripts")) {
+            ProjectReport entry;
+            entry.id = report.at("id");
+            entry.name = report.at("name");
+            entry.path = report.at("path");
+            insertUnique(p.reports, entry.id, std::move(entry), "simulation script");
+        }
+        auto diagnostics = p.validate();
+        if (!diagnostics.empty())
+            throw ProjectError(diagnostics.front().code, diagnostics.front().message);
+        return p;
+    } catch (const ProjectError &) {
+        throw;
+    } catch (const std::exception &e) {
+        throw ProjectError("project.parse", e.what());
+    }
+}
+
+std::filesystem::path projectRootDirectory(const std::filesystem::path &path) {
+    if (path.empty())
+        throw ProjectError("project.path", "Project path must not be empty");
+    std::error_code status;
+    if (std::filesystem::is_directory(path, status) && !status)
+        return path;
+    if (path.extension() == ".ovpro" || path.filename() == "project.ovpro") {
+        // A bare file name (for example `openvlsi-cli pex project.ovpro ...`) has an
+        // empty parent_path; callers must still target the current directory
+        // instead of trying to create an empty path.
+        auto root = path.parent_path();
+        return root.empty() ? std::filesystem::path{"."} : root;
+    }
+    return path;
+}
+
+namespace {
+
+std::filesystem::path projectRoot(const std::filesystem::path &path) { return projectRootDirectory(path); }
+
+std::string normalizedRoot(const std::filesystem::path &path) {
+    std::error_code status;
+    const auto canonical = std::filesystem::weakly_canonical(path, status);
+    return (status ? path.lexically_normal() : canonical).string();
+}
+
+std::string projectRevision(const std::filesystem::path &root) {
+    std::vector<std::filesystem::path> files;
+    const auto addDirectory = [&](const std::filesystem::path &directory, const std::string &extension) {
+        std::error_code status;
+        if (!std::filesystem::is_directory(directory, status) || status)
+            return;
+        for (std::filesystem::directory_iterator it(directory, status), end; !status && it != end;
+             it.increment(status)) {
+            if (it->is_regular_file() && it->path().extension() == extension)
+                files.push_back(it->path());
+        }
+    };
+    files.push_back(root / "project.ovpro");
+    addDirectory(root / "sch", ".ovsch");
+    addDirectory(root / "lay", ".ovlay");
+    addDirectory(root / "impl", ".ovimpl");
+    addDirectory(root / "sim", ".ovsim");
+    std::sort(files.begin(), files.end());
+
+    constexpr std::uint64_t offset = 1469598103934665603ULL;
+    constexpr std::uint64_t prime = 1099511628211ULL;
+    std::uint64_t hash = offset;
+    const auto mix = [&](const std::string &text) {
+        for (const unsigned char character : text) {
+            hash ^= character;
+            hash *= prime;
+        }
+        hash ^= 0xff;
+        hash *= prime;
+    };
+    std::error_code status;
+    for (const auto &file : files) {
+        mix(file.lexically_relative(root).generic_string());
+        const auto size = std::filesystem::file_size(file, status);
+        mix(status ? std::string("missing") : std::to_string(size));
+        const auto modified = std::filesystem::last_write_time(file, status);
+        mix(status ? std::string("missing")
+                   : std::to_string(static_cast<std::int64_t>(modified.time_since_epoch().count())));
+    }
+    std::ostringstream text;
+    text << std::hex << hash;
+    return text.str();
+}
+
+class ProjectLock {
+  public:
+    ProjectLock(const std::filesystem::path &root, bool exclusive) {
+        std::error_code status;
+        std::filesystem::create_directories(root / "build", status);
+        const auto path = root / "build" / ".openvlsi-save.lock";
+#ifndef _WIN32
+        descriptor_ = ::open(path.c_str(), O_CREAT | O_RDWR, 0666);
+        if (descriptor_ >= 0) {
+            const auto operation = exclusive ? LOCK_EX : LOCK_SH;
+            while (::flock(descriptor_, operation) != 0 && errno == EINTR) {
+            }
+        }
+#else
+        handle_ = CreateFileW(path.wstring().c_str(), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                              nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (handle_ != INVALID_HANDLE_VALUE) {
+            OVERLAPPED overlapped{};
+            LockFileEx(handle_, exclusive ? LOCKFILE_EXCLUSIVE_LOCK : 0, 0, MAXDWORD, MAXDWORD, &overlapped);
+        }
+#endif
+    }
+    ~ProjectLock() {
+#ifndef _WIN32
+        if (descriptor_ >= 0) {
+            ::flock(descriptor_, LOCK_UN);
+            ::close(descriptor_);
+        }
+#else
+        if (handle_ != INVALID_HANDLE_VALUE) {
+            OVERLAPPED overlapped{};
+            UnlockFileEx(handle_, 0, MAXDWORD, MAXDWORD, &overlapped);
+            CloseHandle(handle_);
+        }
+#endif
+    }
+    ProjectLock(const ProjectLock &) = delete;
+    ProjectLock &operator=(const ProjectLock &) = delete;
+
+  private:
+#ifndef _WIN32
+    int descriptor_ = -1;
+#else
+    HANDLE handle_ = INVALID_HANDLE_VALUE;
+#endif
+};
+
+class ProjectSaveLock : public ProjectLock {
+  public:
+    explicit ProjectSaveLock(const std::filesystem::path &root) : ProjectLock(root, true) {}
+};
+
+class ProjectReadLock : public ProjectLock {
+  public:
+    explicit ProjectReadLock(const std::filesystem::path &root) : ProjectLock(root, false) {}
+};
+
+std::string recoveryHint() {
+    return " Open with recovery=true or run 'openvlsi-cli project-repair <project>' to quarantine the invalid file "
+           "instead of deleting it.";
+}
+
+std::string safeFileStem(const std::string &name) {
+    std::string stem;
+    stem.reserve(name.size());
+    for (const unsigned char character : name) {
+        if (std::isalnum(character) || character == '-' || character == '_' || character == ' ' || character == '.')
+            stem.push_back(static_cast<char>(character));
+        else
+            stem.push_back('_');
+    }
+    while (!stem.empty() && stem.front() == '.')
+        stem.erase(stem.begin());
+    if (stem.empty())
+        stem = "cell";
+    return stem;
+}
+
+json readJsonFile(const std::filesystem::path &path) {
+    std::ifstream stream(path, std::ios::binary);
+    if (!stream)
+        throw ProjectError("project.load", "Unable to open file: " + path.string());
+    try {
+        return json::parse(stream);
+    } catch (const std::exception &error) {
+        throw ProjectError("project.parse", "Unable to parse " + path.string() + ": " + error.what());
+    }
+}
+
+void writeJsonFile(const std::filesystem::path &path, const json &value) {
+    // Write to a sibling temporary file and rename it into place. Readers then
+    // see either the previous complete file or the new complete file, never a
+    // truncated one while another process is saving.
+    auto temporary = path;
+    temporary += ".tmp";
+    std::ofstream stream(temporary, std::ios::binary | std::ios::trunc);
+    if (!stream)
+        throw ProjectError("project.save", "Unable to open file for writing: " + path.string());
+    stream << value.dump(2) << "\n";
+    stream.close();
+    if (!stream)
+        throw ProjectError("project.save", "Unable to write file: " + path.string());
+    std::error_code status;
+    std::filesystem::rename(temporary, path, status);
+    if (status) {
+        // Windows does not replace an existing target with std::filesystem::rename.
+        status.clear();
+        std::filesystem::remove(path, status);
+        status.clear();
+        std::filesystem::rename(temporary, path, status);
+    }
+    if (status) {
+        std::filesystem::remove(temporary, status);
+        throw ProjectError("project.save", "Unable to replace file atomically: " + path.string());
+    }
+}
+
+void ensureDirectory(const std::filesystem::path &path) { std::filesystem::create_directories(path); }
+
+// Removes stale sidecars only after the new metadata has been written. Readers
+// that understand the inventory ignore unlisted files, so a crash between the
+// metadata write and this cleanup leaves an openable project.
+void pruneDirectory(const std::filesystem::path &path, const std::string &extension,
+                    const std::set<std::string> &keep) {
+    std::error_code status;
+    for (std::filesystem::directory_iterator iterator(path, status), end; !status && iterator != end;
+         iterator.increment(status)) {
+        if (!iterator->is_regular_file() || iterator->path().extension() != extension)
+            continue;
+        if (!keep.contains(iterator->path().filename().string()))
+            std::filesystem::remove(iterator->path(), status);
+        status.clear();
+    }
+}
+
+void ensureGitignore(const std::filesystem::path &root) {
+    const auto path = root / ".gitignore";
+    std::string text;
+    {
+        std::ifstream input(path);
+        if (input)
+            text.assign(std::istreambuf_iterator<char>(input), {});
+    }
+    const auto ensureLine = [&](const std::string &line) {
+        if (text.find(line + "\n") == std::string::npos && text != line)
+            text += (text.empty() || text.back() == '\n' ? "" : "\n") + line + "\n";
+    };
+    ensureLine("build/");
+    std::ofstream output(path, std::ios::binary | std::ios::trunc);
+    if (!output)
+        throw ProjectError("project.save", "Unable to write .gitignore");
+    output << text;
+}
+
+std::string generatedAgentsGuidance() {
+    std::ostringstream output;
+    output << "<!-- OpenVLSI generated guidance: begin -->\n"
+           << "This directory is an OpenVLSI project.\n\n"
+           << "- `project.ovpro` contains project metadata.\n"
+           << "- `sch/*.ovsch` contains schematic cells.\n"
+           << "- `lay/*.ovlay` contains layout cells and procedural layouts.\n"
+           << "- `impl/*.ovimpl` contains RTL-to-GDS implementation runs.\n"
+           << "- `sim/*.ovsim` contains simulations.\n"
+           << "- `scripts/*.py` contains project-level simulation scripts.\n"
+           << "- `build/` contains generated simulation and implementation artifacts.\n\n"
+           << "Never write or edit the split project files (`sch/*.ovsch`, `lay/*.ovlay`, "
+              "`impl/*.ovimpl`, `sim/*.ovsim`) by hand. Use the OpenVLSI MCP, CLI, or GUI tools. If a project fails to "
+              "load, use `project_repair` or `project_open` with recovery instead of deleting files "
+              "with the shell.\n\n"
+           << "At the start of a session, call `openvlsi_version` (or `openvlsi-cli --version`) and confirm "
+              "that the features you need are present. If `project_repair`, `simulation_measure`, "
+              "`simulation_analyses`, `simulation_experiments`, `simulation_measurements`, "
+              "`waveform_analysis`, `schematic_cell_parameters`, text-schematic support, `digital_hdl`, "
+              "`mixed_signal`, or "
+              "`implementation_runs` is missing, stop and ask the user to "
+              "rebuild and restart OpenVLSI instead of working around the missing tools. Restart a "
+              "long-lived MCP server after installing a new build.\n\n"
+           << "When the user asks you to make a schematic or circuit, use this typical workflow:\n\n"
+           << "1. Clarify the expectations (waveforms, gain, bandwidth, settling, power, etc.). If "
+              "important or large schematic specifications are unclear, ask the user before drawing. "
+              "Examples include supply/voltage levels, topology, device types and sizes, performance "
+              "targets, external loads, constraints, and required simulations.\n"
+           << "2. Before drawing, open or create the project and inspect the available PDKs, model "
+              "libraries, ngspice, and Python with `project_summary`, `openvlsi_doctor`, and `pdk_info` "
+              "(or `openvlsi-cli doctor` / `openvlsi-cli pdk-info`). If the user has not specified a PDK, call "
+              "`pdk_info` without arguments to list the installed PDKs and ask the user which "
+              "installed PDK to use before drawing; mention any PDK already selected by the project "
+              "as the suggested default, but do not silently choose one. Do not guess an absolute "
+              "PDK `.lib` path; `pdk_info` returns the package setup. Simulation PDKs come only from "
+              "OpenVLSI packages; do not use `~/.volare`, `~/.ciel`, `PDK_ROOT`, or `PDK`. If a package is "
+              "missing, install it with `openvlsi-pkg`; if its OSDI models are missing, run "
+              "`openvlsi-cli pdk-build <pdk>`. Confirm that the chosen PDK reports "
+              "`simulation_ready: true` and prefer a ready PDK. If no installed PDK is ready, you "
+              "may still create the requested schematic and report the blocker, or ask the user "
+              "whether to install/build a PDK or use an explicitly labeled behavioral model. If the "
+              "user asked for transistor-level simulation, do not silently replace it with a "
+              "behavioral model.\n"
+           << "3. Prefer a drawn canvas schematic over a text SPICE schematic. Use `openvlsi_help` for the "
+              "current workflow and common tool names. In MCP use `schematic_create` and "
+              "`schematic_add_component` for common primitives, or `schematic_add_circuit` for a small "
+              "batch of components and nets. `schematic_list_symbols` shows valid PDK symbols and pin "
+              "names. `schematic_validate` checks connectivity and values before simulation. The lower-level "
+              "`schematic_add_symbol`, `schematic_add_instance`, and `schematic_add_net` calls remain "
+              "available for explicit control. `schematic_create` creates a drawn cell; "
+              "`schematic_create(kind=\"text\")` or `schematic_create_text` "
+              "create a text SPICE cell. `schematic_create(kind=\"systemverilog\")` and "
+              "`schematic_create_systemverilog` create a SystemVerilog source cell for digital HDL "
+              "simulation. Use `schematic_hdl_ports` to inspect its module ports and "
+              "`schematic_add_hdl_instance` to place it in a drawn schematic; a symbol with matching "
+              "pins is generated automatically. Set analog values with `schematic_set_parameter`, wire "
+              "HDL pins with names such as `U1.in`, and run `schematic_validate_hierarchy` before "
+              "simulating. For reusable parameterized blocks, declare parameters with "
+              "`schematic_set_cell_parameter`, use `{R}`-style expressions in component values, and "
+              "override them on a placed block with `schematic_set_parameter`. "
+              "Use text SPICE or SystemVerilog when the user explicitly asks for it, "
+              "provides existing source, or the canvas tools are unavailable; state the reason. "
+              "Canvas schematics keep connectivity, layout, LVS, and simulation workflows available.\n"
+           << "4. Create the simulation with `simulation_create` and optionally a `template` such as "
+              "`tran`, `mixed`, `pwm_dac`, or `digital`. Use `simulation_measure` "
+              "(or `openvlsi-cli simulation-measure`) for numerical checks; `simulation_trace` returns "
+              "decimated waveform samples, and `simulation_result` / `simulation_signals` expose trace "
+              "statistics and available signals. `simulation_run` reports the applied `pdk_setup` and "
+              "suggested follow-up calls. For a "
+              "SystemVerilog source cell, use the `iverilog` simulator with the `digital` analysis. "
+              "The run generates VCD traces; graph the traces or import an external VCD file in the "
+              "GUI with Load VCD. A drawn schematic containing SystemVerilog instances uses the "
+              "`mixed` simulator automatically; its result contains analog node traces and "
+              "`<instance>.<port>` digital traces. HDL instances may be nested inside drawn subcells; "
+              "their scoped names use underscores such as `U1_U2`. "
+              "Logic ports are thresholded, real ports are bridged directly, and buses must be "
+              "flattened with `bus_mode=\"flatten\"` before simulation. "
+              "`schematic_validate_hierarchy` reports `inout` ports, unflattened buses, missing "
+              "nets, and duplicate output drivers; resolve those errors before claiming success.\n"
+           << "5. Create graphs that showcase the schematic behavior: input/output waveforms, frequency "
+              "response, transfer curves, settling, or other views needed to judge the expectations.\n"
+           << "6. Choose the simplest simulation style that fits the task:\n"
+           << "   - Use a normal simulation (`simulation-add` + `simulation-run`) for a single "
+              "straightforward run when a few standard graphs are enough.\n"
+           << "   - Prefer a simulation script (`script-add` / `script-write` / `script-run`) when "
+              "there are useful circuit metrics to calculate (gain, bandwidth, phase margin, slew rate, "
+              "settling, overshoot, power, etc.) or when you need an array of simulations such as "
+              "parameter sweeps or corners. Scripts can compute metrics, compare results with the "
+              "expectations, and generate GUI graphs.\n"
+           << "   - Otherwise use a normal simulation for simplicity.\n"
+           << "7. Run the simulation or script and inspect its diagnostics before editing blindly: "
+              "`simulation_run` returns state, error, netlist context, trace details, and available "
+              "signals. Use `simulation_result`/`simulation_signals` for stored runs. If ngspice or the "
+              "PDK fails to initialize, return to `openvlsi_doctor` (with the schematic or simulation name) and "
+              "fix the environment first. Compare the results with the expectations and tweak the "
+              "schematic if needed. Continue the loop until the expectations are met.\n"
+           << "8. If you substitute a behavioral or RC approximation for a transistor-level circuit, say "
+              "so explicitly and ask whether that is acceptable. A successful transient run is not proof "
+              "of oscillation: use `simulation_measure` and report zero crossings, frequency or period, "
+              "amplitude, and startup behavior before claiming the circuit works.\n\n"
+           << "Analog, mixed-signal, and digital designs share the project model but use different "
+              "implementation paths. For analog physical design, create a layout from the drawn "
+              "schematic with `layout_create_from_schematic` (CLI `layout-create-from-schematic`), "
+              "place and route the devices, then run `lvs`/`lvs-auto` (`lvs_run` in MCP) and `pex` "
+              "(`pex_run` in MCP). PEX writes or updates a text SPICE schematic named `<layout> PEX`; "
+              "simulate that cell for post-layout checks.\n\n"
+           << "For procedural analog layouts, use the composition API instead of hand-placing every "
+              "device with `move` loops and fixed large gaps. Start with `layout.row(gap=0, "
+              "align=\"bottom\")`, `layout.column`, `layout.grid`, `layout.stack`, `layout.repeat`, "
+              "`layout.spacer`, or `layout.stretch`; these calculate bounds and abutment. Use "
+              "`layout.constraint(\"Order\", items=[...], abut=True)`, `layout.align`, "
+              "`layout.symmetric`, `layout.distribute`, and `layout.boundary` for ordering, matching, "
+              "and area limits. Use `layout.add(fragment, x=..., y=...)` to place composed rows and "
+              "columns. Use `layout.generate` for built-in generators such as `mos_pair`, "
+              "`resistor_bank`, `cap_array`, `guard_ring`, `rail`, and `route_bundle`, and "
+              "`@layout.generator` for reusable blocks.\n\n"
+           << "Before placing devices, declare `layout.plan(devices=..., rows=..., "
+              "target_utilization=0.20, max_gap_um=10, require_composition=True)`. After placement, "
+              "call `layout.finish_placement()` or `layout.compact()`. This is a hard gate: "
+              "`layout.route` and `layout.connect` reject calls until the plan's utilization, row-gap, "
+              "row-count, and composition requirements pass.\n\n"
+           << "Then run the quality check and review:\n"
+           << "   1. Call `layout.report(print_report=True)`. Devices are grouped into rows before "
+              "gaps are measured, so use `rows`, `row_count`, `max_horizontal_gap_um`, and "
+              "`large_gaps` rather than comparing every pair of devices.\n"
+           << "   2. Keep `utilization` above roughly 0.20 (higher is better) and row gaps below "
+              "roughly 10 um unless routing/DRC requires more. A fixed 30-60 um routing channel or "
+              "gap between every device is almost never necessary.\n"
+           << "   3. Start from `gap=0` rows and columns; add spacing only where the router or DRC "
+              "requires it. Prefer one shared routing channel over per-device padding.\n"
+           << "   4. Choose device orientation and finger/multiplier settings that reduce the "
+              "dominant row height; tall stacked multiplier devices can make an otherwise compact "
+              "floorplan very tall.\n"
+           << "   5. `layout_regenerate` returns structured `layout_quality`, `layout_plan`, and "
+              "`layout_review` objects. Read those directly instead of parsing `generation_log`.\n"
+           << "   6. Run the separate review step with `layout.review(min_utilization=..., "
+              "max_gap_um=..., require_composition=..., require_plan=True)`, or call MCP "
+              "`layout_review`/CLI `layout-review` after regeneration. Reject the layout if the review "
+              "fails.\n"
+           << "   7. Run LVS, DRC, and PEX after the layout is compact and the review passes; report "
+              "exact results and do not claim cleanliness without the reports.\n"
+           << "   8. For an open-loop AC bench, either use a DC-feedback inductor/capacitor or re-run "
+              "the operating point and update the input trim after resizing devices. Record the trim "
+              "value and verify the output is still in its linear range.\n\n"
+           << "For mixed signal, place SystemVerilog cells "
+              "in a drawn schematic with `schematic_add_hdl_instance`, connect their pins, validate "
+              "the hierarchy, and use the mixed simulator as described above. The digital block can "
+              "also be implemented through RTL-to-GDS and imported as a layout, but analog/digital "
+              "physical integration and merge are not automatic, so do not claim a complete "
+              "mixed-signal GDS unless it was actually produced.\n\n"
+           << "For digital logic, create SystemVerilog design and testbench cells with "
+              "`schematic_create_systemverilog` (or `schematic_create` with `kind=\"systemverilog\"`). "
+              "A source cell may contain both a design and its testbench; the module containing "
+              "`$dumpfile`/`$dumpvars` is preferred as the simulation top. A testbench cell may also "
+              "instantiate modules defined in other project SystemVerilog cells; OpenVLSI compiles the "
+              "referenced sources automatically. Create a simulation for a testbench cell and run it "
+              "with Icarus Verilog, then inspect VCD-derived traces with `simulation_result`, "
+              "`simulation_trace`, and `simulation_measure`. To build a digital chip, first confirm "
+              "that the PDK reports implementation data with `pdk_info` and that "
+              "`implementation_toolchain` finds Yosys, OpenROAD, and KLayout. Then create a run with "
+              "`implementation_create` (top module, PDK, source cells/files, optional SDC), inspect "
+              "the generated scripts with `implementation_prepare` if needed, and run the stages with "
+              "`implementation_run`. OpenVLSI maps the synthesized netlist automatically before floorplan "
+              "when `2_tech_map.v` is missing; `implementation_map` remains available for an explicit "
+              "export. Inspect `implementation_status`, `implementation_log`, and the recorded timing, "
+              "power, route-DRC, and antenna metrics before changing the design. `implementation_update` "
+              "edits run settings and invalidates the selected and later checkpoints. Import the final "
+              "DEF with `implementation_import_layout`, and export the merged GDS with "
+              "`implementation_export_gds`; the final stage may also write `final/6_final.gds` "
+              "automatically. Run `lvs_run` and `drc_run` on the imported layout for signoff. If a "
+              "stage fails, read the bounded stage log and fix the first actionable error instead of "
+              "rerunning blindly. Use `openvlsi_help(topic=\"digital\")`, "
+              "`openvlsi_help(topic=\"implementation\")`, and `openvlsi_help(topic=\"verification\")` for the "
+              "current tool lists. Do not claim timing closure, DRC cleanliness, or a manufacturable "
+              "GDS unless the relevant metrics, report, or file was actually produced; report missing "
+              "tools (Yosys, OpenROAD, KLayout, gdscheck) or PDK implementation data explicitly.\n\n"
+           << "This `AGENTS.md` was generated when the project was created and is not rewritten "
+              "automatically. Edit or replace it if the project's workflow or tool names change.\n\n"
+           << "For scripted work, use `openvlsi-cli` or `openvlsi-mcp`. Successful `openvlsi-mcp` project mutations "
+              "are saved to disk automatically.\n"
+           << "Run stored simulations with `openvlsi-cli simulation-run <project> <simulation>`; "
+              "its run is written under `build/` and loaded by the GUI graph tabs.\n\n"
+           << "Use the OpenVLSI GUI, `openvlsi-cli`, `openvlsipy`, or `openvlsi-mcp` to inspect and edit the project.\n"
+           << "<!-- OpenVLSI generated guidance: end -->\n";
+    return output.str();
+}
+
+bool ensureAgentsFile(const std::filesystem::path &root, const std::string &projectName) {
+    const auto path = root / "AGENTS.md";
+    std::error_code status;
+    if (std::filesystem::exists(path, status) && !status)
+        return false;
+
+    std::ofstream output(path, std::ios::binary | std::ios::trunc);
+    if (!output)
+        throw ProjectError("project.save", "Unable to write AGENTS.md");
+    output << "# " << projectName << "\n\n" << generatedAgentsGuidance();
+    return true;
+}
+
+std::string uniqueStem(const std::string &name, ObjectId id, std::set<std::string> &used) {
+    auto stem = safeFileStem(name);
+    if (used.insert(stem).second)
+        return stem;
+    auto candidate = stem + "-" + std::to_string(id);
+    if (used.insert(candidate).second)
+        return candidate;
+    auto suffix = 2;
+    while (!used.insert(candidate = stem + "-" + std::to_string(id) + "-" + std::to_string(suffix++)).second) {
+    }
+    return candidate;
+}
+
+} // namespace
+
+void Project::save(const std::filesystem::path &path) const {
+    auto diagnostics = validate();
+    if (!diagnostics.empty())
+        throw ProjectError(diagnostics.front().code, diagnostics.front().message);
+
+    const auto root = projectRoot(path);
+    ProjectSaveLock saveLock(root);
+    if (!sourceRevision_.empty() && normalizedRoot(sourceRoot_) == normalizedRoot(root)) {
+        const auto currentRevision = projectRevision(root);
+        if (currentRevision != sourceRevision_)
+            throw ProjectError("project.changed",
+                               "Project files changed on disk since this project was loaded (another OpenVLSI process "
+                               "may have saved). Reload the project before saving, or open it again with recovery "
+                               "if repair is needed.");
+    }
+    const auto full = json::parse(serialize());
+    json projectJson = full;
+    const auto &schematicCells = full.at("schematic_cells");
+    const auto &layoutCells = full.at("layout_cells");
+    const auto &proceduralLayouts = full.at("procedural_layouts");
+    const auto &implementationRuns = full.at("implementation_runs");
+    const auto &simulations = full.at("simulations");
+    projectJson.erase("schematic_cells");
+    projectJson.erase("layout_cells");
+    projectJson.erase("procedural_layouts");
+    projectJson.erase("implementation_runs");
+    projectJson.erase("simulations");
+
+    ensureDirectory(root);
+    const auto schematicDir = root / "sch";
+    const auto layoutDir = root / "lay";
+    const auto implementationDir = root / "impl";
+    const auto simulationDir = root / "sim";
+    ensureDirectory(schematicDir);
+    ensureDirectory(layoutDir);
+    ensureDirectory(implementationDir);
+    ensureDirectory(simulationDir);
+    ensureDirectory(root / "scripts");
+    ensureDirectory(root / "build");
+
+    struct PendingFile {
+        std::filesystem::path path;
+        json document;
+    };
+    std::vector<PendingFile> pending;
+    std::set<std::string> schematicFiles;
+    std::set<std::string> layoutFiles;
+    std::set<std::string> implementationFiles;
+    std::set<std::string> simulationFiles;
+
+    auto inventory = json::object();
+    const auto inventoryFor = [&](const char *kind) -> json & {
+        if (!inventory.contains(kind))
+            inventory[kind] = json::array();
+        return inventory[kind];
+    };
+
+    std::set<std::string> usedSchematics;
+    for (const auto &cell : schematicCells) {
+        const auto id = cell.at("id").get<ObjectId>();
+        const auto cellName = cell.value("name", std::string{});
+        const auto filename = uniqueStem(cellName, id, usedSchematics) + ".ovsch";
+        schematicFiles.insert(filename);
+        inventoryFor("schematics").push_back(inventoryEntry(id, cellName, "sch/" + filename));
+        pending.push_back(
+            {schematicDir / filename, json{{"format", "openvlsi-schematic"}, {"schema_version", 1}, {"cell", cell}}});
+    }
+
+    std::set<std::string> usedLayouts;
+    for (const auto &cell : layoutCells) {
+        const auto id = cell.at("id").get<ObjectId>();
+        const auto cellName = cell.value("name", std::string{});
+        const auto filename = uniqueStem(cellName, id, usedLayouts) + ".ovlay";
+        layoutFiles.insert(filename);
+        inventoryFor("layouts").push_back(inventoryEntry(id, cellName, "lay/" + filename));
+        pending.push_back(
+            {layoutDir / filename, json{{"format", "openvlsi-layout"}, {"schema_version", 2}, {"layout", cell}}});
+    }
+    for (const auto &layout : proceduralLayouts) {
+        const auto id = layout.at("id").get<ObjectId>();
+        const auto layoutName = layout.value("name", std::string{});
+        const auto filename = uniqueStem(layoutName, id, usedLayouts) + ".ovlay";
+        layoutFiles.insert(filename);
+        inventoryFor("procedural_layouts").push_back(inventoryEntry(id, layoutName, "lay/" + filename));
+        pending.push_back({layoutDir / filename,
+                           json{{"format", "openvlsi-layout"}, {"schema_version", 2}, {"procedural_layout", layout}}});
+    }
+
+    for (const auto &run : implementationRuns) {
+        const auto id = run.at("id").get<ObjectId>();
+        ImplementationRun summary;
+        summary.id = id;
+        summary.name = run.value("name", std::string{});
+        const auto filename = implementationRunStem(summary) + ".ovimpl";
+        implementationFiles.insert(filename);
+        inventoryFor("implementation_runs").push_back(inventoryEntry(id, summary.name, "impl/" + filename));
+        pending.push_back({implementationDir / filename,
+                           json{{"format", "openvlsi-implementation"}, {"schema_version", 1}, {"run", run}}});
+    }
+
+    std::set<std::string> usedSimulations;
+    for (const auto &simulation : simulations) {
+        const auto id = simulation.at("id").get<ObjectId>();
+        const auto simulationName = simulation.value("name", std::string{});
+        const auto filename = uniqueStem(simulationName, id, usedSimulations) + ".ovsim";
+        simulationFiles.insert(filename);
+        inventoryFor("simulation_entries").push_back(inventoryEntry(id, simulationName, "sim/" + filename));
+        pending.push_back({simulationDir / filename,
+                           json{{"format", "openvlsi-simulation"}, {"schema_version", 1}, {"simulation", simulation}}});
+    }
+
+    projectJson["inventory"] = {{"schema_version", 1}, {"entries", std::move(inventory)}};
+    ensureGitignore(root);
+    ensureAgentsFile(root, name);
+
+    // Write sidecars first, then publish the inventory. A crash before the
+    // metadata write leaves the previous metadata in place; recovery can
+    // quarantine files that the old inventory does not know about.
+    for (const auto &file : pending)
+        writeJsonFile(file.path, file.document);
+    writeJsonFile(root / "project.ovpro", projectJson);
+    pruneDirectory(schematicDir, ".ovsch", schematicFiles);
+    pruneDirectory(layoutDir, ".ovlay", layoutFiles);
+    pruneDirectory(implementationDir, ".ovimpl", implementationFiles);
+    pruneDirectory(simulationDir, ".ovsim", simulationFiles);
+    sourceRoot_ = root;
+    sourceRevision_ = projectRevision(root);
+    spdlog::info("Saved project {}", (root / "project.ovpro").string());
+}
+
+void Project::adoptSourceRevisionFrom(const Project &other) {
+    sourceRoot_ = other.sourceRoot_;
+    sourceRevision_ = other.sourceRevision_;
+}
+
+std::filesystem::path Project::saveCellFile(ObjectId id) const {
+    const auto diagnostics = validate();
+    if (!diagnostics.empty())
+        throw ProjectError(diagnostics.front().code, diagnostics.front().message);
+    if (sourceRoot_.empty())
+        throw ProjectError("project.save", "Project has not been saved to disk yet");
+
+    const auto root = sourceRoot_;
+    ProjectSaveLock saveLock(root);
+    if (!sourceRevision_.empty()) {
+        const auto currentRevision = projectRevision(root);
+        if (currentRevision != sourceRevision_)
+            throw ProjectError("project.changed",
+                               "Project files changed on disk since this project was loaded (another OpenVLSI process "
+                               "may have saved). Reload the project before saving.");
+    }
+
+    const bool schematic = schematicCells.contains(id);
+    const bool layout = layoutCells.contains(id);
+    const bool procedural = proceduralLayouts.contains(id);
+    if (static_cast<int>(schematic) + static_cast<int>(layout) + static_cast<int>(procedural) != 1)
+        throw ProjectError("project.save", "Project cell not found: " + std::to_string(id));
+
+    const auto directory = root / (schematic ? "sch" : "lay");
+    const auto extension = schematic ? std::string{".ovsch"} : std::string{".ovlay"};
+    std::filesystem::create_directories(directory);
+
+    // Reuse the existing file when the cell already has one. This keeps a
+    // rename or move from leaving a stale duplicate in the project directory.
+    const auto matches = [&](const std::filesystem::path &path) {
+        try {
+            const auto document = readJsonFile(path);
+            const json *object = nullptr;
+            if (document.contains("cell"))
+                object = &document.at("cell");
+            else if (document.contains("layout"))
+                object = &document.at("layout");
+            else if (document.contains("procedural_layout"))
+                object = &document.at("procedural_layout");
+            return object && object->value("id", ObjectId{0}) == id;
+        } catch (...) {
+            return false;
+        }
+    };
+    std::filesystem::path path;
+    std::set<std::string> usedStems;
+    std::error_code status;
+    for (std::filesystem::directory_iterator it(directory, status), end; !status && it != end; it.increment(status)) {
+        if (!it->is_regular_file() || it->path().extension() != extension)
+            continue;
+        usedStems.insert(it->path().stem().string());
+        if (matches(it->path())) {
+            path = it->path();
+            break;
+        }
+    }
+
+    if (path.empty()) {
+        // Existing files may still use an older stem after a rename. Reserve
+        // them so a newly created cell cannot overwrite another cell's file.
+        std::set<std::string> used = usedStems;
+        if (schematic) {
+            for (const auto &[cellId, cell] : schematicCells) {
+                const auto stem = uniqueStem(cell.name, cellId, used);
+                if (cellId == id) {
+                    path = directory / (stem + extension);
+                    break;
+                }
+            }
+        } else {
+            for (const auto &[cellId, cell] : layoutCells) {
+                const auto stem = uniqueStem(cell.name, cellId, used);
+                if (cellId == id) {
+                    path = directory / (stem + extension);
+                    break;
+                }
+            }
+            if (path.empty()) {
+                for (const auto &[cellId, cell] : proceduralLayouts) {
+                    const auto stem = uniqueStem(cell.name, cellId, used);
+                    if (cellId == id) {
+                        path = directory / (stem + extension);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    if (path.empty())
+        throw ProjectError("project.save", "Unable to resolve the project file for cell " + std::to_string(id));
+
+    const auto full = json::parse(serialize());
+    json envelope;
+    if (schematic) {
+        for (const auto &cell : full.at("schematic_cells")) {
+            if (cell.value("id", ObjectId{0}) != id)
+                continue;
+            envelope = json{{"format", "openvlsi-schematic"}, {"schema_version", 1}, {"cell", cell}};
+            break;
+        }
+    } else if (layout) {
+        for (const auto &cell : full.at("layout_cells")) {
+            if (cell.value("id", ObjectId{0}) != id)
+                continue;
+            envelope = json{{"format", "openvlsi-layout"}, {"schema_version", 2}, {"layout", cell}};
+            break;
+        }
+    } else {
+        for (const auto &cell : full.at("procedural_layouts")) {
+            if (cell.value("id", ObjectId{0}) != id)
+                continue;
+            envelope = json{{"format", "openvlsi-layout"}, {"schema_version", 2}, {"procedural_layout", cell}};
+            break;
+        }
+    }
+    if (envelope.is_null())
+        throw ProjectError("project.save", "Unable to serialize project cell " + std::to_string(id));
+
+    writeJsonFile(path, envelope);
+    // Single-cell saves must also publish the sidecar in the project
+    // inventory; otherwise the next load would treat it as a stale file.
+    const char *kind = schematic ? "schematics" : (layout ? "layouts" : "procedural_layouts");
+    const auto cellName =
+        schematic ? schematicCells.at(id).name : (layout ? layoutCells.at(id).name : proceduralLayouts.at(id).name);
+    const auto relative = path.lexically_relative(root).generic_string();
+    auto metadata = readJsonFile(root / "project.ovpro");
+    // Legacy projects have no inventory. Leave them in legacy mode until the
+    // next full save; a partial inventory would hide all other cell files.
+    if (metadata.contains("inventory") && metadata.at("inventory").is_object()) {
+        auto &inventory = metadata["inventory"];
+        if (!inventory.contains("entries") || !inventory.at("entries").is_object())
+            inventory["entries"] = json::object();
+        auto &entries = inventory["entries"];
+        if (!entries.contains(kind) || !entries.at(kind).is_array())
+            entries[kind] = json::array();
+        auto &cells = entries[kind];
+        cells.erase(std::remove_if(cells.begin(), cells.end(),
+                                   [&](const auto &entry) { return entry.value("id", ObjectId{0}) == id; }),
+                    cells.end());
+        cells.push_back(inventoryEntry(id, cellName, relative));
+        writeJsonFile(root / "project.ovpro", metadata);
+    }
+    sourceRoot_ = root;
+    sourceRevision_ = projectRevision(root);
+    return path;
+}
+
+Project Project::load(const std::filesystem::path &path) { return load(path, {}, nullptr); }
+
+Project Project::load(const std::filesystem::path &path, const ProjectLoadOptions &options, ProjectLoadReport *report) {
+    const auto root = projectRoot(path);
+    ProjectReadLock readLock(root);
+    const auto metadataPath = root / "project.ovpro";
+    json full;
+    try {
+        full = readJsonFile(metadataPath);
+    } catch (const std::exception &error) {
+        throw ProjectError("project.format", "Unable to load project metadata '" + metadataPath.string() +
+                                                 "': " + error.what() + recoveryHint());
+    }
+    if (full.value("format", std::string{}) != "openvlsi-project")
+        throw ProjectError("project.format", "Invalid project metadata '" + metadataPath.string() +
+                                                 "': expected format 'openvlsi-project'" + recoveryHint());
+    full["schematic_cells"] = json::array();
+    full["layout_cells"] = json::array();
+    full["procedural_layouts"] = json::array();
+    full["implementation_runs"] = json::array();
+    full["simulations"] = json::array();
+
+    // Inventory-aware projects know exactly which sidecars they own. Legacy
+    // projects without an inventory keep loading every file in the expected
+    // directories, preserving the old behavior during migration.
+    struct InventoryEntry {
+        ObjectId id = 0;
+        std::string name;
+        std::filesystem::path file;
+    };
+    std::map<std::string, std::vector<InventoryEntry>> inventory;
+    bool hasInventory = false;
+    if (full.contains("inventory") && full.at("inventory").is_object()) {
+        const auto &envelope = full.at("inventory");
+        if (envelope.contains("entries") && envelope.at("entries").is_object()) {
+            hasInventory = true;
+            for (auto kind = envelope.at("entries").begin(); kind != envelope.at("entries").end(); ++kind) {
+                if (!kind.value().is_array())
+                    continue;
+                for (const auto &entry : kind.value()) {
+                    if (!entry.is_object() || !entry.contains("id"))
+                        continue;
+                    InventoryEntry parsed;
+                    parsed.id = entry.at("id").get<ObjectId>();
+                    parsed.name = entry.value("name", std::string{});
+                    parsed.file = entry.value("file", std::string{});
+                    if (parsed.file.empty() || parsed.file.is_absolute() ||
+                        parsed.file.lexically_normal().string().starts_with(".."))
+                        throw ProjectError("project.inventory", "Project inventory contains an invalid sidecar path: " +
+                                                                    parsed.file.string() + recoveryHint());
+                    inventory[kind.key()].push_back(std::move(parsed));
+                }
+            }
+        }
+    }
+
+    const auto quarantine = [&](const std::filesystem::path &file, const std::string &message) {
+        auto relative = file.lexically_relative(root);
+        if (relative.empty() || relative.string().starts_with(".."))
+            relative = file.filename();
+        auto directory = root / "build" / "recovery" / relative.parent_path();
+        std::error_code status;
+        std::filesystem::create_directories(directory, status);
+        auto target = directory / relative.filename();
+        for (int suffix = 1; std::filesystem::exists(target, status) && !status; ++suffix) {
+            target = directory / (file.stem().string() + "." + std::to_string(suffix) + file.extension().string());
+        }
+        status.clear();
+        std::filesystem::rename(file, target, status);
+        if (status) {
+            status.clear();
+            std::filesystem::copy_file(file, target, std::filesystem::copy_options::overwrite_existing, status);
+            if (!status)
+                std::filesystem::remove(file, status);
+        }
+        if (report) {
+            report->quarantinedFiles.push_back(target.string());
+            report->warnings.push_back(message + (status ? " (quarantine failed: " + status.message() + ")"
+                                                         : " (quarantined to " + target.string() + ")"));
+        }
+    };
+
+    const auto readDirectory = [&](const std::filesystem::path &directory, const std::string &extension,
+                                   const std::set<std::string> *expected, const auto &consume) {
+        std::vector<std::filesystem::path> files;
+        std::error_code status;
+        if (std::filesystem::is_directory(directory, status) && !status) {
+            for (std::filesystem::directory_iterator iterator(directory, status), end; !status && iterator != end;
+                 iterator.increment(status)) {
+                if (!iterator->is_regular_file() || iterator->path().extension() != extension)
+                    continue;
+                const auto relative = iterator->path().lexically_relative(root).generic_string();
+                if (expected && !expected->contains(relative)) {
+                    const auto message = "Unexpected project file outside the project inventory: '" + relative + "'";
+                    if (!options.recover)
+                        throw ProjectError("project.inventory.extra", message + recoveryHint());
+                    quarantine(iterator->path(), message);
+                    continue;
+                }
+                files.push_back(iterator->path());
+            }
+        }
+        std::sort(files.begin(), files.end());
+        for (const auto &file : files) {
+            try {
+                consume(readJsonFile(file));
+            } catch (const std::exception &error) {
+                const auto relative = file.lexically_relative(root).string();
+                const auto message = "Invalid project file '" + relative + "': " + error.what();
+                if (!options.recover)
+                    throw ProjectError("project.format", message + recoveryHint());
+                quarantine(file, message);
+            }
+        }
+    };
+
+    const auto expectedFiles = [&](const char *kind) {
+        std::set<std::string> files;
+        const auto entries = inventory.find(kind);
+        if (entries == inventory.end())
+            return files;
+        for (const auto &entry : entries->second) {
+            std::error_code status;
+            if (!std::filesystem::is_regular_file(root / entry.file, status) || status) {
+                const auto message = "Project inventory is missing sidecar '" + entry.file.generic_string() + "'";
+                if (!options.recover)
+                    throw ProjectError("project.inventory.missing", message + recoveryHint());
+                if (report)
+                    report->warnings.push_back(message);
+                continue;
+            }
+            files.insert(entry.file.generic_string());
+        }
+        return files;
+    };
+    const auto schematicExpected =
+        hasInventory ? std::optional<std::set<std::string>>(expectedFiles("schematics")) : std::nullopt;
+    const auto layoutExpected =
+        hasInventory ? std::optional<std::set<std::string>>(expectedFiles("layouts")) : std::nullopt;
+    const auto proceduralExpected =
+        hasInventory ? std::optional<std::set<std::string>>(expectedFiles("procedural_layouts")) : std::nullopt;
+    const auto implementationExpected =
+        hasInventory ? std::optional<std::set<std::string>>(expectedFiles("implementation_runs")) : std::nullopt;
+    const auto simulationExpected =
+        hasInventory ? std::optional<std::set<std::string>>(expectedFiles("simulation_entries")) : std::nullopt;
+
+    // Layout cells and procedural layouts share lay/ but have separate
+    // inventory sections, so merge their expected files for the directory read.
+    std::optional<std::set<std::string>> layoutDirectoryExpected = layoutExpected;
+    if (proceduralExpected) {
+        if (!layoutDirectoryExpected)
+            layoutDirectoryExpected.emplace();
+        layoutDirectoryExpected->insert(proceduralExpected->begin(), proceduralExpected->end());
+    }
+
+    readDirectory(
+        root / "sch", ".ovsch", schematicExpected ? &*schematicExpected : nullptr, [&](const json &document) {
+            if (document.value("format", std::string{}) != "openvlsi-schematic" || !document.contains("cell"))
+                throw ProjectError("project.format",
+                                   "Invalid schematic file: expected an 'openvlsi-schematic' envelope with a 'cell' object");
+            full["schematic_cells"].push_back(document.at("cell"));
+        });
+    readDirectory(root / "lay", ".ovlay", layoutDirectoryExpected ? &*layoutDirectoryExpected : nullptr,
+                  [&](const json &document) {
+                      if (document.value("format", std::string{}) != "openvlsi-layout")
+                          throw ProjectError("project.format", "Invalid layout file: expected format 'openvlsi-layout'");
+                      if (document.value("schema_version", 0) != 2)
+                          throw ProjectError("project.schema", "Unsupported layout schema version");
+                      if (document.contains("layout"))
+                          full["layout_cells"].push_back(document.at("layout"));
+                      else if (document.contains("procedural_layout"))
+                          full["procedural_layouts"].push_back(document.at("procedural_layout"));
+                      else
+                          throw ProjectError("project.format",
+                                             "Invalid layout file: expected a 'layout' or 'procedural_layout' object");
+                  });
+    readDirectory(root / "impl", ".ovimpl", implementationExpected ? &*implementationExpected : nullptr,
+                  [&](const json &document) {
+                      if (document.value("format", std::string{}) != "openvlsi-implementation" ||
+                          document.value("schema_version", 0) != 1 || !document.contains("run"))
+                          throw ProjectError("project.format",
+                                             "Invalid implementation file: expected an 'openvlsi-implementation' "
+                                             "envelope with a 'run' object");
+                      full["implementation_runs"].push_back(document.at("run"));
+                  });
+    readDirectory(
+        root / "sim", ".ovsim", simulationExpected ? &*simulationExpected : nullptr, [&](const json &document) {
+            if (document.value("format", std::string{}) != "openvlsi-simulation" || !document.contains("simulation"))
+                throw ProjectError("project.format",
+                                   "Invalid simulation file: expected an 'openvlsi-simulation' envelope with a "
+                                   "'simulation' object");
+            full["simulations"].push_back(document.at("simulation"));
+        });
+
+    // An inventory that names an id which was not loaded indicates a corrupt
+    // or misnamed sidecar. Without this check the project would silently lose
+    // the cell while still looking healthy.
+    const auto verifyInventory = [&](const char *kind, const json &loaded) {
+        const auto entries = inventory.find(kind);
+        if (!hasInventory || entries == inventory.end())
+            return;
+        std::set<ObjectId> loadedIds;
+        for (const auto &entry : loaded)
+            if (entry.contains("id"))
+                loadedIds.insert(entry.at("id").get<ObjectId>());
+        for (const auto &entry : entries->second) {
+            if (loadedIds.contains(entry.id))
+                continue;
+            const auto message =
+                "Project inventory sidecar '" + entry.file.generic_string() + "' does not contain the expected object";
+            if (!options.recover)
+                throw ProjectError("project.inventory.object", message + recoveryHint());
+            if (report)
+                report->warnings.push_back(message);
+        }
+    };
+    verifyInventory("schematics", full.at("schematic_cells"));
+    verifyInventory("layouts", full.at("layout_cells"));
+    verifyInventory("procedural_layouts", full.at("procedural_layouts"));
+    verifyInventory("implementation_runs", full.at("implementation_runs"));
+    verifyInventory("simulation_entries", full.at("simulations"));
+
+    auto project = deserialize(full.dump());
+    project.sourceRoot_ = root;
+    project.sourceRevision_ = projectRevision(root);
+    return project;
+}
+
+ProjectSession::ProjectSession(Project project) : project_(std::move(project)), historyStates_{project_} {}
+Project &ProjectSession::project() noexcept { return project_; }
+const Project &ProjectSession::project() const noexcept { return project_; }
+bool ProjectSession::dirty() const noexcept { return dirty_; }
+const std::vector<std::string> &ProjectSession::history() const noexcept { return historyLabels_; }
+std::size_t ProjectSession::historyPosition() const noexcept { return historyPosition_; }
+void ProjectSession::setLastHistoryLabel(std::string label) {
+    if (historyPosition_ != 0 && historyPosition_ <= historyLabels_.size())
+        historyLabels_[historyPosition_ - 1] = std::move(label);
+}
+void ProjectSession::replaceProject(Project project, bool markDirty) {
+    project_ = std::move(project);
+    historyStates_.assign(1, project_);
+    historyLabels_.clear();
+    historyPosition_ = 0;
+    transactionSnapshot_.reset();
+    transactionLabel_.clear();
+    dirty_ = markDirty;
+    notify();
+}
+void ProjectSession::markDirty() {
+    dirty_ = true;
+    notify();
+}
+void ProjectSession::subscribe(Observer observer) { observers_.push_back(std::move(observer)); }
+void ProjectSession::beginTransaction(std::string label) {
+    if (transactionSnapshot_)
+        throw ProjectError("transaction.nested", "Nested transactions are not supported");
+    transactionSnapshot_ = project_;
+    transactionLabel_ = std::move(label);
+}
+void ProjectSession::commitTransaction() {
+    if (!transactionSnapshot_)
+        throw ProjectError("transaction.missing", "No transaction is active");
+    if (project_.serialize() != transactionSnapshot_->serialize()) {
+        historyLabels_.resize(historyPosition_);
+        historyStates_.resize(historyPosition_ + 1);
+        historyLabels_.push_back(transactionLabel_);
+        historyStates_.push_back(project_);
+        ++historyPosition_;
+
+        // Long-lived sessions must not retain every intermediate state of a
+        // large layout. Keep a bounded undo window and drop the oldest states.
+        constexpr std::size_t maxHistoryStates = 256;
+        if (historyStates_.size() > maxHistoryStates) {
+            const auto drop = historyStates_.size() - maxHistoryStates;
+            historyStates_.erase(historyStates_.begin(), historyStates_.begin() + static_cast<std::ptrdiff_t>(drop));
+            const auto labelDrop = std::min(drop, historyLabels_.size());
+            historyLabels_.erase(historyLabels_.begin(),
+                                 historyLabels_.begin() + static_cast<std::ptrdiff_t>(labelDrop));
+            historyPosition_ = historyPosition_ >= drop ? historyPosition_ - drop : 0;
+        }
+        dirty_ = true;
+        notify();
+    }
+    transactionSnapshot_.reset();
+    transactionLabel_.clear();
+}
+void ProjectSession::rollbackTransaction() {
+    if (!transactionSnapshot_)
+        throw ProjectError("transaction.missing", "No transaction is active");
+    project_ = *transactionSnapshot_;
+    transactionSnapshot_.reset();
+    transactionLabel_.clear();
+    notify();
+}
+void ProjectSession::execute(std::string label, const std::function<void(Project &)> &mutation) {
+    beginTransaction(std::move(label));
+    try {
+        mutation(project_);
+        auto diagnostics = project_.validate();
+        if (!diagnostics.empty())
+            throw ProjectError(diagnostics.front().code, diagnostics.front().message);
+        commitTransaction();
+    } catch (...) {
+        rollbackTransaction();
+        throw;
+    }
+}
+bool ProjectSession::undo() {
+    if (historyPosition_ == 0)
+        return false;
+    --historyPosition_;
+    auto restored = historyStates_[historyPosition_];
+    restored.adoptSourceRevisionFrom(project_);
+    project_ = std::move(restored);
+    dirty_ = true;
+    notify();
+    return true;
+}
+bool ProjectSession::redo() {
+    if (historyPosition_ >= historyLabels_.size())
+        return false;
+    ++historyPosition_;
+    auto restored = historyStates_[historyPosition_];
+    restored.adoptSourceRevisionFrom(project_);
+    project_ = std::move(restored);
+    dirty_ = true;
+    notify();
+    return true;
+}
+void ProjectSession::save(const std::filesystem::path &path) {
+    project_.save(path);
+    dirty_ = false;
+    notify();
+}
+void ProjectSession::notify() {
+    for (const auto &observer : observers_)
+        observer();
+}
+void SelectionModel::select(ObjectId id, std::vector<ObjectId> related) {
+    primary_ = id;
+    related_ = std::move(related);
+}
+void SelectionModel::clear() {
+    primary_.reset();
+    related_.clear();
+}
+std::optional<ObjectId> SelectionModel::primary() const noexcept { return primary_; }
+const std::vector<ObjectId> &SelectionModel::related() const noexcept { return related_; }
+std::string version() { return "0.1.0"; }
+
+BuildInfo buildInfo() {
+    BuildInfo info;
+    info.version = version();
+#ifdef OPENVLSI_BUILD_COMMIT
+    info.commit = OPENVLSI_BUILD_COMMIT;
+#else
+    info.commit = "unknown";
+#endif
+#ifdef OPENVLSI_BUILD_TIME
+    info.buildTime = OPENVLSI_BUILD_TIME;
+#else
+    info.buildTime = "unknown";
+#endif
+#ifdef OPENVLSI_BUILD_TYPE
+    info.buildType = OPENVLSI_BUILD_TYPE;
+#else
+    info.buildType = "unknown";
+#endif
+    info.features = {"project_repair",
+                     "project_recovery",
+                     "schematic_add_pin",
+                     "text_schematic",
+                     "schematic_cell_parameters",
+                     "ngspice_log_capture",
+                     "simulation_metrics",
+                     "simulation_analyses",
+                     "simulation_experiments",
+                     "simulation_measurements",
+                     "waveform_analysis",
+                     "pdk_status",
+                     "pdk_build",
+                     "save_revision_guard",
+                     "layout_ports",
+                     "layout_port_hierarchy",
+                     "layout_connectivity",
+                     "layout_lef_def",
+                     "layout_port_drc",
+                     "layout_references",
+                     "layout_pex",
+                     "pex_device_extraction",
+                     "polygon_device_extraction",
+                     "systemverilog_cells",
+                     "digital_hdl",
+                     "vcd_graphs",
+                     "hdl_hierarchy",
+                     "hdl_instance_symbols",
+                     "mixed_signal",
+                     "mixed_signal_validation",
+                     "hdl_real_ports",
+                     "hdl_bus_flatten",
+                     "agent_authoring",
+                     "symbol_library_autofill",
+                     "schematic_validation",
+                     "spice_import",
+                     "simulation_trace",
+                     "dependency_delete",
+                     "simulation_templates",
+                     "implementation_runs",
+                     "implementation_openroad_plan",
+                     "implementation_toolchain",
+                     "implementation_execute",
+                     "implementation_import",
+                     "implementation_prepare",
+                     "implementation_map",
+                     "implementation_update",
+                     "implementation_gds",
+                     "drc_gdscheck",
+                     "digital_flow_help"};
+    return info;
+}
+} // namespace openvlsi

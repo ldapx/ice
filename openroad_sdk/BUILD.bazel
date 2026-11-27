@@ -3,11 +3,11 @@ load("@rules_cc//cc:cc_library.bzl", "cc_library")
 load("@rules_cc//cc:cc_shared_library.bzl", "cc_shared_library")
 
 cc_library(
-    name = "ice_openroad_odb",
+    name = "openvlsi_openroad_odb",
     srcs = ["src/odb_reader.cpp"],
     hdrs = [
-        "include/ice_openroad/odb_reader.hpp",
-        "include/ice_openroad/types.hpp",
+        "include/openvlsi_openroad/odb_reader.hpp",
+        "include/openvlsi_openroad/types.hpp",
     ],
     includes = ["include"],
     copts = [
@@ -21,13 +21,13 @@ cc_library(
 )
 
 cc_library(
-    name = "ice_openroad",
+    name = "openvlsi_openroad",
     srcs = ["src/engine.cpp"],
     hdrs = [
-        "include/ice_openroad/engine.hpp",
-        "include/ice_openroad/heatmap.hpp",
-        "include/ice_openroad/odb_reader.hpp",
-        "include/ice_openroad/types.hpp",
+        "include/openvlsi_openroad/engine.hpp",
+        "include/openvlsi_openroad/heatmap.hpp",
+        "include/openvlsi_openroad/odb_reader.hpp",
+        "include/openvlsi_openroad/types.hpp",
     ],
     includes = ["include"],
     copts = [
@@ -44,7 +44,7 @@ cc_library(
 )
 
 cc_binary(
-    name = "ice-openroad",
+    name = "openvlsi-openroad",
     srcs = ["src/worker_main.cpp"],
     copts = [
         "-fopenmp",
@@ -53,8 +53,8 @@ cc_binary(
     defines = ["BUILD_GUI=false"],
     visibility = ["//visibility:public"],
     deps = [
-        ":ice_openroad",
-        ":ice_openroad_odb",
+        ":openvlsi_openroad",
+        ":openvlsi_openroad_odb",
         "//bazel:tcl_library_init",
         "@tcl_lang//:tcl",
     ],
@@ -64,11 +64,11 @@ cc_binary(
 # command-line tool remains self-contained; applications that want the C++
 # API can link this shared object instead.
 cc_shared_library(
-    name = "ice_openroad_shared",
+    name = "openvlsi_openroad_shared",
     deps = [
-        ":ice_openroad",
-        ":ice_openroad_odb",
+        ":openvlsi_openroad",
+        ":openvlsi_openroad_odb",
     ],
-    shared_lib_name = "libice_openroad.so",
+    shared_lib_name = "libopenvlsi_openroad.so",
     visibility = ["//visibility:public"],
 )

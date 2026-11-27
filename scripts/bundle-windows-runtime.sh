@@ -3,7 +3,7 @@
 #
 # Usage: bundle-windows-runtime.sh <xpack-staging-dir>
 #
-# The script expects ICE_DEPS_PREFIX (or MINGW_PREFIX) to point at the MSYS2
+# The script expects OPENVLSI_DEPS_PREFIX (or MINGW_PREFIX) to point at the MSYS2
 # UCRT64/MINGW64 prefix that provided Qt, ngspice, OpenSSL, and the other
 # dependencies. It is safe to run when windeployqt or ntldd are unavailable;
 # the corresponding step is skipped.
@@ -25,7 +25,7 @@ normalize_path() {
     fi
 }
 
-deps_prefix="${ICE_DEPS_PREFIX:-${MINGW_PREFIX:-}}"
+deps_prefix="${OPENVLSI_DEPS_PREFIX:-${MINGW_PREFIX:-}}"
 deps_prefix="$(normalize_path "$deps_prefix")"
 if [[ -z "$deps_prefix" ]]; then
     for candidate in /ucrt64 /mingw64 /clang64; do
@@ -35,7 +35,7 @@ if [[ -z "$deps_prefix" ]]; then
         fi
     done
 fi
-qt_bin="${ICE_QT_BIN:-${deps_prefix:+$deps_prefix/bin}}"
+qt_bin="${OPENVLSI_QT_BIN:-${deps_prefix:+$deps_prefix/bin}}"
 qt_bin="$(normalize_path "$qt_bin")"
 
 deployqt=""
@@ -52,8 +52,8 @@ for candidate in \
     fi
 done
 
-if [[ -n "$deployqt" && -f "$bindir/ice.exe" ]]; then
-    "$deployqt" --release --no-translations --no-compiler-runtime --dir "$bindir" "$bindir/ice.exe"
+if [[ -n "$deployqt" && -f "$bindir/openvlsi.exe" ]]; then
+    "$deployqt" --release --no-translations --no-compiler-runtime --dir "$bindir" "$bindir/openvlsi.exe"
 fi
 
 # Copy every non-system DLL that the staged executables depend on. This covers

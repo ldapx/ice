@@ -8,7 +8,7 @@ Specification and performance report produced by `training_agent.py` on 2026-11-
 | --- | --- |
 | Model | nvidia/nemotron-3-ultra-550b-a55b:free |
 | Project | project |
-| Run directory | /home/gan/repos/ice/Training-data/runs/20261104-193844_common-source-amplifier |
+| Run directory | /home/gan/repos/openvlsi/Training-data/runs/20261104-193844_common-source-amplifier |
 | Schematic | `design_a1` (text SPICE) |
 | Simulation | `sim_a1` (transient) |
 | State | succeeded |
@@ -90,6 +90,6 @@ RL out 0 100k
 - `thoughts.md` — full agent reasoning and tool log
 - `specs.md`, `specs.csv` — this table
 - `netlist.sp` — the simulated netlist
-- `simulation.json` — the raw stored ICE run
+- `simulation.json` — the raw stored OpenVLSI run
 - `proposal.json` — the model's final structured answer
-- `project/` — the ICE project (open `project.icepro` in the ICE GUI)
+- `project/` — the OpenVLSI project (open `project.ovpro` in the OpenVLSI GUI)

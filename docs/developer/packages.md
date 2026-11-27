@@ -7,9 +7,9 @@ Packages are directories containing a versioned `package.toml` manifest and
 capability-oriented content such as `symbols/`, `technology/`, `layout/`,
 `simulation/`, `implementation/`, and `vendor/`.
 
-`ice-pkg resolve <repository> <ice-version> name=constraint ...` selects the
+`openvlsi-pkg resolve <repository> <openvlsi-version> name=constraint ...` selects the
 highest matching local package version, resolves transitive dependencies, and
-writes a deterministic `ice.lock`. The lockfile records exact versions,
+writes a deterministic `openvlsi.lock`. The lockfile records exact versions,
 sources, trust declarations, capabilities, canonical `pdk_id`, and SHA-256
 content hashes. The content hash covers the package model files, so a PDK
 package version plus hash pins the simulation stack.
@@ -17,7 +17,7 @@ package version plus hash pins the simulation stack.
 Package code is untrusted by default. A package's `[trust] trusted = true`
 metadata is recorded for policy decisions and gates package device generators.
 A project can additionally trust individual package names in its
-`project.icepro`:
+`project.ovpro`:
 
 ```json
 "trusted_packages": ["ihp.sg13g2", "sky130"]
@@ -25,8 +25,8 @@ A project can additionally trust individual package names in its
 
 The procedural-layout check allows package code when the package manifest is
 trusted, or when the project trusts the package manifest name or PDK id. An
-explicit `ICE_ALLOW_PACKAGE_CODE=1` overrides the check for one invocation;
-`ICE_ALLOW_PACKAGE_CODE=0` remains a global kill switch that denies package code
+explicit `OPENVLSI_ALLOW_PACKAGE_CODE=1` overrides the check for one invocation;
+`OPENVLSI_ALLOW_PACKAGE_CODE=0` remains a global kill switch that denies package code
 even for a trusting project. The trust flag is advisory metadata, not a
 cryptographic signature. Project trust is not version-pinned; use package
 versions and lockfile hashes for supply-chain pinning. Scripts and plugins must
@@ -43,10 +43,10 @@ separate packages for:
 External Git packages can be installed into a local repository with:
 
 ```text
-ice-pkg install <repository> <name> <version> <git-url> [revision]
+openvlsi-pkg install <repository> <name> <version> <git-url> [revision]
 ```
 
-The installer clones the source and writes an ICE wrapper manifest when the
+The installer clones the source and writes an OpenVLSI wrapper manifest when the
 repository does not already provide one. It does not execute package scripts.
 The IHP, Sky130, and GF180 packages now vendor their simulation model subsets
 and declare a `[pdk.simulation]` contract; an upstream Volare/CIEL installation
@@ -74,7 +74,7 @@ omitted when a PDK does not need them.
 │   ├── devices/
 │   │   ├── index.json
 │   │   ├── pcell/                 # Python PCell definitions
-│   │   ├── fixed/                 # fixed .icelay cells
+│   │   ├── fixed/                 # fixed .ovlay cells
 │   │   ├── generator.py
 │   │   └── build.py
 │   └── dummy_fill.py              # optional procedural-fill hook
@@ -100,12 +100,12 @@ Shared implementation data lives under `implementation/common/`. Per-stack
 technology LEF and RCX rules live under `implementation/stacks/<stack>/`;
 single-stack PDKs use `implementation/stacks/default/`. Liberty files may be
 plain `.lib` or gzip-compressed `.lib.gz`. Built OSDI objects are cached outside
-the package by `ice-pkg pdk-build`; their Verilog-A sources live under
+the package by `openvlsi-pkg pdk-build`; their Verilog-A sources live under
 `simulation/verilog-a/`. All manifest paths are relative to the package root.
 
 ## PDK metadata
 
-Simulation PDKs come from ICE packages only. Volare, CIEL, `PDK_ROOT`, `PDK`,
+Simulation PDKs come from OpenVLSI packages only. Volare, CIEL, `PDK_ROOT`, `PDK`,
 and system PDK roots are not runtime fallbacks.
 
 A package that provides a PDK should declare a canonical ID, aliases, and a
@@ -138,13 +138,13 @@ vd = 0.6
 ```
 
 `[pdk.simulation.probe]` supplies the minimum-size NMOS dimensions and bias
-used by `ice-cli pdk-doctor`/the GUI PDK readiness check. Width and length are
+used by `openvlsi-cli pdk-doctor`/the GUI PDK readiness check. Width and length are
 emitted verbatim, so a package whose model library sets `.option scale=1u` can
-use unitless values. When the block is absent, ICE uses generic defaults
+use unitless values. When the block is absent, OpenVLSI uses generic defaults
 (`1u`, `0.13u`, 1.2 V, 0.6 V) instead of guessing from the PDK id.
 
-`manufacturing_grid` is the PDK coordinate grid in ICE database units
-(nanometres). ICE uses it as the default layout grid for new layouts while
+`manufacturing_grid` is the PDK coordinate grid in OpenVLSI database units
+(nanometres). OpenVLSI uses it as the default layout grid for new layouts while
 preserving a project grid the user has changed. It does not replace per-layer
 minimum-spacing rules or placement/routing track pitches.
 
@@ -152,7 +152,7 @@ minimum-spacing rules or placement/routing track pitches.
 The `verilog_a` tree and `[[pdk.simulation.osdi]]` sources are relative to the
 package root.
 
-`spiceinit` names an ngspice start-up file such as the PDK's `spinit`. ICE
+`spiceinit` names an ngspice start-up file such as the PDK's `spinit`. OpenVLSI
 replays its `set ...` commands before loading a circuit, so a run does not
 depend on the user's `~/.spiceinit`. Packages whose models are binned
 `.subckt` wrappers (SKY130, GF180MCU) need it to select the BSIM
@@ -179,7 +179,7 @@ output = "psp103.osdi"
 Build the OSDI cache once with:
 
 ```sh
-ice-pkg pdk-build ihp.sg13g2
+openvlsi-pkg pdk-build ihp.sg13g2
 ```
 
 A package may also declare its display name, default schematic, layout layers,
@@ -291,11 +291,11 @@ stream routed DEF geometry onto the PDK's real GDS layer numbers. Without a
 map, KLayout assigns sequential numbers to LEF layers, so routes, pins, labels,
 and the die outline land on layers that do not exist in the PDK.
 
-When `[pdk.implementation.orfs]` is present, ICE may resolve missing LEF,
+When `[pdk.implementation.orfs]` is present, OpenVLSI may resolve missing LEF,
 Liberty, site, IO-layer, routing, OpenRCX rule, and standard-cell GDS defaults
 from an OpenROAD-flow-scripts platform under `OPENROAD_FLOW_SCRIPTS` or
-`ICE_OPENROAD_FLOW_SCRIPTS`. The block can also carry fallback physical policy
-that ICE must not infer from the PDK name:
+`OPENVLSI_OPENROAD_FLOW_SCRIPTS`. The block can also carry fallback physical policy
+that OpenVLSI must not infer from the PDK name:
 
 ```toml
 [pdk.implementation.orfs]
@@ -316,7 +316,7 @@ Liberty masters match the cell LEF. `implementation-toolchain` reports whether
 ### Layer styles
 
 A PDK package can ship default colors, patterns, and visibility for its layers
-in `technology/layer-styles.json`. ICE discovers the file automatically from the
+in `technology/layer-styles.json`. OpenVLSI discovers the file automatically from the
 package root; it is not listed in `package.toml`.
 
 ```json
@@ -350,7 +350,7 @@ Sky130, and GF180MCU packages ship style files derived from their layer maps.
 ## Package indexes
 
 The GUI reads available packages from a Git package index. The default index is
-https://github.com/ldapx/ice-packages, cloned into `~/.ice/package-index`.
+https://github.com/ldapx/ice-packages, cloned into `~/.openvlsi/package-index`.
 Opening **Manage Packages** automatically clones the default index when it is
 missing or empty, so the repository's packages are shown without pressing
 **Refresh**. **Refresh** still performs an explicit pull and submodule update.
@@ -366,7 +366,7 @@ Open `Project -> Manage Packages` to:
 
 - browse every package in the index with its description, version, capabilities,
   and `.github/logo.png` logo;
-- install an indexed package into `~/.ice/packages`;
+- install an indexed package into `~/.openvlsi/packages`;
 - install a package from an arbitrary repository URL with **Install from
   Repository URL…**;
 - uninstall any installed package, including packages that are not currently in
@@ -375,14 +375,14 @@ Open `Project -> Manage Packages` to:
 - activate any installed PDK package when a project is open.
 
 Installing and uninstalling packages work without an open project. Installing a
-package writes an `ice.lock` beside the project when a project is open. A
+package writes an `openvlsi.lock` beside the project when a project is open. A
 package that was removed from the index but is still installed remains visible
 so it can be uninstalled.
 
 ## Project package dependencies
 
 Every project records its package dependencies. Opening a project verifies that
-each dependency is installed. If packages are missing, ICE lists them and offers
+each dependency is installed. If packages are missing, OpenVLSI lists them and offers
 to install them before the project opens; closing the prompt leaves the project
 closed.
 
@@ -401,7 +401,7 @@ dependency.
 ### Symbol pins and SPICE nodes
 
 Bipolar and MOS device models are SPICE subcircuits, so a symbol must declare
-one pin per subcircuit node, in the order the model expects. ICE reads the node
+one pin per subcircuit node, in the order the model expects. OpenVLSI reads the node
 list from the package model files, therefore a bipolar symbol with a substrate
 pin (for example the SKY130 NPN, declared as `.subckt ... c b e s`) is
 instantiated with four nodes, while a three terminal substrate PNP keeps three.
@@ -414,7 +414,7 @@ symbol that is placed more than once is copied per instance (see
 
 The package simulation options are applied before the schematic netlist, so a
 `.option scale=...` line (SKY130 declares `.option scale=1u`) sets the length
-unit of every MOS width and length. ICE converts sizes written with an SI
+unit of every MOS width and length. OpenVLSI converts sizes written with an SI
 suffix (`1u`, `150n`) into those units and emits bare values unchanged, so a
 symbol default of `w = 1u` becomes `W=1` and a hand written `W=60` stays 60
 microns. Without a scale option, sizes are emitted verbatim.
@@ -422,7 +422,7 @@ microns. Without a scale option, sizes are emitted verbatim.
 ## PDK-provided procedural layout operations
 
 Procedural layout scripts can request process-specific geometry through the
-generic layout builder API. ICE dispatches these requests to the active PDK
+generic layout builder API. OpenVLSI dispatches these requests to the active PDK
 package after the user script finishes:
 
 ```python
@@ -451,7 +451,7 @@ Each PDK package owns its layout device library:
 
 ```text
 <pdk-root>/layout/devices/index.json       # library index
-<pdk-root>/layout/devices/fixed/*.icelay   # fixed-device cells (optional)
+<pdk-root>/layout/devices/fixed/*.ovlay   # fixed-device cells (optional)
 <pdk-root>/layout/devices/pcell/           # Python PCell definitions
 <pdk-root>/layout/devices/generator.py     # runtime PCell generator
 <pdk-root>/layout/devices/build.py         # index/fixed-device regeneration
@@ -461,31 +461,31 @@ Each PDK package owns its layout device library:
 
 Parameterized devices are Python PCells: the index carries their generator
 metadata (`module` and `class`) and parameter defaults, but no stored geometry.
-ICE generates their layout from the package Python scripts when a device is
+OpenVLSI generates their layout from the package Python scripts when a device is
 selected or placed, and regenerates it when a parameter changes. Fixed devices
-have no generator metadata and are stored as `layout/devices/fixed/*.icelay`
+have no generator metadata and are stored as `layout/devices/fixed/*.ovlay`
 cells.
 The `index.json` index also carries the library layers, ordering, categories,
 and a `cell_prefix` used for instance names (for example `IHP `, `SKY130 `, or
 `GF180 `). No global PDK installation is consulted. Device-library port
 records may carry a layer or datatype as a generator/routing hint. When a cell
-is placed, those records become ICE ports in the project layout. The port name,
-rectangle, direction, side, net, label, and layer are stored in `.icelay`; the
+is placed, those records become OpenVLSI ports in the project layout. The port name,
+rectangle, direction, side, net, label, and layer are stored in `.ovlay`; the
 layer is required and drives routing and interchange.
 
 The IHP SG13G2 package ships its complete device library plus vendored IHP
 PyCell sources under `vendor/ihp`. Parametric regeneration runs the package's
 `layout/devices/pcell/ihp_runtime.py`, which evaluates those sources and
-transfers polygons into an `icepy` layout cell. ICE's `icepy.pcells` module is
+transfers polygons into an `openvlsipy` layout cell. OpenVLSI's `openvlsipy.pcells` module is
 technology-neutral and contains only the shared package PCell runtime.
 
-The Sky130 and GF180MCU packages ship ICE-native replicas of their PCell
-families in `layout/devices/pcell/pcells.py`. They use the `icepy` layout
+The Sky130 and GF180MCU packages ship OpenVLSI-native replicas of their PCell
+families in `layout/devices/pcell/pcells.py`. They use the `openvlsipy` layout
 builder API directly and do not require KLayout, gdsfactory, Volare, CIEL, or
 `PDK_ROOT`. Their `layout/devices/index.json` is generated from the same
 definitions with `layout/devices/build.py`. Parameterized cells are written as
 PCell index entries without geometry; only fixed cells are written as
-`layout/devices/fixed/*.icelay`.
+`layout/devices/fixed/*.ovlay`.
 
 ### Procedural cell generators
 
@@ -516,13 +516,13 @@ return any composable handle. They run in the same external Python process as
 procedural layouts, so they can use `ctx.device`, `ctx.row`, `ctx.port`, and
 the rest of the public builder API, but they cannot mutate the project
 database. Package entries override built-in generators with the same name.
-The package version and the ICE builder/built-in generator sources participate
+The package version and the OpenVLSI builder/built-in generator sources participate
 in regeneration detection; a package generator change should bump the package
 version.
 
 ### DRC decks
 
-`technology/drc.json` declares how ICE runs DRC for the package. It can point
+`technology/drc.json` declares how OpenVLSI runs DRC for the package. It can point
 at a KLayout `.lydrc`/`.drc` deck (with `{deck}`, `{input}`, `{report}`,
 `{top_cell}`, `{suite}`, and `{workdir}` placeholders) or a gdscheck process,
 and may list search paths for an externally installed PDK. The SKY130 package
@@ -537,21 +537,21 @@ The gdscheck variant declares the exact process name:
 }
 ```
 
-Named `suites` can select alternate decks or rule groups. `ICE_DRC_DECK`
-overrides the deck path for every PDK, and `ICE_DRC_DECK_<PDK>` (for example
-`ICE_DRC_DECK_SKY130A`) overrides it for one PDK. Packages without
-`technology/drc.json` use a generic identifier-normalizing fallback; ICE no
+Named `suites` can select alternate decks or rule groups. `OPENVLSI_DRC_DECK`
+overrides the deck path for every PDK, and `OPENVLSI_DRC_DECK_<PDK>` (for example
+`OPENVLSI_DRC_DECK_SKY130A`) overrides it for one PDK. Packages without
+`technology/drc.json` use a generic identifier-normalizing fallback; OpenVLSI no
 longer contains a table of known PDK process names.
 
 ### Layer connectivity and routing
 
-`technology/connectivity.json` tells ICE the electrical role of each layer,
+`technology/connectivity.json` tells OpenVLSI the electrical role of each layer,
 which cut layers connect which conductor pairs, and the vertical stack used by
 the procedural router and the planned-connection router:
 
 ```json
 {
-  "format": "ice-pdk-connectivity",
+  "format": "openvlsi-pdk-connectivity",
   "schema_version": 1,
   "layers": [
     {"name": "diff", "role": "active"},
@@ -579,10 +579,10 @@ Names are matched case-insensitively after removing a trailing `.purpose`, so
 `implant`, `well`, `boundary`, `label`, `text`, `ignored`, and `insulator`. `sheet_resistance` is in ohm/square and overrides PEX's generic
 per-kind coefficient for that layer. Via `size` and `enclosure` are in
 nanometres and become the router defaults for that layer pair. Layers and vias
-not declared in the file keep ICE's generic name fallback, so custom PDKs still
+not declared in the file keep OpenVLSI's generic name fallback, so custom PDKs still
 work without the document.
 
-`ice-cli pdk-info <pdk>` reports the resolved `layout_library`,
+`openvlsi-cli pdk-info <pdk>` reports the resolved `layout_library`,
 `layout_generator`, `layout_extraction`, `layout_connectivity`, and
 `drc_config` paths for each installed package.
 
@@ -594,7 +594,7 @@ owns its layer names, models, and terminal layers:
 
 ```json
 {
-  "format": "ice-device-extraction",
+  "format": "openvlsi-device-extraction",
   "schema_version": 1,
   "pdk": "ihp-sg13g2",
   "devices": [
@@ -629,4 +629,4 @@ as one shorted diffusion net. It then emits a SPICE device per channel. Device
 dimensions are derived from the channel geometry: the gate aspect ratio chooses
 the length axis unless `length_axis` is explicitly `x` or `y`.
 
-Building `icepy` is required for PDK device regeneration.
+Building `openvlsipy` is required for PDK device regeneration.

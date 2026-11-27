@@ -1,0 +1,5325 @@
+#include "openvlsilib/agent_api.hpp"
+#include "openvlsilib/connectivity.hpp"
+#include "openvlsilib/core.hpp"
+#include "openvlsilib/drc.hpp"
+#include "openvlsilib/implementation.hpp"
+#include "openvlsilib/interchange.hpp"
+#include "openvlsilib/measure.hpp"
+#include "openvlsilib/operations.hpp"
+#include "openvlsilib/pdk.hpp"
+#include "openvlsilib/pex.hpp"
+#include "openvlsilib/procedural_layout.hpp"
+#include "openvlsilib/process.hpp"
+#include "openvlsilib/simulation.hpp"
+#include "openvlsilib/simulation_report.hpp"
+#include "openvlsilib/simulation_store.hpp"
+#include "openvlsilib/spice.hpp"
+#include "openvlsilib/symbols.hpp"
+#include "openvlsilib/verification.hpp"
+#include "openvlsilib/waveform.hpp"
+
+#include <nlohmann/json.hpp>
+#include <spdlog/sinks/stdout_color_sinks.h>
+#include <spdlog/spdlog.h>
+
+#include <algorithm>
+#include <cctype>
+#include <charconv>
+#include <chrono>
+#include <csignal>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <iostream>
+#include <limits>
+#include <map>
+#include <optional>
+#include <set>
+#include <sstream>
+#include <stdexcept>
+#include <string>
+#include <vector>
+
+namespace {
+
+using json = nlohmann::json;
+
+json parsedMetadata(const std::string &text) {
+    if (text.empty())
+        return nullptr;
+    try {
+        return json::parse(text);
+    } catch (const std::exception &) {
+        return json{{"error", "invalid stored metadata"}};
+    }
+}
+
+openvlsi::ProcessCancellation *gActiveCancellation = nullptr;
+
+void handleImplementationSignal(int) {
+    if (gActiveCancellation)
+        gActiveCancellation->cancel();
+}
+
+[[noreturn]] void argumentError(const std::string &message) { throw openvlsi::ProjectError("cli.arguments", message); }
+
+void expectArguments(const std::vector<std::string> &args, std::size_t minimum, std::size_t maximum,
+                     const std::string &usage) {
+    if (args.size() < minimum || args.size() > maximum)
+        argumentError("Usage: openvlsi-cli " + usage);
+}
+
+[[noreturn]] void unknownCommand(const std::string &command) {
+    throw openvlsi::ProjectError("cli.command", "Unknown command: " + command + ". Run 'openvlsi-cli --help'.");
+}
+
+openvlsi::Coordinate parseInteger(const std::string &text, const char *what) {
+    try {
+        std::size_t used = 0;
+        const auto value = std::stoll(text, &used);
+        if (used != text.size())
+            throw std::invalid_argument("trailing characters");
+        return static_cast<openvlsi::Coordinate>(value);
+    } catch (const std::exception &) {
+        argumentError(std::string("Invalid integer for ") + what + ": " + text);
+    }
+}
+
+double parseDouble(const std::string &text, const char *what) {
+    try {
+        std::size_t used = 0;
+        const auto parsed = openvlsi::parseDoublePrefix(text, used);
+        if (!parsed || used == 0)
+            throw std::invalid_argument("invalid number");
+        double value = *parsed;
+        auto suffix = text.substr(used);
+        std::transform(suffix.begin(), suffix.end(), suffix.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        double multiplier = 1.0;
+        if (suffix.empty() || suffix == "s")
+            multiplier = 1.0;
+        else if (suffix == "t")
+            multiplier = 1e12;
+        else if (suffix == "g")
+            multiplier = 1e9;
+        else if (suffix == "meg")
+            multiplier = 1e6;
+        else if (suffix == "k")
+            multiplier = 1e3;
+        else if (suffix == "m")
+            multiplier = 1e-3;
+        else if (suffix == "u")
+            multiplier = 1e-6;
+        else if (suffix == "n")
+            multiplier = 1e-9;
+        else if (suffix == "p")
+            multiplier = 1e-12;
+        else if (suffix == "f")
+            multiplier = 1e-15;
+        else
+            throw std::invalid_argument("unknown suffix");
+        return value * multiplier;
+    } catch (const std::exception &) {
+        argumentError(std::string("Invalid number for ") + what + ": " + text);
+    }
+}
+
+std::pair<std::string, double> parseAssignment(const std::string &text, const char *what) {
+    const auto separator = text.find('=');
+    if (separator == std::string::npos || separator == 0)
+        argumentError(std::string("Invalid ") + what + " (expected name=value): " + text);
+    return {text.substr(0, separator), parseDouble(text.substr(separator + 1), what)};
+}
+
+std::pair<std::string, std::string> parseTextAssignment(const std::string &text, const char *what) {
+    const auto separator = text.find('=');
+    if (separator == std::string::npos || separator == 0)
+        argumentError(std::string("Invalid ") + what + " (expected name=value): " + text);
+    return {text.substr(0, separator), text.substr(separator + 1)};
+}
+
+bool parseToggle(const std::string &text, const char *what) {
+    auto normalized = text;
+    std::transform(normalized.begin(), normalized.end(), normalized.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (normalized == "on" || normalized == "true" || normalized == "yes" || normalized == "1")
+        return true;
+    if (normalized == "off" || normalized == "false" || normalized == "no" || normalized == "0")
+        return false;
+    argumentError(std::string("Invalid boolean for ") + what + ": " + text);
+}
+
+std::optional<openvlsi::ObjectId> parseUnsigned(const std::string &text) {
+    if (text.empty() || !std::all_of(text.begin(), text.end(), [](unsigned char c) { return std::isdigit(c); }))
+        return std::nullopt;
+    try {
+        std::size_t used = 0;
+        const auto value = std::stoull(text, &used);
+        if (used == text.size())
+            return static_cast<openvlsi::ObjectId>(value);
+    } catch (const std::exception &) {
+    }
+    return std::nullopt;
+}
+
+template <typename Map> openvlsi::ObjectId resolveByIdOrName(const Map &map, const std::string &text, const char *kind) {
+    if (const auto id = parseUnsigned(text); id && map.contains(*id))
+        return *id;
+    for (const auto &[id, entry] : map) {
+        if (entry.name == text)
+            return id;
+    }
+    argumentError(std::string("Unknown ") + kind + ": " + text);
+}
+
+openvlsi::ObjectId resolveSchematic(const openvlsi::Project &project, const std::string &text) {
+    return resolveByIdOrName(project.schematicCells, text, "schematic");
+}
+
+openvlsi::ObjectId resolveLayout(const openvlsi::Project &project, const std::string &text) {
+    return resolveByIdOrName(project.layoutCells, text, "layout cell");
+}
+
+openvlsi::ObjectId resolveSchematicInstance(const openvlsi::Project &project, openvlsi::ObjectId cellId, const std::string &text) {
+    const auto cell = project.schematicCells.find(cellId);
+    if (cell == project.schematicCells.end())
+        argumentError("Unknown schematic cell");
+    if (const auto id = parseUnsigned(text); id && cell->second.instances.contains(*id))
+        return *id;
+    for (const auto &[id, instance] : cell->second.instances) {
+        if (instance.name == text)
+            return id;
+    }
+    argumentError("Unknown schematic instance: " + text);
+}
+
+openvlsi::ObjectId resolveLayoutShape(const openvlsi::Project &project, openvlsi::ObjectId cellId, const std::string &text) {
+    const auto cell = project.layoutCells.find(cellId);
+    if (cell == project.layoutCells.end())
+        argumentError("Unknown layout cell");
+    if (const auto id = parseUnsigned(text); id && cell->second.shapes.contains(*id))
+        return *id;
+    for (const auto &[id, shape] : cell->second.shapes) {
+        if (!shape.name.empty() && shape.name == text)
+            return id;
+    }
+    argumentError("Unknown layout shape: " + text);
+}
+
+openvlsi::ObjectId resolveLayoutDevice(const openvlsi::Project &project, openvlsi::ObjectId cellId, const std::string &text) {
+    const auto cell = project.layoutCells.find(cellId);
+    if (cell == project.layoutCells.end())
+        argumentError("Unknown layout cell");
+    const auto findNamed = [&](const auto &objects) -> std::optional<openvlsi::ObjectId> {
+        for (const auto &[id, object] : objects) {
+            if (object.name == text)
+                return id;
+        }
+        return std::nullopt;
+    };
+    if (text.starts_with("instance:")) {
+        const auto name = text.substr(std::string("instance:").size());
+        if (const auto id = parseUnsigned(name); id && cell->second.instances.contains(*id))
+            return *id;
+        if (const auto id = findNamed(cell->second.instances))
+            return *id;
+        argumentError("Unknown layout instance: " + name);
+    }
+    if (text.starts_with("planned:")) {
+        const auto name = text.substr(std::string("planned:").size());
+        if (const auto id = parseUnsigned(name); id && cell->second.plannedDevices.contains(*id))
+            return *id;
+        if (const auto id = findNamed(cell->second.plannedDevices))
+            return *id;
+        argumentError("Unknown planned device: " + name);
+    }
+    if (const auto id = parseUnsigned(text)) {
+        if (cell->second.instances.contains(*id) || cell->second.plannedDevices.contains(*id))
+            return *id;
+    }
+    const auto instance = findNamed(cell->second.instances);
+    const auto planned = findNamed(cell->second.plannedDevices);
+    if (instance && planned)
+        argumentError("Layout device name is ambiguous; use instance:<name> or planned:<name>: " + text);
+    if (instance)
+        return *instance;
+    if (planned)
+        return *planned;
+    argumentError("Unknown layout device: " + text);
+}
+
+json layoutDeviceBindingJson(const openvlsi::Project &project, const openvlsi::LayoutDeviceBinding &binding) {
+    json value{{"layout_cell", binding.layoutCell},
+               {"layout_object", binding.layoutObject},
+               {"layout_kind", binding.kind == openvlsi::LayoutDeviceKind::instance ? "instance" : "planned_device"},
+               {"layout_name", binding.layoutName},
+               {"schematic_instance", binding.schematicInstance},
+               {"stale", binding.stale},
+               {"duplicate", binding.duplicate}};
+    if (binding.schematicCell != 0) {
+        value["schematic_cell"] = binding.schematicCell;
+        if (const auto cell = project.schematicCells.find(binding.schematicCell); cell != project.schematicCells.end())
+            value["schematic_name"] = cell->second.name;
+    }
+    value["schematic_instance_name"] = binding.schematicName;
+    return value;
+}
+
+openvlsi::LayoutArrange parseLayoutArrange(const std::string &text) {
+    if (text == "left")
+        return openvlsi::LayoutArrange::left;
+    if (text == "right")
+        return openvlsi::LayoutArrange::right;
+    if (text == "top")
+        return openvlsi::LayoutArrange::top;
+    if (text == "bottom")
+        return openvlsi::LayoutArrange::bottom;
+    if (text == "center-horizontal" || text == "center_horizontal")
+        return openvlsi::LayoutArrange::centerHorizontal;
+    if (text == "center-vertical" || text == "center_vertical")
+        return openvlsi::LayoutArrange::centerVertical;
+    if (text == "distribute-horizontal" || text == "distribute_horizontal")
+        return openvlsi::LayoutArrange::distributeHorizontal;
+    if (text == "distribute-vertical" || text == "distribute_vertical")
+        return openvlsi::LayoutArrange::distributeVertical;
+    argumentError("Unknown layout-arrange operation: " + text);
+}
+
+openvlsi::ObjectId resolveLayoutItem(const openvlsi::Project &project, const std::string &text) {
+    if (const auto id = parseUnsigned(text)) {
+        if (project.layoutCells.contains(*id) || project.proceduralLayouts.contains(*id))
+            return *id;
+    }
+    for (const auto &[id, procedural] : project.proceduralLayouts) {
+        if (procedural.name == text)
+            return id;
+    }
+    for (const auto &[id, cell] : project.layoutCells) {
+        if (cell.name == text)
+            return id;
+    }
+    argumentError("Unknown layout or procedural layout: " + text);
+}
+
+openvlsi::ObjectId resolveProceduralLayout(const openvlsi::Project &project, const std::string &text) {
+    if (const auto id = parseUnsigned(text)) {
+        if (project.proceduralLayouts.contains(*id))
+            return *id;
+    }
+    for (const auto &[id, procedural] : project.proceduralLayouts) {
+        if (procedural.name == text)
+            return id;
+    }
+    argumentError("Unknown procedural layout: " + text);
+}
+
+std::optional<openvlsi::PackageSpec> packageForPdk(const std::string &pdk) {
+    if (pdk.empty() || pdk == openvlsi::genericPdkId)
+        return std::nullopt;
+    const auto pdks = openvlsi::findPdks(pdk);
+    if (pdks.empty())
+        return std::nullopt;
+    return openvlsi::PackageManager::readManifest(pdks.front().packageRoot);
+}
+
+// Fills in the package default when a layout command omits the stack. A
+// request that names an undeclared stack is rejected before the project is
+// modified.
+std::string resolveLayoutStack(const std::string &pdk, const std::string &requested) {
+    const auto package = packageForPdk(pdk);
+    if (!package || !package->pdk)
+        return requested;
+    return openvlsi::resolvePdkStack(*package->pdk, requested);
+}
+
+openvlsi::ObjectId resolveImplementationRun(const openvlsi::Project &project, const std::string &text) {
+    if (const auto id = parseUnsigned(text); id && project.implementationRuns.contains(*id))
+        return *id;
+    for (const auto &[id, run] : project.implementationRuns) {
+        if (run.name == text)
+            return id;
+    }
+    argumentError("Unknown implementation run: " + text);
+}
+
+json implementationSummary(const openvlsi::ImplementationRun &run) {
+    return {{"id", run.id},
+            {"name", run.name},
+            {"top", run.config.top},
+            {"pdk", run.config.pdk},
+            {"stack", run.config.stack},
+            {"backend", run.config.backend},
+            {"status", openvlsi::implementationStatusName(run.status)},
+            {"current_stage", openvlsi::implementationStageName(run.currentStage)},
+            {"directory", run.directory},
+            {"config_hash", run.configHash},
+            {"result_layout", run.resultLayout}};
+}
+
+json drcReportJson(const openvlsi::VerificationReport &report) {
+    json violations = json::array();
+    std::size_t errors = 0;
+    std::size_t warnings = 0;
+    std::size_t info = 0;
+    for (const auto &violation : report.drc) {
+        if (violation.severity == openvlsi::VerificationSeverity::error)
+            ++errors;
+        else if (violation.severity == openvlsi::VerificationSeverity::warning)
+            ++warnings;
+        else
+            ++info;
+        json entry = {{"severity", openvlsi::verificationSeverityName(violation.severity)},
+                      {"rule", violation.rule},
+                      {"message", violation.message},
+                      {"cell", violation.cell},
+                      {"location",
+                       {{"x", violation.location.x},
+                        {"y", violation.location.y},
+                        {"width", violation.location.width},
+                        {"height", violation.location.height}}}};
+        if (violation.object)
+            entry["object"] = *violation.object;
+        violations.push_back(std::move(entry));
+    }
+    return {{"total", report.drc.size()},
+            {"errors", errors},
+            {"warnings", warnings},
+            {"info", info},
+            {"violations", std::move(violations)}};
+}
+
+openvlsi::ObjectId resolveLayer(const openvlsi::Project &project, const std::string &text) {
+    return resolveByIdOrName(project.layers, text, "layer");
+}
+
+openvlsi::ObjectId resolveLayoutNet(const openvlsi::LayoutCell &cell, const std::string &text) {
+    return resolveByIdOrName(cell.nets, text, "layout net");
+}
+
+openvlsi::ObjectId resolveLayoutPort(const openvlsi::LayoutCell &cell, const std::string &text) {
+    if (const auto id = parseUnsigned(text); id && cell.ports.contains(*id))
+        return *id;
+    for (const auto &[id, port] : cell.ports) {
+        if (port.name == text)
+            return id;
+    }
+    argumentError("Unknown layout port: " + text);
+}
+
+openvlsi::PortDirection parsePortDirectionArgument(const std::string &text) {
+    if (const auto direction = openvlsi::parsePortDirection(text))
+        return *direction;
+    argumentError("Unknown port direction: " + text);
+}
+
+openvlsi::PortSide parsePortSideArgument(const std::string &text) {
+    if (const auto side = openvlsi::parsePortSide(text))
+        return *side;
+    argumentError("Unknown port side: " + text);
+}
+
+openvlsi::ObjectId resolveSymbol(const openvlsi::SchematicCell &cell, const std::string &text) {
+    if (const auto id = parseUnsigned(text); id && cell.symbols.contains(*id))
+        return *id;
+    for (const auto &[id, symbol] : cell.symbols) {
+        if (symbol.name == text)
+            return id;
+    }
+    argumentError("Unknown symbol: " + text);
+}
+
+openvlsi::ObjectId resolvePin(const openvlsi::SchematicCell &cell, const std::string &text) {
+    if (const auto id = parseUnsigned(text); id) {
+        for (const auto &[_, symbol] : cell.symbols) {
+            if (std::any_of(symbol.pins.begin(), symbol.pins.end(), [&](const auto &pin) { return pin.id == *id; }))
+                return *id;
+        }
+    }
+    const auto dot = text.find('.');
+    if (dot != std::string::npos) {
+        const auto ownerName = text.substr(0, dot);
+        const auto pinName = text.substr(dot + 1);
+        for (const auto &[_, instance] : cell.instances) {
+            if (instance.name != ownerName)
+                continue;
+            const auto symbol = cell.symbols.find(instance.symbol);
+            if (symbol == cell.symbols.end())
+                continue;
+            for (const auto &pin : symbol->second.pins)
+                if (pin.name == pinName)
+                    return pin.id;
+        }
+        for (const auto &[_, symbol] : cell.symbols) {
+            if (symbol.name != ownerName)
+                continue;
+            for (const auto &pin : symbol.pins)
+                if (pin.name == pinName)
+                    return pin.id;
+        }
+    }
+    std::optional<openvlsi::ObjectId> found;
+    for (const auto &[_, symbol] : cell.symbols) {
+        for (const auto &pin : symbol.pins) {
+            if (pin.name != text)
+                continue;
+            if (found)
+                argumentError("Pin name is ambiguous; use <symbol>.<pin>: " + text);
+            found = pin.id;
+        }
+    }
+    if (!found)
+        argumentError("Unknown pin: " + text);
+    return *found;
+}
+
+openvlsi::Orientation parseOrientation(const std::string &text) {
+    static const std::map<std::string, openvlsi::Orientation> values = {
+        {"r0", openvlsi::Orientation::r0},     {"r90", openvlsi::Orientation::r90},  {"r180", openvlsi::Orientation::r180},
+        {"r270", openvlsi::Orientation::r270}, {"mx", openvlsi::Orientation::mx},    {"my", openvlsi::Orientation::my},
+        {"m45", openvlsi::Orientation::m45},   {"m135", openvlsi::Orientation::m135}};
+    const auto it = values.find(text);
+    if (it == values.end())
+        argumentError("Unsupported orientation: " + text);
+    return it->second;
+}
+
+openvlsi::PinDirection parsePinDirection(const std::string &text) {
+    static const std::map<std::string, openvlsi::PinDirection> values = {
+        {"left", openvlsi::PinDirection::left},
+        {"right", openvlsi::PinDirection::right},
+        {"up", openvlsi::PinDirection::up},
+        {"down", openvlsi::PinDirection::down},
+    };
+    const auto it = values.find(text);
+    if (it == values.end())
+        argumentError("Unsupported pin direction: " + text);
+    return it->second;
+}
+
+const char *pinDirectionName(openvlsi::PinDirection direction) {
+    switch (direction) {
+    case openvlsi::PinDirection::left:
+        return "left";
+    case openvlsi::PinDirection::right:
+        return "right";
+    case openvlsi::PinDirection::up:
+        return "up";
+    case openvlsi::PinDirection::down:
+        return "down";
+    }
+    return "right";
+}
+
+std::vector<openvlsi::LayoutPoint> parsePoints(const std::vector<std::string> &args, std::size_t begin) {
+    std::vector<openvlsi::LayoutPoint> points;
+    for (std::size_t index = begin; index < args.size(); ++index) {
+        const auto comma = args[index].find(',');
+        if (comma == std::string::npos)
+            argumentError("Points must be written as x,y");
+        points.push_back({parseInteger(args[index].substr(0, comma), "point x"),
+                          parseInteger(args[index].substr(comma + 1), "point y")});
+    }
+    if (points.size() < 3)
+        argumentError("A polygon requires at least three x,y points");
+    return points;
+}
+
+std::vector<std::string> splitSignals(const std::string &text) {
+    std::vector<std::string> signals;
+    std::string current;
+    const auto flush = [&] {
+        const auto first = current.find_first_not_of(" \t\r\n");
+        const auto last = current.find_last_not_of(" \t\r\n");
+        if (first != std::string::npos)
+            signals.push_back(current.substr(first, last - first + 1));
+        current.clear();
+    };
+    for (const char character : text) {
+        if (character == ',' || std::isspace(static_cast<unsigned char>(character))) {
+            flush();
+            continue;
+        }
+        current.push_back(character);
+    }
+    flush();
+    return signals;
+}
+
+openvlsi::Rect parseRectArgument(const std::string &text, const char *what) {
+    const auto parts = splitSignals(text);
+    if (parts.size() != 4)
+        argumentError(std::string(what) + " must be x,y,width,height");
+    openvlsi::Rect rect;
+    rect.x = parseInteger(parts[0], what);
+    rect.y = parseInteger(parts[1], what);
+    rect.width = parseInteger(parts[2], what);
+    rect.height = parseInteger(parts[3], what);
+    return rect;
+}
+
+void applyImplementationConfigOption(const openvlsi::Project &project, const std::vector<std::string> &args,
+                                     std::size_t &index, openvlsi::ImplementationConfig &config) {
+    const auto &option = args[index];
+    const auto value = [&]() -> const std::string & {
+        if (++index >= args.size())
+            argumentError("Missing value for " + option);
+        return args[index];
+    };
+    if (option == "--top") {
+        config.top = value();
+    } else if (option == "--pdk") {
+        config.pdk = value();
+    } else if (option == "--stack") {
+        config.stack = value();
+    } else if (option == "--source") {
+        config.sources.emplace_back(value());
+    } else if (option == "--source-cell") {
+        config.sourceCells.push_back(resolveSchematic(project, value()));
+    } else if (option == "--sdc") {
+        config.sdc = value();
+    } else if (option == "--std-cell-lib") {
+        config.standardCellLibrary = value();
+    } else if (option == "--corner") {
+        config.corner = value();
+    } else if (option == "--site") {
+        config.site = value();
+    } else if (option == "--utilization") {
+        config.utilization = parseDouble(value(), "utilization");
+    } else if (option == "--aspect-ratio") {
+        config.aspectRatio = parseDouble(value(), "aspect ratio");
+    } else if (option == "--placement-density") {
+        config.placementDensity = parseDouble(value(), "placement density");
+    } else if (option == "--threads") {
+        config.threads = static_cast<int>(parseInteger(value(), "threads"));
+    } else if (option == "--seed") {
+        config.seed = static_cast<std::uint32_t>(parseInteger(value(), "seed"));
+    } else if (option == "--timeout") {
+        config.timeoutSeconds = static_cast<int>(parseInteger(value(), "timeout"));
+    } else if (option == "--backend") {
+        config.backend = value();
+    } else if (option == "--die-area") {
+        config.dieArea = parseRectArgument(value(), "die area");
+    } else if (option == "--core-area") {
+        config.coreArea = parseRectArgument(value(), "core area");
+    } else if (option == "--clear-die-area") {
+        config.dieArea.reset();
+    } else if (option == "--clear-core-area") {
+        config.coreArea.reset();
+    } else if (option == "--io-horizontal-layers") {
+        config.ioHorizontalLayers = splitSignals(value());
+    } else if (option == "--io-vertical-layers") {
+        config.ioVerticalLayers = splitSignals(value());
+    } else if (option == "--macro") {
+        const auto parts = splitSignals(value());
+        if (parts.size() < 3 || parts.size() > 4)
+            argumentError("--macro must be cell,x,y[,orientation]");
+        openvlsi::ImplementationMacroPlacement macro;
+        macro.cell = parts[0];
+        macro.x = parseInteger(parts[1], "macro x");
+        macro.y = parseInteger(parts[2], "macro y");
+        if (parts.size() == 4)
+            macro.orientation = parts[3];
+        config.macros.push_back(std::move(macro));
+    } else if (option == "--clear-macros") {
+        config.macros.clear();
+    } else if (option == "--timing-driven") {
+        config.timingDriven = true;
+    } else if (option == "--routability-driven") {
+        config.routabilityDriven = true;
+    } else if (option == "--cts") {
+        config.ctsEnabled = true;
+    } else if (option == "--no-cts") {
+        config.ctsEnabled = false;
+    } else if (option == "--cts-root-buffer") {
+        config.ctsRootBuffer = value();
+    } else if (option == "--cts-buffers") {
+        config.ctsBuffers = splitSignals(value());
+    } else if (option == "--routing-min-layer") {
+        config.routingMinLayer = value();
+    } else if (option == "--routing-max-layer") {
+        config.routingMaxLayer = value();
+    } else if (option == "--antenna-repair") {
+        config.antennaRepair = true;
+    } else if (option == "--no-antenna-repair") {
+        config.antennaRepair = false;
+    } else {
+        argumentError("Unknown implementation option: " + option);
+    }
+}
+
+std::string verilogIdentifier(const std::string &text) {
+    std::string result;
+    result.reserve(text.size());
+    for (const auto character : text) {
+        const auto byte = static_cast<unsigned char>(character);
+        if (std::isalnum(byte) || character == '_')
+            result.push_back(character);
+        else if (!result.empty() && result.back() != '_')
+            result.push_back('_');
+    }
+    while (!result.empty() && result.back() == '_')
+        result.pop_back();
+    if (result.empty())
+        result = "digital_block";
+    if (std::isdigit(static_cast<unsigned char>(result.front())))
+        result.insert(result.begin(), '_');
+    return result;
+}
+
+std::string normalizeAnalysisName(const std::string &text) {
+    std::string normalized;
+    for (const unsigned char character : text) {
+        if (!std::isspace(character))
+            normalized.push_back(static_cast<char>(std::tolower(character)));
+    }
+    if (normalized.empty() || normalized == "tran" || normalized == "transient")
+        return "transient";
+    if (normalized == "dc" || normalized == "dcsweep")
+        return "dc";
+    if (normalized == "ac" || normalized == "acsweep")
+        return "ac";
+    if (normalized == "op" || normalized == "operatingpoint")
+        return "op";
+    if (normalized == "tf" || normalized == "transferfunction")
+        return "tf";
+    if (normalized == "noise")
+        return "noise";
+    if (normalized == "digital" || normalized == "vcd" || normalized == "systemverilog")
+        return "digital";
+    argumentError("Unsupported analysis: " + text);
+}
+
+std::string readTextFile(const std::filesystem::path &path) {
+    std::ifstream stream(path, std::ios::binary);
+    if (!stream)
+        throw openvlsi::ProjectError("cli.file", "Unable to read file: " + path.string());
+    return {std::istreambuf_iterator<char>(stream), {}};
+}
+
+std::string readStdin() {
+    std::ostringstream stream;
+    stream << std::cin.rdbuf();
+    return stream.str();
+}
+
+std::filesystem::path projectRootForCli(const std::filesystem::path &path) { return openvlsi::projectRootDirectory(path); }
+
+void requireImportTargetAvailable(const std::filesystem::path &path, bool force) {
+    std::error_code status;
+    const auto projectFile = projectRootForCli(path) / "project.ovpro";
+    if (!force && std::filesystem::exists(projectFile, status) && !status)
+        throw openvlsi::ProjectError("project.exists", "A project already exists at " + projectFile.string() +
+                                                      "; choose another path or pass --force to replace it.");
+}
+
+std::filesystem::path defaultProjectPath() {
+    if (const auto *configured = std::getenv("OPENVLSI_PROJECT"); configured && *configured)
+        return configured;
+    std::error_code status;
+    auto directory = std::filesystem::current_path(status);
+    if (status)
+        return {};
+    for (int depth = 0; depth < 4 && !directory.empty(); ++depth) {
+        const auto candidate = directory / "project.ovpro";
+        if (std::filesystem::is_regular_file(candidate, status) && !status)
+            return candidate;
+        const auto parent = directory.parent_path();
+        if (parent == directory)
+            break;
+        directory = parent;
+    }
+    return {};
+}
+
+std::string projectNameForPath(const std::filesystem::path &path) {
+    const auto root = projectRootForCli(path);
+    auto name = root.filename().string();
+    if (name.empty())
+        name = "project";
+    return name;
+}
+
+std::string resolvePackageName(const std::string &request) {
+    const auto pdks = openvlsi::findPdks(request);
+    if (pdks.empty())
+        throw openvlsi::ProjectError("project.trust.package", "Unknown OpenVLSI PDK package: " + request);
+    return pdks.front().packageName;
+}
+
+json diagnosticsJson(const openvlsi::Project &project) {
+    json result = json::array();
+    for (const auto &diagnostic : project.validate()) {
+        json item = {{"severity", diagnostic.severity == openvlsi::Diagnostic::Severity::error ? "error" : "warning"},
+                     {"code", diagnostic.code},
+                     {"message", diagnostic.message}};
+        if (diagnostic.object)
+            item["object"] = *diagnostic.object;
+        result.push_back(std::move(item));
+    }
+    return result;
+}
+
+json simulationJson(const openvlsi::SimulationItem &simulation);
+
+json projectSummary(const openvlsi::Project &project, const std::string &path) {
+    json result = {
+        {"name", project.name},
+        {"identity", project.identity},
+        {"path", path},
+        {"grid", project.grid},
+        {"units",
+         {{"nanometers_per_unit", project.units.nanometers_per_unit}, {"denominator", project.units.denominator}}},
+        {"package_dependencies", project.packageDependencies},
+        {"trusted_packages", project.trustedPackages},
+        {"schematics", json::array()},
+        {"layers", json::array()},
+        {"layouts", json::array()},
+        {"procedural_layouts", json::array()},
+        {"simulations", json::array()},
+        {"simulation_scripts", json::array()},
+    };
+    for (const auto &[id, cell] : project.schematicCells) {
+        result["schematics"].push_back({{"id", id},
+                                        {"name", cell.name},
+                                        {"pdk", cell.pdk},
+                                        {"text", cell.textSchematic},
+                                        {"systemverilog", cell.systemVerilogSchematic},
+                                        {"symbols", cell.symbols.size()},
+                                        {"instances", cell.instances.size()},
+                                        {"nets", cell.nets.size()}});
+    }
+    for (const auto &[id, layer] : project.layers) {
+        result["layers"].push_back({{"id", id},
+                                    {"name", layer.name},
+                                    {"number", layer.number},
+                                    {"datatype", layer.datatype},
+                                    {"color", layer.color},
+                                    {"pattern", layer.pattern},
+                                    {"visible", layer.visible}});
+    }
+    for (const auto &[id, cell] : project.layoutCells) {
+        result["layouts"].push_back({{"id", id},
+                                     {"name", cell.name},
+                                     {"pdk", cell.pdk},
+                                     {"library", cell.library},
+                                     {"device", cell.device},
+                                     {"generated_by", cell.generatedBy},
+                                     {"shapes", cell.shapes.size()},
+                                     {"ports", cell.ports.size()},
+                                     {"instances", cell.instances.size()},
+                                     {"planned_devices", cell.plannedDevices.size()}});
+    }
+    for (const auto &[id, cell] : project.proceduralLayouts) {
+        result["procedural_layouts"].push_back({{"id", id},
+                                                {"name", cell.name},
+                                                {"pdk", cell.pdk},
+                                                {"generated_cell", cell.generatedCell},
+                                                {"script_length", cell.script.size()}});
+    }
+    for (const auto &[id, simulation] : project.simulations) {
+        auto entry = simulationJson(simulation);
+        entry["id"] = id;
+        result["simulations"].push_back(std::move(entry));
+    }
+    for (const auto &[id, report] : project.reports)
+        result["simulation_scripts"].push_back({{"id", id}, {"name", report.name}, {"path", report.path}});
+    return result;
+}
+
+openvlsi::ObjectId resolveReport(const openvlsi::Project &project, const std::string &text) {
+    return resolveByIdOrName(project.reports, text, "report");
+}
+
+openvlsi::ObjectId resolveSimulation(const openvlsi::Project &project, const std::string &text) {
+    return resolveByIdOrName(project.simulations, text, "simulation");
+}
+
+const openvlsi::SimulationGraph &resolveSimulationGraph(const openvlsi::SimulationItem &simulation, const std::string &text) {
+    if (const auto id = parseUnsigned(text)) {
+        for (const auto &graph : simulation.graphs) {
+            if (graph.id == *id)
+                return graph;
+        }
+    }
+    for (const auto &graph : simulation.graphs) {
+        if (graph.name == text)
+            return graph;
+    }
+    argumentError("Unknown simulation graph: " + text);
+}
+
+json simulationGraphJson(const openvlsi::SimulationGraph &graph) {
+    json result = {{"id", graph.id},
+                   {"name", graph.name},
+                   {"x_axis", graph.xAxis},
+                   {"y_signals", graph.ySignals},
+                   {"x_min", graph.xMin ? json(*graph.xMin) : json(nullptr)},
+                   {"x_max", graph.xMax ? json(*graph.xMax) : json(nullptr)},
+                   {"y_min", graph.yMin ? json(*graph.yMin) : json(nullptr)},
+                   {"y_max", graph.yMax ? json(*graph.yMax) : json(nullptr)},
+                   {"view", graph.view},
+                   {"fft", {{"enabled", graph.fft}, {"window", graph.fftWindow}, {"points", graph.fftPoints}}},
+                   {"show_measurements", graph.showMeasurements},
+                   {"derived_traces", json::array()},
+                   {"overlays", json::array()},
+                   {"markers", json::array()}};
+    for (const auto &trace : graph.derivedTraces)
+        result["derived_traces"].push_back({{"name", trace.name}, {"expression", trace.expression}});
+    for (const auto &overlay : graph.overlays)
+        result["overlays"].push_back({{"run_id", overlay.runId}, {"label", overlay.label}});
+    for (const auto &marker : graph.markers) {
+        json entry = {{"label", marker.label}, {"signal", marker.signal}, {"x", marker.x}};
+        if (marker.hasY)
+            entry["y"] = marker.y;
+        result["markers"].push_back(std::move(entry));
+    }
+    return result;
+}
+
+json cornerJson(const openvlsi::SimulationCorner &corner) {
+    return {{"name", corner.name},
+            {"model_section", corner.modelSection},
+            {"temperature", corner.temperature},
+            {"source_overrides", corner.sourceOverrides},
+            {"parameters", corner.parameters}};
+}
+
+json measurementSpecJson(const openvlsi::SimulationMeasurementSpec &spec) {
+    json result = {{"name", spec.name},   {"metric", spec.metric},   {"signal", spec.signal},
+                   {"input", spec.input}, {"voltage", spec.voltage}, {"tolerance", spec.tolerance}};
+    if (spec.threshold)
+        result["threshold"] = *spec.threshold;
+    return result;
+}
+
+json measurementResultJson(const openvlsi::SimulationMeasurementResult &measurement) {
+    json result = {{"name", measurement.name},
+                   {"metric", measurement.metric},
+                   {"value", measurement.value},
+                   {"unit", measurement.unit},
+                   {"valid", measurement.valid}};
+    if (!measurement.error.empty())
+        result["error"] = measurement.error;
+    return result;
+}
+
+json simulationJson(const openvlsi::SimulationItem &simulation) {
+    json result = {{"id", simulation.id},
+                   {"name", simulation.name},
+                   {"schematic", simulation.schematic},
+                   {"simulator", simulation.simulator},
+                   {"analysis", simulation.analysis},
+                   {"start", simulation.start},
+                   {"stop", simulation.stop},
+                   {"step", simulation.step},
+                   {"temperature", simulation.temperature},
+                   {"model_section", simulation.modelSection},
+                   {"parameters", simulation.parameters},
+                   {"source_overrides", simulation.sourceOverrides},
+                   {"dc_source", simulation.dcSource},
+                   {"dc_start", simulation.dcStart},
+                   {"dc_stop", simulation.dcStop},
+                   {"dc_step", simulation.dcStep},
+                   {"ac_variation", simulation.acVariation},
+                   {"ac_points", simulation.acPoints},
+                   {"ac_start", simulation.acStart},
+                   {"ac_stop", simulation.acStop},
+                   {"noise_output", simulation.noiseOutput},
+                   {"noise_input", simulation.noiseInput},
+                   {"noise_variation", simulation.noiseVariation},
+                   {"noise_points", simulation.noisePoints},
+                   {"noise_start", simulation.noiseStart},
+                   {"noise_stop", simulation.noiseStop},
+                   {"tf_output", simulation.tfOutput},
+                   {"tf_source", simulation.tfSource},
+                   {"signals", simulation.captureSignals},
+                   {"graphs", simulation.graphs.size()},
+                   {"corners", json::array()},
+                   {"sweeps", json::array()},
+                   {"measurements", json::array()}};
+    for (const auto &corner : simulation.corners)
+        result["corners"].push_back(cornerJson(corner));
+    for (const auto &sweep : simulation.sweeps)
+        result["sweeps"].push_back({{"parameter", sweep.parameter}, {"values", sweep.values}});
+    result["monte_carlo"] = {{"enabled", simulation.monteCarlo.enabled},
+                             {"samples", simulation.monteCarlo.samples},
+                             {"temperature_sigma", simulation.monteCarlo.temperatureSigma},
+                             {"supply_sigma_percent", simulation.monteCarlo.supplySigmaPercent},
+                             {"supply_source", simulation.monteCarlo.supplySource},
+                             {"supply_nominal", simulation.monteCarlo.supplyNominal},
+                             {"parameter_sigma_percent", simulation.monteCarlo.parameterSigmaPercent},
+                             {"seed", simulation.monteCarlo.seed}};
+    for (const auto &measurement : simulation.measurements)
+        result["measurements"].push_back(measurementSpecJson(measurement));
+    return result;
+}
+
+json experimentPointJson(const openvlsi::ExperimentPoint &point) {
+    json result = {{"variant", point.variant},
+                   {"corner", point.corner},
+                   {"sample", point.sample},
+                   {"parameters", point.parameters},
+                   {"state", openvlsi::jobStateName(point.result.state)},
+                   {"analysis", point.result.analysis},
+                   {"x_axis", point.result.xAxis},
+                   {"x_unit", point.result.xUnit},
+                   {"time_points", point.result.time.size()},
+                   {"scalars", point.result.scalars},
+                   {"trace_names", json::array()},
+                   {"measurements", json::array()}};
+    for (const auto &trace : point.result.traces)
+        result["trace_names"].push_back(trace.name);
+    if (!point.result.error.empty())
+        result["error"] = point.result.error;
+    for (const auto &measurement : point.result.measurements)
+        result["measurements"].push_back(measurementResultJson(measurement));
+    return result;
+}
+
+json schematicInfo(const openvlsi::SchematicCell &cell) {
+    json result = {{"id", cell.id},
+                   {"name", cell.name},
+                   {"pdk", cell.pdk},
+                   {"text", cell.textSchematic},
+                   {"systemverilog", cell.systemVerilogSchematic},
+                   {"source", cell.sourceText()},
+                   {"parameters", json::array()},
+                   {"symbols", json::array()},
+                   {"instances", json::array()},
+                   {"nets", json::array()}};
+    for (const auto &parameter : cell.parameters)
+        result["parameters"].push_back({{"id", parameter.id}, {"name", parameter.name}, {"value", parameter.value}});
+    for (const auto &[id, symbol] : cell.symbols) {
+        json pins = json::array();
+        for (const auto &pin : symbol.pins)
+            pins.push_back({{"id", pin.id},
+                            {"name", pin.name},
+                            {"x", pin.x},
+                            {"y", pin.y},
+                            {"direction", pinDirectionName(pin.direction)},
+                            {"width", pin.width},
+                            {"width_known", pin.widthKnown}});
+        result["symbols"].push_back(
+            {{"id", id}, {"name", symbol.name}, {"source_cell", symbol.sourceCell}, {"pins", std::move(pins)}});
+    }
+    for (const auto &[id, instance] : cell.instances) {
+        json parameters = json::array();
+        for (const auto &parameter : instance.parameters)
+            parameters.push_back({{"id", parameter.id}, {"name", parameter.name}, {"value", parameter.value}});
+        result["instances"].push_back({{"id", id},
+                                       {"name", instance.name},
+                                       {"symbol", instance.symbol},
+                                       {"x", instance.x},
+                                       {"y", instance.y},
+                                       {"orientation", openvlsi::orientationName(instance.orientation)},
+                                       {"parameters", std::move(parameters)}});
+    }
+    for (const auto &[id, net] : cell.nets) {
+        result["nets"].push_back({{"id", id}, {"name", net.name}, {"pins", net.pins}, {"x", net.x}, {"y", net.y}});
+    }
+    if (cell.textSchematic) {
+        const auto interface = openvlsi::spiceInterfaceForText(cell.spiceText, cell.name, cell.spiceSourcePath);
+        result["spice_ready"] = interface.ok;
+        result["spice_subcircuit"] = interface.subcircuitName;
+        result["spice_ports"] = interface.ports;
+        result["spice_port_declarations"] = interface.declaredPorts;
+        if (!interface.ok)
+            result["spice_error"] = interface.error;
+    }
+    return result;
+}
+
+json diagnosticJson(const openvlsi::Diagnostic &diagnostic) {
+    json item = {{"severity", diagnostic.severity == openvlsi::Diagnostic::Severity::error ? "error" : "warning"},
+                 {"code", diagnostic.code},
+                 {"message", diagnostic.message}};
+    if (diagnostic.object)
+        item["object"] = *diagnostic.object;
+    return item;
+}
+
+json fileSymbolJson(const openvlsi::FileSymbol &symbol) {
+    json pins = json::array();
+    for (const auto &pin : symbol.pins)
+        pins.push_back({{"name", pin.name},
+                        {"direction", pinDirectionName(pin.direction)},
+                        {"x", pin.x},
+                        {"y", pin.y},
+                        {"width", pin.width},
+                        {"width_known", pin.widthKnown}});
+    json defaults = json::array();
+    for (const auto &parameter : symbol.defaultParameters)
+        defaults.push_back({{"name", parameter.name}, {"value", parameter.value}});
+    return {{"name", symbol.name},
+            {"category", symbol.category},
+            {"pins", std::move(pins)},
+            {"defaults", std::move(defaults)}};
+}
+
+json componentPlacementJson(const openvlsi::ComponentPlacement &placement) {
+    json pins = json::array();
+    for (const auto &pin : placement.pins)
+        pins.push_back({{"id", pin.id},
+                        {"name", pin.name},
+                        {"direction", pinDirectionName(pin.direction)},
+                        {"width", pin.width},
+                        {"width_known", pin.widthKnown}});
+    return {{"instance", placement.instance},
+            {"symbol", placement.symbol},
+            {"symbol_name", placement.symbolName},
+            {"name", placement.instanceName},
+            {"pins", std::move(pins)}};
+}
+
+json layoutInfo(const openvlsi::Project &project, const openvlsi::LayoutCell &cell) {
+    json result = {{"id", cell.id},
+                   {"name", cell.name},
+                   {"pdk", cell.pdk},
+                   {"stack", cell.stack},
+                   {"library", cell.library},
+                   {"read_only", cell.readOnly},
+                   {"device", cell.device},
+                   {"generated_by", cell.generatedBy},
+                   {"schematic_cell", cell.schematicCell == 0 ? json(nullptr) : json(cell.schematicCell)},
+                   {"shapes", json::array()},
+                   {"ports", json::array()},
+                   {"instances", json::array()},
+                   {"planned_devices", json::array()}};
+    if (cell.schematicCell != 0) {
+        const auto schematic = project.schematicCells.find(cell.schematicCell);
+        result["schematic"] = schematic == project.schematicCells.end() ? json(nullptr) : json(schematic->second.name);
+    } else {
+        result["schematic"] = nullptr;
+    }
+    if (cell.reference)
+        result["reference"] = {
+            {"path", cell.reference->path}, {"format", cell.reference->format}, {"top_cell", cell.reference->topCell}};
+    for (const auto &[id, shape] : cell.shapes) {
+        const auto layer = project.layers.find(shape.layer);
+        json polygon = json::array();
+        for (const auto &point : shape.polygon)
+            polygon.push_back({point.x, point.y});
+        json centerline = json::array();
+        for (const auto &point : shape.centerline)
+            centerline.push_back({point.x, point.y});
+        json segmentLayers = json::array();
+        for (const auto layer : shape.segmentLayers)
+            segmentLayers.push_back(layer);
+        json segmentWidths = json::array();
+        for (const auto width : shape.segmentWidths)
+            segmentWidths.push_back(width);
+        json pointVias = json::array();
+        for (const auto &vias : shape.pointVias) {
+            json entry = json::array();
+            for (const auto layer : vias)
+                entry.push_back(layer);
+            pointVias.push_back(std::move(entry));
+        }
+        result["shapes"].push_back({{"id", id},
+                                    {"layer", shape.layer},
+                                    {"layer_name", layer == project.layers.end() ? "" : layer->second.name},
+                                    {"is_path", shape.isPath()},
+                                    {"is_text", shape.isText()},
+                                    {"name", shape.name},
+                                    {"text", shape.text},
+                                    {"path_width", shape.width},
+                                    {"segment_widths", std::move(segmentWidths)},
+                                    {"centerline", std::move(centerline)},
+                                    {"segment_layers", std::move(segmentLayers)},
+                                    {"point_vias", std::move(pointVias)},
+                                    {"rectangle",
+                                     {{"x", shape.rectangle.x},
+                                      {"y", shape.rectangle.y},
+                                      {"width", shape.rectangle.width},
+                                      {"height", shape.rectangle.height}}},
+                                    {"polygon", std::move(polygon)}});
+    }
+    for (const auto &[id, port] : cell.ports) {
+        result["ports"].push_back({{"id", id},
+                                   {"name", port.name},
+                                   {"layer", port.layer},
+                                   {"x", port.rectangle.x},
+                                   {"y", port.rectangle.y},
+                                   {"width", port.rectangle.width},
+                                   {"height", port.rectangle.height},
+                                   {"direction", openvlsi::portDirectionName(port.direction)},
+                                   {"side", openvlsi::portSideName(port.side)},
+                                   {"net", port.net == 0 ? json(nullptr) : json(port.net)},
+                                   {"label", port.label},
+                                   {"visible", port.visible},
+                                   {"locked", port.locked}});
+    }
+    for (const auto &[id, instance] : cell.instances) {
+        result["instances"].push_back({{"id", id},
+                                       {"name", instance.name},
+                                       {"cell", instance.cell},
+                                       {"x", instance.x},
+                                       {"y", instance.y},
+                                       {"orientation", openvlsi::orientationName(instance.orientation)}});
+    }
+    for (const auto &[id, device] : cell.plannedDevices) {
+        result["planned_devices"].push_back({{"id", id},
+                                             {"name", device.name},
+                                             {"x", device.x},
+                                             {"y", device.y},
+                                             {"width", device.width},
+                                             {"height", device.height}});
+    }
+    return result;
+}
+
+json buildJson(const std::filesystem::path &executablePath) {
+    const auto info = openvlsi::buildInfo();
+    return {{"version", info.version},
+            {"commit", info.commit},
+            {"build_time", info.buildTime},
+            {"build_type", info.buildType},
+            {"executable", executablePath.string()},
+            {"features", info.features}};
+}
+
+json measurementJson(const openvlsi::SignalMeasurement &measurement) {
+    json result = {{"name", measurement.name},
+                   {"points", measurement.statistics.points},
+                   {"min", measurement.statistics.min},
+                   {"max", measurement.statistics.max},
+                   {"amplitude", measurement.statistics.amplitude()},
+                   {"mean", measurement.statistics.mean},
+                   {"rms", measurement.statistics.rms},
+                   {"first", measurement.statistics.first},
+                   {"last", measurement.statistics.last},
+                   {"threshold", measurement.threshold},
+                   {"zero_crossings", measurement.zeroCrossings},
+                   {"rising_crossings", measurement.risingCrossings}};
+    if (measurement.period)
+        result["period"] = *measurement.period;
+    if (measurement.frequency)
+        result["frequency"] = *measurement.frequency;
+    if (measurement.settlingTime)
+        result["settling_time"] = *measurement.settlingTime;
+    return result;
+}
+
+json doctorJson(const std::filesystem::path &executablePath, const std::optional<std::filesystem::path> &projectPath,
+                bool probe = false) {
+    const auto runner = openvlsi::reportRunnerScriptPath(executablePath);
+    const auto python = openvlsi::reportPythonExecutable();
+    const auto commandAvailable = [](const std::string &program) {
+        openvlsi::ProcessOptions options;
+        options.arguments = {program, "--version"};
+        options.timeoutSeconds = 10;
+        const auto result = openvlsi::runProcess(options);
+        return result.started && result.exitCode == 0;
+    };
+    const bool pythonAvailable = !python.empty() && commandAvailable(python);
+    const bool ngspiceLibrary = openvlsi::ngspiceLibraryAvailable();
+    const bool ngspiceExecutable = commandAvailable("ngspice");
+
+    const auto roots = openvlsi::defaultPdkRoots();
+    const auto pdks = openvlsi::discoverPdks(roots);
+    json pdkArray = json::array();
+    json simulationLibraries = json::array();
+    json readyPdks = json::array();
+    bool pdksReady = false;
+    bool allPdksReady = !pdks.empty();
+    for (const auto &pdk : pdks) {
+        pdkArray.push_back(openvlsi::pdkInfoJson(pdk, false));
+        pdksReady = pdksReady || pdk.simulationReady;
+        allPdksReady = allPdksReady && pdk.simulationReady;
+        if (pdk.simulationReady)
+            readyPdks.push_back(pdk.id);
+        for (const auto &file : pdk.modelFiles) {
+            simulationLibraries.push_back(
+                {{"pdk", pdk.id}, {"version", pdk.version}, {"path", file.path.string()}, {"sections", file.sections}});
+        }
+    }
+
+    std::vector<std::string> timingLibraries;
+    for (const auto &root : roots) {
+        std::error_code status;
+        if (!std::filesystem::is_directory(root, status) || status)
+            continue;
+        for (std::filesystem::recursive_directory_iterator it(root, status), end; !status && it != end;
+             it.increment(status)) {
+            if (it.depth() > 8) {
+                it.disable_recursion_pending();
+                continue;
+            }
+            if (!it->is_regular_file())
+                continue;
+            const auto filename = it->path().filename().string();
+            if (!filename.ends_with(".lib") && !filename.ends_with(".lib.gz"))
+                continue;
+            if (it->path().string().find("/implementation/common/lib/") == std::string::npos)
+                continue;
+            timingLibraries.push_back(it->path().string());
+            if (timingLibraries.size() >= 50)
+                break;
+        }
+        if (timingLibraries.size() >= 50)
+            break;
+    }
+
+    json result = {{"build", buildJson(executablePath)},
+                   {"report_runner", runner.empty() ? json(nullptr) : json(runner.string())},
+                   {"python", python},
+                   {"python_available", pythonAvailable},
+                   {"ngspice_executable_available", ngspiceExecutable},
+                   {"ngspice_library_available", ngspiceLibrary},
+                   {"pdk_roots", json::array()},
+                   {"pdks", std::move(pdkArray)},
+                   {"pdks_ready", pdksReady},
+                   {"all_pdks_ready", allPdksReady},
+                   {"ready_pdks", std::move(readyPdks)},
+                   {"simulation_model_libraries", std::move(simulationLibraries)},
+                   {"timing_libraries", std::move(timingLibraries)}};
+    for (const auto &root : roots)
+        result["pdk_roots"].push_back(root.string());
+
+    bool ok = !runner.empty() && pythonAvailable && (ngspiceExecutable || ngspiceLibrary);
+    if (projectPath) {
+        const auto project = openvlsi::Project::load(*projectPath);
+        std::set<std::string> ids;
+        for (const auto &[_, cell] : project.schematicCells)
+            if (!cell.pdk.empty() && cell.pdk != openvlsi::genericPdkId)
+                ids.insert(cell.pdk);
+        for (const auto &[_, cell] : project.layoutCells)
+            if (!cell.pdk.empty() && cell.pdk != openvlsi::genericPdkId)
+                ids.insert(cell.pdk);
+        for (const auto &[_, cell] : project.proceduralLayouts)
+            if (!cell.pdk.empty() && cell.pdk != openvlsi::genericPdkId)
+                ids.insert(cell.pdk);
+        json checks = json::array();
+        bool projectReady = true;
+        std::string missingSummary;
+        for (const auto &id : ids) {
+            const auto matches = openvlsi::findPdks(id);
+            if (matches.empty()) {
+                projectReady = false;
+                checks.push_back({{"id", id}, {"simulation_ready", false}, {"missing", {"PDK package not installed"}}});
+                if (!missingSummary.empty())
+                    missingSummary += "; ";
+                missingSummary += id + ": PDK package not installed";
+                continue;
+            }
+            for (const auto &pdk : matches) {
+                auto item = openvlsi::pdkInfoJson(pdk, false);
+                projectReady = projectReady && pdk.simulationReady;
+                if (probe) {
+                    const auto probeResult = openvlsi::probePdk(pdk);
+                    item["probe"] = {{"attempted", probeResult.attempted},
+                                     {"ok", probeResult.ok},
+                                     {"summary", probeResult.summary},
+                                     {"log", probeResult.log}};
+                    projectReady = projectReady && probeResult.ok;
+                    if (!probeResult.ok && !probeResult.summary.empty()) {
+                        if (!missingSummary.empty())
+                            missingSummary += "; ";
+                        missingSummary += id + ": " + probeResult.summary;
+                    }
+                }
+                if (!pdk.simulationReady) {
+                    for (const auto &missing : pdk.missing) {
+                        if (!missingSummary.empty())
+                            missingSummary += "; ";
+                        missingSummary += id + ": " + missing;
+                    }
+                }
+                checks.push_back(std::move(item));
+            }
+        }
+        result["project"] = projectPath->string();
+        result["pdk_checks"] = std::move(checks);
+        result["pdk_ready"] = projectReady;
+        if (!projectReady) {
+            ok = false;
+            result["pdk_hint"] = "The project PDK is not simulation-ready: " + missingSummary;
+        }
+    }
+    result["ok"] = ok;
+    return result;
+}
+
+void printJson(const json &value) { std::cout << value.dump(2) << "\n"; }
+
+void printHelp() {
+    std::cout << "openvlsi-cli " << openvlsi::version() << "\n\n"
+              << "Usage: openvlsi-cli <command> [arguments]\n\n"
+              << "Project:\n"
+              << "  project-create <folder|project.ovpro> [name]\n"
+              << "  project-info [folder|project.ovpro]  (OPENVLSI_PROJECT or cwd search when omitted)\n"
+              << "  project-validate <folder|project.ovpro>\n"
+              << "  project-trust <folder|project.ovpro> <pdk|package> [trusted|untrusted]\n"
+              << "  project-repair <folder|project.ovpro>\n"
+              << "  doctor [project] [--probe]\n"
+              << "  pdk-info [pdk] [--probe]\n"
+              << "  pdk-build <pdk-or-package>\n\n"
+              << "Schematic:\n"
+              << "  schematic-add-cell <project> <name> [pdk]\n"
+              << "  schematic-add-text <project> <name> [pdk] [spice-file]\n"
+              << "      or: schematic-add-text <project> <name> --pdk <pdk> --file <spice-file>\n"
+              << "  schematic-add-sv <project> <name> [pdk] [source-file]\n"
+              << "  schematic-set-text <project> <cell> [--kind text|systemverilog] [--source-path <path>] "
+                 "[--convert] <file|->\n"
+              << "  schematic-list <project>\n"
+              << "  schematic-info <project> <cell>\n"
+              << "  schematic-add-symbol <project> <cell> <name> [source-cell] [--blank]\n"
+              << "  schematic-add-pin <project> <cell> <symbol> <name> [x] [y] [direction]\n"
+              << "  schematic-add-instance <project> <cell> <symbol> <name> <x> <y>\n"
+              << "  schematic-add-component <project> <cell> <type> [name] [x] [y] [param=value ...]\n"
+              << "  schematic-list-symbols [pdk] [query]\n"
+              << "  schematic-add-circuit <project> <cell> <json-file|->\n"
+              << "  schematic-set-parameter <project> <cell> <instance> <name> <value>\n"
+              << "  schematic-set-cell-parameter <project> <cell> <name> <value>\n"
+              << "  schematic-remove-cell-parameter <project> <cell> <name>\n"
+              << "  schematic-add-net <project> <cell> <name> <pin> <pin> ...\n"
+              << "  schematic-wrap <project> <cell> <instance> <instance> ... [--name <name>]\n"
+              << "  schematic-validate <project> <cell>\n"
+              << "  schematic-import-spice <project> <name> [--pdk <pdk>] [--mode text|drawn|auto] <file|->\n"
+              << "  schematic-remove <project> <cell> [--dry-run] [--cascade]\n"
+              << "  schematic-hdl-ports <project> <cell>\n"
+              << "  schematic-add-hdl-instance <project> <cell> <source-cell> <name> <x> <y> "
+                 "[--flatten-buses]\n"
+              << "  schematic-add-spice-instance <project> <cell> <source-cell> <name> <x> <y>\n"
+              << "  schematic-validate-hierarchy <project> <cell>\n"
+              << "  schematic-netlist <project> <cell>\n\n"
+              << "Layout:\n"
+              << "  layout-add-cell <project> <name> [pdk] [stack]\n"
+              << "  layout-add-procedural <project> <name> [pdk] [script-file] [stack]\n"
+              << "  layout-regenerate <project> <procedural> [timeout-seconds]\n"
+              << "  layout-get-script <project> <procedural>\n"
+              << "  layout-set-script <project> <procedural> <script-file|->\n"
+              << "  layout-set-parameter <project> <procedural> <name> <value>\n"
+              << "  layout-create-from-schematic <project> <schematic> [layout-name]\n"
+              << "  layout-list <project>\n"
+              << "  layout-info <project> <cell|procedural>\n"
+              << "  layout-review <project> <procedural> [--min-utilization <v>] [--max-gap-um <v>] "
+                 "[--require-composition] [--require-plan]\n"
+              << "  layout-remove <project> <cell|procedural> [--dry-run]\n"
+              << "  layout-add-layer <project> <name> <number> [datatype]\n"
+              << "  layout-add-rectangle <project> <cell> <layer> <x> <y> <width> <height>\n"
+              << "  layout-add-text <project> <cell> <layer> <x> <y> <text> [height]\n"
+              << "  layout-add-polygon <project> <cell> <layer> <x,y> <x,y> <x,y> ...\n"
+              << "  layout-add-port <project> <cell> <name> <layer> <x> <y> <width> <height> [port options]\n"
+              << "  layout-list-ports <project> <cell>\n"
+              << "  layout-update-port <project> <cell> <port> [port options]\n"
+              << "  layout-remove-port <project> <cell> <port>\n"
+              << "  layout-add-net <project> <cell> <name>\n"
+              << "  layout-assign-port-net <project> <cell> <port> <net|none>\n"
+              << "  layout-add-instance <project> <parent> <child> <name> <x> <y> [orientation]\n"
+              << "  layout-duplicate <project> <cell> <shape> <shape> ... [--dx <n>] [--dy <n>]\n"
+              << "  layout-array <project> <cell> <shape> <shape> ... --rows <n> --columns <n> "
+                 "[--x-pitch <n>] [--y-pitch <n>]\n"
+              << "  layout-arrange <project> <cell> <left|right|top|bottom|center-horizontal|center-vertical|"
+                 "distribute-horizontal|distribute-vertical> <shape> <shape> ...\n"
+              << "  layout-bind-device <project> <layout> <layout-device> <schematic> <schematic-device>\n"
+              << "  layout-unbind-device <project> <layout> <layout-device>\n"
+              << "  layout-device-links <project> <layout> [--schematic <schematic>]\n"
+              << "  layout-link-schematic <project> <layout> <schematic>\n"
+              << "  layout-unlink-schematic <project> <layout>\n"
+              << "  layout-connectivity <project> <cell>\n"
+              << "  layout-export-gds <project> <cell> <output.gds|oas> [--flatten]\n"
+              << "  layout-export-lef <project> <cell> <output.lef>\n"
+              << "  layout-export-def <project> <cell> <output.def>\n"
+              << "  layout-import-gds <input.gds|oas> <project> [port-label-layer] [--top-cell <name>] [--force]\n"
+              << "  layout-import-lef <input.lef> <project> [--force]\n"
+              << "  layout-import-def <input.def> <project> [--force]\n\n"
+              << "Implementation:\n"
+              << "  implementation-create <project> <name> --top <module> --pdk <pdk> [--stack <stack>] "
+                 "[--source <file>]... [--source-cell <cell>]... [--sdc <file>] [--std-cell-lib <name>] "
+                 "[--corner <corner>] [--utilization <value>] [--aspect-ratio <value>] "
+                 "[--placement-density <value>] [--threads <n>] [--backend <name>] "
+                 "[--die-area x,y,w,h] [--core-area x,y,w,h] [--site <name>] "
+                 "[--io-horizontal-layers <a,b>] [--io-vertical-layers <a,b>] [--macro cell,x,y[,orientation]]... "
+                 "[--timing-driven] [--routability-driven] [--no-cts] [--cts-root-buffer <cell>] "
+                 "[--cts-buffers <a,b>] [--routing-min-layer <layer>] [--routing-max-layer <layer>] "
+                 "[--no-antenna-repair] [--seed <n>] [--timeout <seconds>]\n"
+              << "  implementation-update <project> <run> [--from <stage>] [same options as implementation-create]\n"
+              << "  implementation-list <project>\n"
+              << "  implementation-status <project> <run>\n"
+              << "  implementation-prepare <project> <run>\n"
+              << "  implementation-run <project> <run> [--from <stage>] [--to <stage>] [--timeout <seconds>] "
+                 "[--verbose]\n"
+              << "  implementation-map <project> <run> [--output <path>] [--verbose]\n"
+              << "  implementation-log <project> <run> [--stage <stage>] [--tail <lines>]\n"
+              << "  implementation-cancel <project> <run>\n"
+              << "  implementation-import <project> <run> [--layout-name <name>] [--replace]\n"
+              << "  implementation-export-gds <project> <run> [--output <path>]\n"
+              << "  implementation-toolchain\n"
+              << "  implementation-delete <project> <run> [--purge] [--dry-run]\n\n"
+              << "Verification:\n"
+              << "  lvs <project> <schematic> <layout>\n"
+              << "  lvs-auto <project> <layout>\n"
+              << "  pex <project> <layout> [schematic-name]\n"
+              << "  drc <project> <layout> [--no-flatten] [--output <dir>] [--suite <name>] "
+                 "[--top-cell <name>] [--timeout <seconds>]\n\n"
+              << "Simulation:\n"
+              << "  simulation-add <project> <name> <schematic> [analysis] [stop] [step] "
+                 "[signals...]\n"
+              << "  simulation-configure <project> <simulation> [--analysis name] [--start s] [--stop s] "
+                 "[--step s] [--temperature c] [--model-section s] [--dc-source s] "
+                 "[--ac-points n] [--noise-output n] [--tf-output n] [--param name=value] "
+                 "[--source name=value]...\n"
+              << "  simulation-list <project>\n"
+              << "  simulation-remove <project> <simulation> [--dry-run]\n"
+              << "  simulation-run <project> <simulation> [timeout-ms] [output.json]\n"
+              << "  simulation-experiment <project> <simulation> [timeout-ms] [--no-store] [--output file]\n"
+              << "  simulation-corner-defaults <project> <simulation>\n"
+              << "  simulation-corner-add <project> <simulation> <name> [--section s] [--temperature c] ...\n"
+              << "  simulation-corner-list <project> <simulation>\n"
+              << "  simulation-corner-remove <project> <simulation> <name>\n"
+              << "  simulation-sweep-add <project> <simulation> <parameter> <value...>\n"
+              << "  simulation-sweep-list <project> <simulation>\n"
+              << "  simulation-sweep-remove <project> <simulation> <parameter>\n"
+              << "  simulation-monte-carlo <project> <simulation> [--samples n] [--temperature-sigma c] ...\n"
+              << "  simulation-measure-add <project> <simulation> <name> <metric> [--signal s] [--input s] ...\n"
+              << "  simulation-measure-list <project> <simulation>\n"
+              << "  simulation-measure-remove <project> <simulation> <name>\n"
+              << "  simulation-trace <project> <simulation> [signals] [max-points]\n"
+              << "  simulation-measure <project> <simulation> [signal] [threshold]\n"
+              << "  simulation-graph-add <project> <simulation> <name> [x-axis] [y-signals]\n"
+              << "  simulation-graph-list <project> <simulation>\n"
+              << "  simulation-graph-info <project> <simulation> <graph>\n"
+              << "  simulation-graph-update <project> <simulation> <graph> [name] [x-axis] [y-signals]\n"
+                 "      [--view linear|db|phase] [--fft on|off] [--fft-window w] [--fft-points n]\n"
+                 "      [--show-measurements on|off] [--derived name=expr] [--overlay run-id[=label]]\n"
+                 "      [--clear-derived] [--clear-overlays] [--clear-markers]\n"
+              << "  simulation-graph-derive <project> <simulation> <graph> <name> <expression>\n"
+              << "  simulation-graph-derive-remove <project> <simulation> <graph> <name>\n"
+              << "  simulation-graph-overlay <project> <simulation> <graph> <run-id> [label]\n"
+              << "  simulation-graph-overlay-remove <project> <simulation> <graph> <run-id>\n"
+              << "  simulation-graph-marker-add <project> <simulation> <graph> <label> <x> [--y v] [--signal s]\n"
+              << "  simulation-graph-marker-remove <project> <simulation> <graph> <label>\n"
+              << "  simulation-runs <project> [simulation]\n"
+              << "  simulation-graph-limits <project> <simulation> <graph> [x-min] [x-max] [y-min] [y-max]\n"
+              << "  simulation-graph-delete <project> <simulation> <graph>\n"
+              << "  simulate <project> <schematic> [stop] [step] [timeout-ms] [signals] [output.json]\n"
+              << "  simulate-netlist <netlist-file> [stop] [step] [timeout-ms] [signals] [output.json]\n"
+              << "  (drawn schematics with SystemVerilog blocks use the mixed simulator automatically)\n\n"
+              << "Simulation scripts:\n"
+              << "  script-add <project> <name> [source-file]\n"
+              << "  script-list <project>\n"
+              << "  script-info <project> <script>\n"
+              << "  script-read <project> <script>\n"
+              << "  script-write <project> <script> <source-file|->\n"
+              << "  script-run <project> <script> [timeout-ms] [--json]\n"
+              << "  script-delete <project> <script> [--purge] [--dry-run]\n\n"
+              << "Simulation scripts may be referenced by name or id. Use '-' to read script source from stdin.\n";
+}
+
+} // namespace
+
+int main(int argc, char **argv) {
+    auto logger = spdlog::stderr_color_mt("openvlsi-cli");
+    spdlog::set_default_logger(std::move(logger));
+
+    if (argc < 2 || std::string(argv[1]) == "--help" || std::string(argv[1]) == "-h" ||
+        std::string(argv[1]) == "help") {
+        printHelp();
+        return 0;
+    }
+
+    std::vector<std::string> args;
+    args.reserve(static_cast<std::size_t>(argc - 1));
+    for (int index = 1; index < argc; ++index)
+        args.emplace_back(argv[index]);
+    auto command = args.front();
+    auto executablePath = openvlsi::currentExecutablePath();
+    if (executablePath.empty())
+        executablePath = std::filesystem::absolute(argv[0]);
+
+    if (command == "--version" || command == "version") {
+        auto version = buildJson(executablePath);
+        for (const auto *feature : {"simulation_measure", "pdk_info"})
+            version["features"].push_back(feature);
+        printJson(version);
+        return 0;
+    }
+
+    try {
+        if (command == "doctor") {
+            expectArguments(args, 1, 3, "doctor [project] [--probe]");
+            std::optional<std::filesystem::path> projectPath;
+            bool probe = false;
+            for (std::size_t index = 1; index < args.size(); ++index) {
+                if (args[index] == "--probe")
+                    probe = true;
+                else if (!projectPath)
+                    projectPath = args[index];
+                else
+                    argumentError("Usage: openvlsi-cli doctor [project] [--probe]");
+            }
+            const auto report = doctorJson(executablePath, projectPath, probe);
+            printJson(report);
+            return report.value("ok", false) ? 0 : 1;
+        }
+        if (command == "pdk-info") {
+            expectArguments(args, 1, 3, "pdk-info [pdk] [--probe]");
+            std::string requested;
+            bool probe = false;
+            for (std::size_t index = 1; index < args.size(); ++index) {
+                if (args[index] == "--probe")
+                    probe = true;
+                else if (requested.empty())
+                    requested = args[index];
+                else
+                    argumentError("Usage: openvlsi-cli pdk-info [pdk] [--probe]");
+            }
+            auto pdks = requested.empty() ? openvlsi::discoverPdks() : openvlsi::findPdks(requested);
+            if (requested.empty() && pdks.empty()) {
+                printJson({{"pdks", json::array()}});
+                return 0;
+            }
+            if (pdks.empty()) {
+                std::string available;
+                for (const auto &candidate : openvlsi::discoverPdks()) {
+                    if (!available.empty())
+                        available += ", ";
+                    available += candidate.id;
+                }
+                argumentError("Unknown PDK '" + requested +
+                              "'. Available PDKs: " + (available.empty() ? "none" : available));
+            }
+            json result = {{"pdks", json::array()}};
+            for (const auto &pdk : pdks) {
+                auto item = openvlsi::pdkInfoJson(pdk, true);
+                if (probe) {
+                    const auto probeResult = openvlsi::probePdk(pdk);
+                    item["probe"] = {{"attempted", probeResult.attempted},
+                                     {"ok", probeResult.ok},
+                                     {"summary", probeResult.summary},
+                                     {"log", probeResult.log}};
+                }
+                result["pdks"].push_back(std::move(item));
+            }
+            printJson(result);
+            return 0;
+        }
+        if (command == "pdk-build") {
+            expectArguments(args, 2, 2, "pdk-build <pdk-or-package>");
+            const auto pdks = openvlsi::findPdks(args[1]);
+            if (pdks.empty())
+                argumentError("Unknown OpenVLSI PDK package: " + args[1]);
+            const auto result = openvlsi::buildPdkOsdi(pdks.front());
+            printJson({{"ok", result.ok},
+                       {"summary", result.summary},
+                       {"compiler", result.compiler},
+                       {"osdi_dir", result.osdiDir.string()},
+                       {"log", result.log}});
+            return result.ok ? 0 : 1;
+        }
+        if (command == "project-create") {
+            expectArguments(args, 2, 3, "project-create <folder|project.ovpro> [name]");
+            const std::filesystem::path path = args[1];
+            const auto name = args.size() == 3 ? args[2] : projectNameForPath(path);
+            const auto projectFile = projectRootForCli(path) / "project.ovpro";
+            std::error_code status;
+            if (std::filesystem::exists(projectFile, status) && !status)
+                throw openvlsi::ProjectError("project.exists", "A project already exists at " + projectFile.string());
+            openvlsi::Project project;
+            project.identity = "project-" + name;
+            project.name = name;
+            project.save(path);
+            printJson({{"path", projectFile.string()}, {"name", name}});
+            return 0;
+        }
+
+        if (command == "project-info") {
+            expectArguments(args, 1, 2, "project-info [folder|project.ovpro]");
+            const auto path = args.size() == 2 ? std::filesystem::path(args[1]) : defaultProjectPath();
+            if (path.empty())
+                argumentError("No project path was given and no project.ovpro was found; pass a path or set "
+                              "OPENVLSI_PROJECT");
+            const auto project = openvlsi::Project::load(path);
+            printJson(projectSummary(project, path.string()));
+            return 0;
+        }
+
+        if (command == "project-validate") {
+            expectArguments(args, 2, 2, "project-validate <folder|project.ovpro>");
+            const auto project = openvlsi::Project::load(args[1]);
+            const auto diagnostics = diagnosticsJson(project);
+            printJson({{"valid", diagnostics.empty()}, {"diagnostics", diagnostics}});
+            return 0;
+        }
+
+        if (command == "lvs") {
+            expectArguments(args, 4, 4, "lvs <project> <schematic> <layout>");
+            const auto project = openvlsi::Project::load(args[1]);
+            const auto schematic = resolveSchematic(project, args[2]);
+            const auto layout = resolveLayout(project, args[3]);
+            const auto report = openvlsi::runLvs(project, schematic, layout);
+            std::cout << openvlsi::serializeLvsReport(report);
+            return report.matched() ? 0 : 1;
+        }
+
+        if (command == "lvs-auto") {
+            expectArguments(args, 3, 3, "lvs-auto <project> <layout>");
+            const auto project = openvlsi::Project::load(args[1]);
+            const auto layout = resolveLayout(project, args[2]);
+            const auto schematic = openvlsi::schematicForLayout(project, layout);
+            if (schematic == 0)
+                throw openvlsi::ProjectError(
+                    "lvs.schematic", "Unable to infer a schematic for this layout; use lvs with an explicit schematic");
+            const auto report = openvlsi::runLvs(project, schematic, layout);
+            std::cout << openvlsi::serializeLvsReport(report);
+            return report.matched() ? 0 : 1;
+        }
+
+        if (command == "pex") {
+            expectArguments(args, 3, 4, "pex <project> <layout> [schematic-name]");
+            openvlsi::ProjectSession session(openvlsi::Project::load(args[1]));
+            const auto layout = resolveLayout(session.project(), args[2]);
+            openvlsi::PexOptions options;
+            if (args.size() == 4)
+                options.schematicName = args[3];
+            const auto report = openvlsi::runPex(session.project(), layout, options);
+            session.save(args[1]);
+            std::cout << openvlsi::serializePexReport(report);
+            return 0;
+        }
+
+        if (command == "drc") {
+            if (args.size() < 3)
+                argumentError("Usage: openvlsi-cli drc <project> <layout> [--no-flatten] [--output <dir>] "
+                              "[--suite <name>] [--top-cell <name>] [--timeout <seconds>] "
+                              "[--engine klayout|gdscheck] [--deck <path>]");
+            const auto project = openvlsi::Project::load(args[1]);
+            const auto layout = resolveLayout(project, args[2]);
+            const auto &layoutCell = project.layoutCells.at(layout);
+            openvlsi::LayoutDrcOptions options;
+            options.workDirectory = projectRootForCli(args[1]) / "build" / "drc" / layoutCell.name;
+            for (std::size_t index = 3; index < args.size(); ++index) {
+                const auto &option = args[index];
+                const auto value = [&]() -> const std::string & {
+                    if (++index >= args.size())
+                        argumentError("Missing value for " + option);
+                    return args[index];
+                };
+                if (option == "--no-flatten") {
+                    options.flatten = false;
+                } else if (option == "--output") {
+                    options.workDirectory = value();
+                } else if (option == "--suite") {
+                    options.suite = value();
+                } else if (option == "--top-cell") {
+                    options.topCell = value();
+                } else if (option == "--timeout") {
+                    options.timeoutSeconds = static_cast<int>(parseInteger(value(), "timeout"));
+                } else if (option == "--engine") {
+                    options.engine = value();
+                } else if (option == "--deck") {
+                    options.deck = value();
+                } else {
+                    argumentError("Unknown drc option: " + option);
+                }
+            }
+            const auto result = openvlsi::runLayoutDrc(project, layout, options);
+            const auto report = drcReportJson(result.report);
+            printJson({{"ok", result.ok},
+                       {"layout", result.layout},
+                       {"name", result.layoutName},
+                       {"pdk", layoutCell.pdk},
+                       {"engine", result.engine},
+                       {"deck", result.deckPath.generic_string()},
+                       {"suite", options.suite},
+                       {"gds", result.gdsPath.generic_string()},
+                       {"report", result.reportPath.generic_string()},
+                       {"log", result.logPath.generic_string()},
+                       {"error", result.error},
+                       {"process_exit_code", result.process.exitCode},
+                       {"process_timed_out", result.process.timedOut},
+                       {"drc", report},
+                       {"counts",
+                        {{"total", report["total"]},
+                         {"errors", report["errors"]},
+                         {"warnings", report["warnings"]},
+                         {"info", report["info"]}}}});
+            const auto errors = report["errors"].get<std::size_t>();
+            return result.ok && errors == 0 ? 0 : 1;
+        }
+
+        if (command == "project-trust") {
+            expectArguments(args, 3, 4,
+                            "project-trust <folder|project.ovpro> <pdk|package> [trusted|untrusted]");
+            auto project = openvlsi::Project::load(args[1]);
+            const auto package = resolvePackageName(args[2]);
+            bool trusted = true;
+            if (args.size() == 4) {
+                if (args[3] == "untrusted" || args[3] == "false" || args[3] == "0")
+                    trusted = false;
+                else if (args[3] != "trusted" && args[3] != "true" && args[3] != "1")
+                    argumentError("Package trust must be 'trusted' or 'untrusted'");
+            }
+            if (trusted) {
+                if (std::find(project.trustedPackages.begin(), project.trustedPackages.end(), package) ==
+                    project.trustedPackages.end())
+                    project.trustedPackages.push_back(package);
+            } else {
+                project.trustedPackages.erase(
+                    std::remove(project.trustedPackages.begin(), project.trustedPackages.end(), package),
+                    project.trustedPackages.end());
+            }
+            project.save(args[1]);
+            printJson({{"path", (openvlsi::projectRootDirectory(args[1]) / "project.ovpro").string()},
+                       {"package", package},
+                       {"trusted", trusted},
+                       {"trusted_packages", project.trustedPackages}});
+            return 0;
+        }
+
+        if (command == "project-repair") {
+            expectArguments(args, 2, 2, "project-repair <folder|project.ovpro>");
+            openvlsi::ProjectLoadOptions options;
+            options.recover = true;
+            openvlsi::ProjectLoadReport loadReport;
+            auto project = openvlsi::Project::load(args[1], options, &loadReport);
+            openvlsi::ProjectSession session(std::move(project));
+            session.save(args[1]);
+            printJson({{"repaired", true},
+                       {"warnings", loadReport.warnings},
+                       {"quarantined_files", loadReport.quarantinedFiles}});
+            return 0;
+        }
+
+        if (command == "schematic-add-cell") {
+            expectArguments(args, 3, 4, "schematic-add-cell <project> <name> [pdk]");
+            openvlsi::ProjectSession session(openvlsi::Project::load(args[1]));
+            openvlsi::ObjectId id = 0;
+            const auto pdk = args.size() == 4 ? args[3] : std::string(openvlsi::genericPdkId);
+            session.execute("schematic-add-cell", [&](openvlsi::Project &project) {
+                openvlsi::applyPdkDefaultGrid(project, pdk);
+                id = openvlsi::createSchematicCell(project, args[2], pdk);
+            });
+            session.save(args[1]);
+            printJson({{"id", id}, {"name", args[2]}, {"pdk", pdk}});
+            return 0;
+        }
+
+        if (command == "schematic-add-text") {
+            expectArguments(args, 3, static_cast<std::size_t>(-1),
+                            "schematic-add-text <project> <name> [pdk] [spice-file] "
+                            "or --pdk <pdk> --file <spice-file>");
+            auto pdk = std::string(openvlsi::genericPdkId);
+            std::string spiceFile;
+            bool pdkSpecified = false;
+            if (args.size() > 3 && std::string_view(args[3]).starts_with("--")) {
+                for (std::size_t index = 3; index < args.size(); ++index) {
+                    if (args[index] == "--pdk" && index + 1 < args.size()) {
+                        pdk = args[++index];
+                        pdkSpecified = true;
+                    } else if (args[index] == "--file" && index + 1 < args.size()) {
+                        spiceFile = args[++index];
+                    } else {
+                        argumentError("Expected --pdk <pdk> or --file <spice-file>");
+                    }
+                }
+            } else if (args.size() == 4) {
+                std::error_code status;
+                if (std::filesystem::is_regular_file(args[3], status) && !status) {
+                    spiceFile = args[3];
+                } else if (args[3].find('/') != std::string::npos ||
+                           std::filesystem::path(args[3]).extension() == ".sp") {
+                    argumentError("'" + args[3] +
+                                  "' was interpreted as a PDK because no --pdk was given. "
+                                  "Use --pdk <pdk> --file <spice-file> or pass the PDK before the file.");
+                } else {
+                    pdk = args[3];
+                    pdkSpecified = true;
+                }
+            } else if (args.size() == 5) {
+                pdk = args[3];
+                spiceFile = args[4];
+                pdkSpecified = true;
+            } else if (args.size() > 5) {
+                argumentError("Too many positional arguments; use --pdk <pdk> --file <spice-file>");
+            }
+            openvlsi::ProjectSession session(openvlsi::Project::load(args[1]));
+            auto text = spiceFile.empty() ? "* SPICE schematic: " + args[2] + "\n.title " + args[2] + "\n.end\n"
+                                          : readTextFile(spiceFile);
+            openvlsi::ObjectId id = 0;
+            session.execute("schematic-add-text", [&](openvlsi::Project &project) {
+                id = openvlsi::createTextSchematicCell(project, args[2], pdk, text, spiceFile);
+            });
+            session.save(args[1]);
+            json result = {{"id", id}, {"name", args[2]}, {"pdk", pdk}, {"text", text}};
+            if (!pdkSpecified)
+                result["warning"] = "No PDK was specified; the text schematic was stored with the generic PDK. "
+                                    "Pass --pdk <pdk> if this cell belongs to a PDK-specific design.";
+            printJson(result);
+            return 0;
+        }
+
+        if (command == "schematic-set-text") {
+            expectArguments(args, 4, static_cast<std::size_t>(-1),
+                            "schematic-set-text <project> <cell> [--kind text|systemverilog] "
+                            "[--source-path <path>] [--convert] <source-file|->");
+            std::string kind;
+            std::string sourcePath;
+            bool convert = false;
+            std::string file;
+            for (std::size_t index = 3; index < args.size(); ++index) {
+                if (args[index] == "--kind" && index + 1 < args.size())
+                    kind = args[++index];
+                else if (args[index] == "--source-path" && index + 1 < args.size())
+                    sourcePath = args[++index];
+                else if (args[index] == "--convert")
+                    convert = true;
+                else if (file.empty())
+                    file = args[index];
+                else
+                    argumentError("Too many schematic-set-text arguments");
+            }
+            if (file.empty())
+                argumentError("A source file or '-' is required");
+            auto project = openvlsi::Project::load(args[1]);
+            const auto cellId = resolveSchematic(project, args[2]);
+            auto &target = project.schematicCells.at(cellId);
+            const bool requestedSystemVerilog = kind == "systemverilog" || kind == "sv";
+            if (!kind.empty() && kind != "text" && kind != "spice" && !requestedSystemVerilog)
+                argumentError("--kind must be text or systemverilog");
+            const bool systemVerilog = kind.empty() ? target.systemVerilogSchematic : requestedSystemVerilog;
+            if (!target.isTextSource()) {
+                const bool empty = target.symbols.empty() && target.instances.empty() && target.nets.empty() &&
+                                   target.parameters.empty();
+                if (!convert || !empty)
+                    throw openvlsi::ProjectError("schematic.convert",
+                                            "Schematic '" + target.name +
+                                                "' is a drawn schematic; pass --convert only for an empty cell");
+            }
+            const auto text = file == "-" ? readStdin() : readTextFile(file);
+            openvlsi::ProjectSession session(project);
+            openvlsi::SchematicSourceEditResult edit;
+            session.execute("schematic-set-text", [&](openvlsi::Project &p) {
+                edit = openvlsi::setSchematicSourceText(p, cellId, systemVerilog, text, sourcePath, convert);
+            });
+            session.save(args[1]);
+            json notes = json::array();
+            for (const auto &note : edit.notes)
+                notes.push_back(note);
+            printJson({{"id", cellId},
+                       {"name", session.project().schematicCells.at(cellId).name},
+                       {"kind", systemVerilog ? "systemverilog" : "text"},
+                       {"text_length", text.size()},
+                       {"converted", edit.converted},
+                       {"added_pins", edit.addedPins},
+                       {"removed_pins", edit.removedPins},
+                       {"notes", std::move(notes)}});
+            return 0;
+        }
+
+        if (command == "schematic-add-sv") {
+            expectArguments(args, 3, 5, "schematic-add-sv <project> <name> [pdk] [source-file]");
+            auto pdk = std::string(openvlsi::genericPdkId);
+            std::string sourceFile;
+            if (args.size() == 4) {
+                std::error_code status;
+                if (std::filesystem::is_regular_file(args[3], status) && !status)
+                    sourceFile = args[3];
+                else
+                    pdk = args[3];
+            } else if (args.size() == 5) {
+                pdk = args[3];
+                sourceFile = args[4];
+            }
+            openvlsi::ProjectSession session(openvlsi::Project::load(args[1]));
+            const auto moduleName = verilogIdentifier(args[2]);
+            const auto source = sourceFile.empty()
+                                    ? "// SystemVerilog block: " + args[2] + "\nmodule " + moduleName +
+                                          " (\n    input  logic clk,\n    input  logic rst,\n    output logic out\n);\n"
+                                          "    assign out = 1'b0;\nendmodule\n"
+                                    : readTextFile(sourceFile);
+            openvlsi::ObjectId id = 0;
+            session.execute("schematic-add-systemverilog", [&](openvlsi::Project &project) {
+                openvlsi::applyPdkDefaultGrid(project, pdk);
+                id = openvlsi::createSystemVerilogCell(project, args[2], pdk, source);
+            });
+            session.save(args[1]);
+            printJson({{"id", id}, {"name", args[2]}, {"pdk", pdk}, {"source", source}});
+            return 0;
+        }
+
+        if (command == "schematic-add-component") {
+            expectArguments(args, 4, static_cast<std::size_t>(-1),
+                            "schematic-add-component <project> <cell> <type> [name] [x] [y] "
+                            "[--symbol <name>] [param=value ...]");
+            auto project = openvlsi::Project::load(args[1]);
+            const auto cell = resolveSchematic(project, args[2]);
+            openvlsi::ComponentRequest request;
+            request.type = args[3];
+            std::vector<std::string> positional;
+            for (std::size_t index = 4; index < args.size(); ++index) {
+                if (args[index] == "--symbol" && index + 1 < args.size()) {
+                    request.symbol = args[++index];
+                    continue;
+                }
+                const auto equals = args[index].find('=');
+                if (equals != std::string::npos) {
+                    request.parameters.push_back({0, args[index].substr(0, equals), args[index].substr(equals + 1)});
+                } else {
+                    positional.push_back(args[index]);
+                }
+            }
+            if (!positional.empty())
+                request.name = positional[0];
+            if (positional.size() > 1)
+                request.x = parseInteger(positional[1], "x");
+            if (positional.size() > 2)
+                request.y = parseInteger(positional[2], "y");
+            if (positional.size() > 3)
+                argumentError("Too many positional arguments for schematic-add-component");
+            openvlsi::ProjectSession session(project);
+            openvlsi::ComponentPlacement placement;
+            session.execute("schematic-add-component",
+                            [&](openvlsi::Project &p) { placement = openvlsi::addSchematicComponent(p, cell, request); });
+            session.save(args[1]);
+            auto result = componentPlacementJson(placement);
+            result["cell"] = cell;
+            printJson(result);
+            return 0;
+        }
+
+        if (command == "schematic-list-symbols") {
+            expectArguments(args, 1, 3, "schematic-list-symbols [pdk] [query]");
+            const auto pdk = args.size() >= 2 ? args[1] : std::string(openvlsi::genericPdkId);
+            const auto query = args.size() >= 3 ? args[2] : std::string{};
+            const auto symbols = openvlsi::availableSymbols(pdk);
+            const auto loweredQuery = [&] {
+                auto value = query;
+                std::transform(value.begin(), value.end(), value.begin(),
+                               [](unsigned char character) { return static_cast<char>(std::tolower(character)); });
+                return value;
+            }();
+            json result = json::array();
+            for (const auto &symbol : symbols) {
+                const auto lowerName = [&] {
+                    auto value = symbol.name;
+                    std::transform(value.begin(), value.end(), value.begin(),
+                                   [](unsigned char character) { return static_cast<char>(std::tolower(character)); });
+                    return value;
+                }();
+                const auto lowerCategory = [&] {
+                    auto value = symbol.category;
+                    std::transform(value.begin(), value.end(), value.begin(),
+                                   [](unsigned char character) { return static_cast<char>(std::tolower(character)); });
+                    return value;
+                }();
+                if (!loweredQuery.empty() && lowerName.find(loweredQuery) == std::string::npos &&
+                    lowerCategory.find(loweredQuery) == std::string::npos)
+                    continue;
+                result.push_back(fileSymbolJson(symbol));
+            }
+            printJson({{"pdk", pdk}, {"symbols", std::move(result)}});
+            return 0;
+        }
+
+        if (command == "schematic-add-circuit") {
+            expectArguments(args, 4, 4, "schematic-add-circuit <project> <cell> <json-file|->");
+            auto project = openvlsi::Project::load(args[1]);
+            const auto cell = resolveSchematic(project, args[2]);
+            const auto text = args[3] == "-" ? readStdin() : readTextFile(args[3]);
+            const auto document = json::parse(text, nullptr, false);
+            if (document.is_discarded() || !document.is_object())
+                argumentError("Circuit JSON must be an object with components and optional nets");
+            openvlsi::CircuitRequest request;
+            const auto &components = document.at("components");
+            if (!components.is_array())
+                argumentError("Circuit JSON 'components' must be an array");
+            for (const auto &entry : components) {
+                openvlsi::ComponentRequest component;
+                component.type = entry.value("type", std::string{});
+                component.symbol = entry.value("symbol", std::string{});
+                component.name = entry.value("name", std::string{});
+                component.x = entry.value("x", openvlsi::Coordinate{0});
+                component.y = entry.value("y", openvlsi::Coordinate{0});
+                const auto addParameters = [&](const json &parameters) {
+                    for (const auto &[name, value] : parameters.items()) {
+                        if (value.is_string())
+                            component.parameters.push_back({0, name, value.get<std::string>()});
+                        else if (value.is_number() || value.is_boolean())
+                            component.parameters.push_back({0, name, value.dump()});
+                        else
+                            argumentError("Component parameter values must be strings, numbers, or booleans");
+                    }
+                };
+                if (entry.contains("parameters"))
+                    addParameters(entry.at("parameters"));
+                else if (entry.contains("params"))
+                    addParameters(entry.at("params"));
+                request.components.push_back(std::move(component));
+            }
+            if (document.contains("nets")) {
+                for (const auto &entry : document.at("nets")) {
+                    openvlsi::CircuitNetRequest net;
+                    net.name = entry.value("name", std::string{});
+                    net.x = entry.value("x", openvlsi::Coordinate{0});
+                    net.y = entry.value("y", openvlsi::Coordinate{0});
+                    for (const auto &pin : entry.at("pins")) {
+                        if (pin.is_string())
+                            net.pins.push_back(pin.get<std::string>());
+                        else if (pin.is_number_integer())
+                            net.pins.push_back(std::to_string(pin.get<std::int64_t>()));
+                        else if (pin.is_number_unsigned())
+                            net.pins.push_back(std::to_string(pin.get<std::uint64_t>()));
+                        else
+                            argumentError("Circuit net pins must be strings or integer pin ids");
+                    }
+                    request.nets.push_back(std::move(net));
+                }
+            }
+            openvlsi::ProjectSession session(project);
+            openvlsi::CircuitPlacement placement;
+            session.execute("schematic-add-circuit",
+                            [&](openvlsi::Project &p) { placement = openvlsi::addSchematicCircuit(p, cell, request); });
+            session.save(args[1]);
+            json componentsJson = json::array();
+            for (const auto &component : placement.components)
+                componentsJson.push_back(componentPlacementJson(component));
+            printJson({{"cell", cell}, {"components", std::move(componentsJson)}, {"nets", placement.nets}});
+            return 0;
+        }
+
+        if (command == "schematic-validate") {
+            expectArguments(args, 3, 3, "schematic-validate <project> <cell>");
+            const auto project = openvlsi::Project::load(args[1]);
+            const auto cell = resolveSchematic(project, args[2]);
+            const auto diagnostics = openvlsi::validateSchematic(project, cell);
+            json items = json::array();
+            bool ok = true;
+            for (const auto &diagnostic : diagnostics) {
+                if (diagnostic.severity == openvlsi::Diagnostic::Severity::error)
+                    ok = false;
+                auto item = diagnosticJson(diagnostic);
+                json suggestions = json::array();
+                if (diagnostic.code.starts_with("schematic.pdk")) {
+                    suggestions.push_back(
+                        {{"command", "pdk-info"}, {"arguments", json::array({project.schematicCells.at(cell).pdk})}});
+                } else if (diagnostic.code.starts_with("schematic.symbol")) {
+                    suggestions.push_back(
+                        {{"command", "schematic-info"}, {"arguments", json::array({args[1], args[2]})}});
+                } else if (diagnostic.code.starts_with("hdl.")) {
+                    suggestions.push_back(
+                        {{"command", "schematic-validate-hierarchy"}, {"arguments", json::array({args[1], args[2]})}});
+                } else {
+                    suggestions.push_back(
+                        {{"command", "schematic-info"}, {"arguments", json::array({args[1], args[2]})}});
+                }
+                item["suggested_calls"] = std::move(suggestions);
+                items.push_back(std::move(item));
+            }
+            printJson(
+                {{"schematic", project.schematicCells.at(cell).name}, {"ok", ok}, {"diagnostics", std::move(items)}});
+            return 0;
+        }
+
+        if (command == "schematic-import-spice") {
+            expectArguments(args, 4, static_cast<std::size_t>(-1),
+                            "schematic-import-spice <project> <name> [--pdk <pdk>] "
+                            "[--mode text|drawn|auto] <source-file|->");
+            auto pdk = std::string(openvlsi::genericPdkId);
+            auto mode = std::string{"text"};
+            std::string file;
+            for (std::size_t index = 3; index < args.size(); ++index) {
+                if (args[index] == "--pdk" && index + 1 < args.size())
+                    pdk = args[++index];
+                else if (args[index] == "--mode" && index + 1 < args.size())
+                    mode = args[++index];
+                else if (file.empty())
+                    file = args[index];
+                else
+                    argumentError("Too many schematic-import-spice arguments");
+            }
+            if (file.empty())
+                argumentError("A SPICE source file or '-' is required");
+            if (mode != "text" && mode != "drawn" && mode != "auto")
+                argumentError("--mode must be text, drawn, or auto");
+            const auto source = file == "-" ? readStdin() : readTextFile(file);
+            const bool drawn = mode == "drawn" || (mode == "auto" && openvlsi::spiceNetlistSupportsDrawn(source));
+            openvlsi::ProjectSession session(openvlsi::Project::load(args[1]));
+            openvlsi::SpiceImportResult imported;
+            session.execute("schematic-import-spice", [&](openvlsi::Project &project) {
+                imported = openvlsi::createSchematicFromSpice(project, args[2], pdk, source, drawn,
+                                                         file == "-" ? std::string{} : file);
+            });
+            session.save(args[1]);
+            printJson({{"id", imported.cell},
+                       {"name", args[2]},
+                       {"pdk", pdk},
+                       {"mode", drawn ? "drawn" : "text"},
+                       {"warnings", imported.warnings}});
+            return 0;
+        }
+
+        if (command == "schematic-hdl-ports") {
+            expectArguments(args, 3, 3, "schematic-hdl-ports <project> <cell>");
+            const auto project = openvlsi::Project::load(args[1]);
+            const auto id = resolveSchematic(project, args[2]);
+            const auto &cell = project.schematicCells.at(id);
+            if (!cell.systemVerilogSchematic)
+                throw openvlsi::ProjectError("schematic.hdl", "Schematic cell is not a SystemVerilog source cell");
+            const auto parsed = openvlsi::parseSystemVerilogModule(cell);
+            if (!parsed.ok)
+                throw openvlsi::ProjectError("schematic.hdl.parse", parsed.error);
+            const auto directionName = [](openvlsi::HdlPortDirection direction) {
+                switch (direction) {
+                case openvlsi::HdlPortDirection::input:
+                    return "input";
+                case openvlsi::HdlPortDirection::output:
+                    return "output";
+                case openvlsi::HdlPortDirection::inout:
+                    return "inout";
+                }
+                return "input";
+            };
+            json ports = json::array();
+            for (const auto &port : parsed.module.ports)
+                ports.push_back({{"name", port.name},
+                                 {"direction", directionName(port.direction)},
+                                 {"width", port.width},
+                                 {"width_known", port.widthKnown},
+                                 {"real", port.real}});
+            printJson({{"id", id},
+                       {"schematic", cell.name},
+                       {"module", parsed.module.name},
+                       {"ports", std::move(ports)},
+                       {"warnings", parsed.warnings}});
+            return 0;
+        }
+
+        if (command == "schematic-add-hdl-instance") {
+            expectArguments(args, 7, 9,
+                            "schematic-add-hdl-instance <project> <cell> <source-cell> <name> <x> <y> "
+                            "[--flatten-buses]");
+            auto project = openvlsi::Project::load(args[1]);
+            const auto parent = resolveSchematic(project, args[2]);
+            const auto source = resolveSchematic(project, args[3]);
+            const auto x = parseInteger(args[5], "x");
+            const auto y = parseInteger(args[6], "y");
+            bool flattenBuses = false;
+            for (std::size_t index = 7; index < args.size(); ++index) {
+                if (args[index] == "--flatten-buses")
+                    flattenBuses = true;
+                else if (args[index] == "--bus-mode" && index + 1 < args.size()) {
+                    const auto mode = args[++index];
+                    if (mode != "scalar" && mode != "flatten")
+                        argumentError("--bus-mode must be scalar or flatten");
+                    flattenBuses = mode == "flatten";
+                } else if (args[index] != "scalar")
+                    argumentError("Expected --flatten-buses or --bus-mode <scalar|flatten>");
+            }
+            openvlsi::ProjectSession session(project);
+            openvlsi::ObjectId instance = 0;
+            openvlsi::ObjectId symbol = 0;
+            session.execute("schematic-add-hdl-instance", [&](openvlsi::Project &p) {
+                instance = openvlsi::addSystemVerilogInstance(p, parent, source, args[4], x, y, &symbol, flattenBuses);
+            });
+            session.save(args[1]);
+            json pins = json::array();
+            const auto &symbolRef = session.project().schematicCells.at(parent).symbols.at(symbol);
+            for (const auto &pin : symbolRef.pins) {
+                pins.push_back({{"id", pin.id},
+                                {"name", pin.name},
+                                {"direction", pinDirectionName(pin.direction)},
+                                {"width", pin.width},
+                                {"width_known", pin.widthKnown}});
+            }
+            printJson({{"id", instance},
+                       {"cell", parent},
+                       {"source_cell", source},
+                       {"symbol", symbol},
+                       {"symbol_name", symbolRef.name},
+                       {"name", args[4]},
+                       {"x", x},
+                       {"y", y},
+                       {"pins", std::move(pins)}});
+            return 0;
+        }
+
+        if (command == "schematic-add-spice-instance") {
+            expectArguments(args, 7, 7, "schematic-add-spice-instance <project> <cell> <source-cell> <name> <x> <y>");
+            auto project = openvlsi::Project::load(args[1]);
+            const auto parent = resolveSchematic(project, args[2]);
+            const auto source = resolveSchematic(project, args[3]);
+            const auto x = parseInteger(args[5], "x");
+            const auto y = parseInteger(args[6], "y");
+            openvlsi::ProjectSession session(project);
+            openvlsi::ObjectId instance = 0;
+            openvlsi::ObjectId symbol = 0;
+            session.execute("schematic-add-spice-instance", [&](openvlsi::Project &p) {
+                instance = openvlsi::addTextSpiceInstance(p, parent, source, args[4], x, y, &symbol);
+            });
+            session.save(args[1]);
+            json pins = json::array();
+            const auto &symbolRef = session.project().schematicCells.at(parent).symbols.at(symbol);
+            for (const auto &pin : symbolRef.pins) {
+                pins.push_back({{"id", pin.id},
+                                {"name", pin.name},
+                                {"direction", pinDirectionName(pin.direction)},
+                                {"width", pin.width},
+                                {"width_known", pin.widthKnown}});
+            }
+            printJson({{"id", instance},
+                       {"cell", parent},
+                       {"source_cell", source},
+                       {"symbol", symbol},
+                       {"symbol_name", symbolRef.name},
+                       {"name", args[4]},
+                       {"x", x},
+                       {"y", y},
+                       {"pins", std::move(pins)}});
+            return 0;
+        }
+
+        if (command == "schematic-validate-hierarchy") {
+            expectArguments(args, 3, 3, "schematic-validate-hierarchy <project> <cell>");
+            const auto project = openvlsi::Project::load(args[1]);
+            const auto id = resolveSchematic(project, args[2]);
+            const auto plan = openvlsi::buildMixedSignalPlan(project, id);
+            const auto diagnostics = openvlsi::validateHdlHierarchy(project, id);
+            json checked = json::array();
+            for (const auto &diagnostic : diagnostics) {
+                json item = {
+                    {"severity", diagnostic.severity == openvlsi::Diagnostic::Severity::error ? "error" : "warning"},
+                    {"code", diagnostic.code},
+                    {"message", diagnostic.message}};
+                if (diagnostic.object)
+                    item["object"] = *diagnostic.object;
+                checked.push_back(std::move(item));
+            }
+            json blocks = json::array();
+            for (const auto &binding : plan.hdlInstances) {
+                json ports = json::array();
+                for (const auto &port : binding.ports) {
+                    const auto node = binding.portNodes.find(port.name);
+                    ports.push_back({{"name", port.name},
+                                     {"width", port.width},
+                                     {"node", node == binding.portNodes.end() ? json(nullptr) : json(node->second)}});
+                }
+                blocks.push_back({{"instance", binding.instanceName},
+                                  {"module", binding.moduleName},
+                                  {"source_cell", binding.sourceCell},
+                                  {"ports", std::move(ports)}});
+            }
+            json result = {{"schematic", project.schematicCells.at(id).name},
+                           {"ok", plan.ok()},
+                           {"diagnostics", std::move(checked)},
+                           {"hdl_instances", std::move(blocks)},
+                           {"analog_inputs", plan.analogInputNodes},
+                           {"digital_outputs", plan.digitalOutputNodes},
+                           {"warnings", plan.warnings}};
+            if (plan.ok())
+                result["analog_netlist"] = plan.analogNetlist;
+            else
+                result["error"] = plan.error;
+            printJson(result);
+            return 0;
+        }
+
+        if (command == "schematic-list") {
+            expectArguments(args, 2, 2, "schematic-list <project>");
+            const auto project = openvlsi::Project::load(args[1]);
+            json result = json::array();
+            for (const auto &[id, cell] : project.schematicCells) {
+                result.push_back({{"id", id},
+                                  {"name", cell.name},
+                                  {"pdk", cell.pdk},
+                                  {"text", cell.textSchematic},
+                                  {"systemverilog", cell.systemVerilogSchematic},
+                                  {"symbols", cell.symbols.size()},
+                                  {"instances", cell.instances.size()},
+                                  {"nets", cell.nets.size()}});
+            }
+            printJson(result);
+            return 0;
+        }
+
+        if (command == "schematic-info") {
+            expectArguments(args, 3, 3, "schematic-info <project> <cell>");
+            const auto project = openvlsi::Project::load(args[1]);
+            const auto id = resolveSchematic(project, args[2]);
+            const auto &cell = project.schematicCells.at(id);
+            auto result = schematicInfo(cell);
+            try {
+                const auto setup = openvlsi::pdkSimulationSetupFor(cell.pdk);
+                result["pdk_setup"] = {
+                    {"pdk", cell.pdk}, {"lines", setup.netlistLines}, {"init_commands", setup.initCommands}};
+            } catch (const openvlsi::ProjectError &error) {
+                result["pdk_setup"] = {{"pdk", cell.pdk}, {"warning", error.what()}};
+            }
+            printJson(result);
+            return 0;
+        }
+
+        if (command == "schematic-remove") {
+            expectArguments(args, 3, 5, "schematic-remove <project> <cell> [--dry-run] [--cascade]");
+            bool dryRun = false;
+            bool cascade = false;
+            for (std::size_t index = 3; index < args.size(); ++index) {
+                if (args[index] == "--dry-run")
+                    dryRun = true;
+                else if (args[index] == "--cascade")
+                    cascade = true;
+                else
+                    argumentError("Expected --dry-run or --cascade");
+            }
+            auto project = openvlsi::Project::load(args[1]);
+            const auto id = resolveSchematic(project, args[2]);
+            const auto plan = openvlsi::planSchematicDeletion(project, id);
+            json simulations = json::array();
+            for (const auto &simulation : plan.simulations)
+                simulations.push_back({{"id", simulation.id}, {"name", simulation.name}});
+            json symbols = json::array();
+            for (const auto &dependency : plan.symbols)
+                symbols.push_back({{"parent_cell", dependency.parentCell},
+                                   {"parent_name", dependency.parentName},
+                                   {"symbol", dependency.symbol},
+                                   {"symbol_name", dependency.symbolName},
+                                   {"instances", dependency.instances}});
+            json layouts = json::array();
+            for (const auto &dependency : plan.layouts)
+                layouts.push_back({{"layout", dependency.layout},
+                                   {"layout_name", dependency.layoutName},
+                                   {"devices", dependency.devices},
+                                   {"instances", dependency.instances},
+                                   {"ports", dependency.ports}});
+            if (dryRun) {
+                printJson({{"id", id},
+                           {"name", plan.name},
+                           {"deleted", false},
+                           {"dry_run", true},
+                           {"blocked", plan.blocked()},
+                           {"simulations", std::move(simulations)},
+                           {"symbols", std::move(symbols)},
+                           {"layouts", std::move(layouts)}});
+                return 0;
+            }
+            if (plan.blocked() && !cascade) {
+                printJson({{"id", id},
+                           {"name", plan.name},
+                           {"deleted", false},
+                           {"blocked", true},
+                           {"simulations", std::move(simulations)},
+                           {"symbols", std::move(symbols)},
+                           {"layouts", std::move(layouts)}});
+                return 1;
+            }
+            openvlsi::ProjectSession session(project);
+            session.execute("remove schematic", [&](openvlsi::Project &p) {
+                if (cascade)
+                    openvlsi::removeSchematicCascade(p, id);
+                else
+                    openvlsi::removeSchematicCell(p, id);
+            });
+            session.save(args[1]);
+            printJson({{"id", id}, {"name", plan.name}, {"deleted", true}, {"cascaded", cascade}});
+            return 0;
+        }
+
+        if (command == "schematic-add-symbol") {
+            expectArguments(args, 4, 6, "schematic-add-symbol <project> <cell> <name> [source-cell] [--blank]");
+            const auto project = openvlsi::Project::load(args[1]);
+            const auto cell = resolveSchematic(project, args[2]);
+            bool blank = false;
+            openvlsi::ObjectId source = 0;
+            for (std::size_t index = 4; index < args.size(); ++index) {
+                if (args[index] == "--blank")
+                    blank = true;
+                else if (source == 0)
+                    source = resolveSchematic(project, args[index]);
+                else
+                    argumentError("Unexpected schematic-add-symbol argument: " + args[index]);
+            }
+            std::string artwork;
+            std::vector<openvlsi::Pin> templatePins;
+            openvlsi::Coordinate templateLabelY = 0;
+            if (source != 0) {
+                const auto &sourceCell = project.schematicCells.at(source);
+                if (sourceCell.systemVerilogSchematic) {
+                    const auto parsed = openvlsi::parseSystemVerilogModule(sourceCell);
+                    if (!parsed.ok)
+                        throw openvlsi::ProjectError("schematic.hdl.parse", parsed.error);
+                    const auto templ = openvlsi::makeHdlSymbolTemplate(parsed.module);
+                    artwork = templ.artwork;
+                    templatePins = templ.pins;
+                    templateLabelY = templ.labelY;
+                } else if (!blank) {
+                    const auto templ = openvlsi::hierarchicalSymbolTemplate(sourceCell);
+                    artwork = templ.artwork;
+                    templatePins = templ.pins;
+                    templateLabelY = templ.labelY;
+                }
+            } else if (!blank) {
+                try {
+                    const auto definition = openvlsi::resolveSchematicSymbol(project.schematicCells.at(cell).pdk, args[3]);
+                    artwork = definition.svg;
+                    templatePins = definition.pins;
+                } catch (const openvlsi::ProjectError &error) {
+                    throw openvlsi::ProjectError("schematic.symbol",
+                                            std::string(error.what()) +
+                                                ". Use schematic-add-component, or pass --blank and add pins "
+                                                "explicitly with schematic-add-pin.");
+                }
+            }
+            openvlsi::ProjectSession session(project);
+            openvlsi::ObjectId id = 0;
+            session.execute("schematic-add-symbol", [&](openvlsi::Project &p) {
+                id = openvlsi::addSymbol(p, cell, args[3], artwork, source);
+                auto &symbol = p.schematicCells.at(cell).symbols.at(id);
+                symbol.label = openvlsi::SymbolLabel{0, templateLabelY};
+                for (auto pin : templatePins) {
+                    pin.id = p.nextId();
+                    symbol.pins.push_back(std::move(pin));
+                }
+            });
+            session.save(args[1]);
+            const auto &symbol = session.project().schematicCells.at(cell).symbols.at(id);
+            json pins = json::array();
+            for (const auto &pin : symbol.pins)
+                pins.push_back({{"id", pin.id},
+                                {"name", pin.name},
+                                {"direction", pinDirectionName(pin.direction)},
+                                {"width", pin.width},
+                                {"width_known", pin.widthKnown}});
+            printJson({{"id", id}, {"cell", cell}, {"name", args[3]}, {"pins", std::move(pins)}});
+            return 0;
+        }
+
+        if (command == "schematic-add-pin") {
+            expectArguments(args, 5, 8, "schematic-add-pin <project> <cell> <symbol> <name> [x] [y] [direction]");
+            auto project = openvlsi::Project::load(args[1]);
+            const auto cellId = resolveSchematic(project, args[2]);
+            auto &cell = project.schematicCells.at(cellId);
+            const auto symbolId = resolveSymbol(cell, args[3]);
+            auto &symbol = cell.symbols.at(symbolId);
+            for (const auto &pin : symbol.pins) {
+                if (pin.name == args[4])
+                    throw openvlsi::ProjectError("schematic.pin", "Pin already exists: " + args[4]);
+            }
+            const auto x = args.size() > 5 ? parseInteger(args[5], "x") : openvlsi::Coordinate{0};
+            const auto y = args.size() > 6 ? parseInteger(args[6], "y") : openvlsi::Coordinate{0};
+            const auto direction = args.size() > 7 ? parsePinDirection(args[7]) : openvlsi::PinDirection::right;
+            openvlsi::ProjectSession session(project);
+            openvlsi::ObjectId pinId = 0;
+            session.execute("schematic-add-pin", [&](openvlsi::Project &p) {
+                pinId = p.nextId();
+                p.schematicCells.at(cellId).symbols.at(symbolId).pins.push_back({pinId, args[4], x, y, direction});
+            });
+            session.save(args[1]);
+            printJson({{"id", pinId}, {"cell", cellId}, {"symbol", symbolId}, {"name", args[4]}, {"x", x}, {"y", y}});
+            return 0;
+        }
+
+        if (command == "schematic-add-instance") {
+            expectArguments(args, 7, 7, "schematic-add-instance <project> <cell> <symbol> <name> <x> <y>");
+            const auto project = openvlsi::Project::load(args[1]);
+            const auto cell = resolveSchematic(project, args[2]);
+            const auto symbol = resolveSymbol(project.schematicCells.at(cell), args[3]);
+            const auto &symbolRef = project.schematicCells.at(cell).symbols.at(symbol);
+            if (symbolRef.pins.empty())
+                throw openvlsi::ProjectError("schematic.symbol.pins",
+                                        "Symbol '" + symbolRef.name +
+                                            "' has no pins; use schematic-add-component or add pins explicitly");
+            const auto x = parseInteger(args[5], "x");
+            const auto y = parseInteger(args[6], "y");
+            openvlsi::ProjectSession session(project);
+            openvlsi::ObjectId id = 0;
+            session.execute("schematic-add-instance",
+                            [&](openvlsi::Project &p) { id = openvlsi::addSchematicInstance(p, cell, symbol, args[4], x, y); });
+            session.save(args[1]);
+            printJson({{"id", id}, {"cell", cell}, {"symbol", symbol}, {"name", args[4]}});
+            return 0;
+        }
+
+        if (command == "schematic-set-parameter") {
+            expectArguments(args, 6, 6, "schematic-set-parameter <project> <cell> <instance> <name> <value>");
+            auto project = openvlsi::Project::load(args[1]);
+            const auto cell = resolveSchematic(project, args[2]);
+            const auto &cellRef = project.schematicCells.at(cell);
+            openvlsi::ObjectId instanceId = 0;
+            if (const auto id = parseUnsigned(args[3]); id && cellRef.instances.contains(*id)) {
+                instanceId = *id;
+            } else {
+                for (const auto &[id, instance] : cellRef.instances) {
+                    if (instance.name == args[3]) {
+                        instanceId = id;
+                        break;
+                    }
+                }
+            }
+            if (instanceId == 0)
+                throw openvlsi::ProjectError("schematic.instance", "Unknown instance: " + args[3]);
+            openvlsi::ProjectSession session(project);
+            session.execute("schematic-set-parameter", [&](openvlsi::Project &p) {
+                openvlsi::setSchematicParameter(p, cell, instanceId, args[4], args[5]);
+            });
+            session.save(args[1]);
+            printJson({{"cell", cell}, {"instance", instanceId}, {"name", args[4]}, {"value", args[5]}});
+            return 0;
+        }
+
+        if (command == "schematic-set-cell-parameter") {
+            expectArguments(args, 5, 5, "schematic-set-cell-parameter <project> <cell> <name> <value>");
+            auto project = openvlsi::Project::load(args[1]);
+            const auto cell = resolveSchematic(project, args[2]);
+            openvlsi::ProjectSession session(project);
+            session.execute("schematic-set-cell-parameter",
+                            [&](openvlsi::Project &p) { openvlsi::setSchematicCellParameter(p, cell, args[3], args[4]); });
+            session.save(args[1]);
+            printJson({{"cell", cell}, {"name", args[3]}, {"value", args[4]}});
+            return 0;
+        }
+
+        if (command == "schematic-remove-cell-parameter") {
+            expectArguments(args, 4, 4, "schematic-remove-cell-parameter <project> <cell> <name>");
+            auto project = openvlsi::Project::load(args[1]);
+            const auto cell = resolveSchematic(project, args[2]);
+            openvlsi::ProjectSession session(project);
+            bool removed = false;
+            session.execute("schematic-remove-cell-parameter",
+                            [&](openvlsi::Project &p) { removed = openvlsi::removeSchematicCellParameter(p, cell, args[3]); });
+            session.save(args[1]);
+            printJson({{"cell", cell}, {"name", args[3]}, {"removed", removed}});
+            return 0;
+        }
+
+        if (command == "schematic-add-net") {
+            expectArguments(args, 5, static_cast<std::size_t>(-1),
+                            "schematic-add-net <project> <cell> <name> <pin> <pin> ...");
+            const auto project = openvlsi::Project::load(args[1]);
+            const auto cell = resolveSchematic(project, args[2]);
+            std::vector<openvlsi::ObjectId> pins;
+            for (std::size_t index = 4; index < args.size(); ++index)
+                pins.push_back(resolvePin(project.schematicCells.at(cell), args[index]));
+            openvlsi::ProjectSession session(project);
+            openvlsi::ObjectId id = 0;
+            session.execute("schematic-add-net", [&](openvlsi::Project &p) { id = openvlsi::addNet(p, cell, args[3], pins); });
+            session.save(args[1]);
+            printJson({{"id", id}, {"cell", cell}, {"name", args[3]}, {"pins", pins}});
+            return 0;
+        }
+
+        if (command == "schematic-wrap") {
+            expectArguments(args, 4, 1000, "schematic-wrap <project> <cell> <instance> <instance> ... [--name <name>]");
+            const auto project = openvlsi::Project::load(args[1]);
+            const auto cell = resolveSchematic(project, args[2]);
+            std::vector<openvlsi::ObjectId> instances;
+            std::string childName;
+            for (std::size_t index = 3; index < args.size(); ++index) {
+                if (args[index] == "--name") {
+                    if (index + 1 >= args.size())
+                        argumentError("Missing value for --name");
+                    childName = args[++index];
+                } else {
+                    instances.push_back(resolveSchematicInstance(project, cell, args[index]));
+                }
+            }
+            if (instances.empty())
+                argumentError("Select at least one schematic instance to wrap");
+            openvlsi::ProjectSession session(project);
+            openvlsi::SchematicWrapResult result;
+            session.execute("schematic-wrap", [&](openvlsi::Project &p) {
+                result = openvlsi::wrapSchematicInstances(p, cell, instances, childName);
+            });
+            session.save(args[1]);
+            printJson({{"cell", result.cell},
+                       {"name", session.project().schematicCells.at(result.cell).name},
+                       {"symbol", result.symbol},
+                       {"instance", result.instance},
+                       {"ports", result.ports}});
+            return 0;
+        }
+
+        if (command == "schematic-netlist") {
+            expectArguments(args, 3, 3, "schematic-netlist <project> <cell>");
+            const auto project = openvlsi::Project::load(args[1]);
+            const auto cell = resolveSchematic(project, args[2]);
+            std::vector<std::string> notes;
+            const auto lines = openvlsi::buildSimulationNetlist(project, cell, &notes);
+            json ports = json::array();
+            for (const auto *port : openvlsi::schematicPortInstances(project.schematicCells.at(cell)))
+                ports.push_back(port->name);
+            printJson({{"cell", cell}, {"netlist", lines}, {"ports", std::move(ports)}, {"notes", notes}});
+            return 0;
+        }
+
+        if (command == "layout-add-cell") {
+            expectArguments(args, 3, 5, "layout-add-cell <project> <name> [pdk] [stack]");
+            openvlsi::ProjectSession session(openvlsi::Project::load(args[1]));
+            openvlsi::ObjectId id = 0;
+            const auto pdk = args.size() >= 4 ? args[3] : std::string(openvlsi::genericPdkId);
+            const auto stack = resolveLayoutStack(pdk, args.size() == 5 ? args[4] : std::string{});
+            session.execute("layout-add-cell", [&](openvlsi::Project &project) {
+                openvlsi::applyPdkDefaultGrid(project, pdk);
+                id = openvlsi::createLayoutCell(project, args[2], pdk, stack);
+            });
+            session.save(args[1]);
+            printJson({{"id", id}, {"name", args[2]}, {"pdk", pdk}, {"stack", stack}});
+            return 0;
+        }
+
+        if (command == "layout-add-procedural") {
+            expectArguments(args, 3, 6, "layout-add-procedural <project> <name> [pdk] [script-file] [stack]");
+            openvlsi::ProjectSession session(openvlsi::Project::load(args[1]));
+            const auto pdk = args.size() >= 4 ? args[3] : std::string(openvlsi::genericPdkId);
+            const auto script = args.size() >= 5 ? readTextFile(args[4]) : openvlsi::defaultProceduralLayoutScript();
+            const auto stack = resolveLayoutStack(pdk, args.size() == 6 ? args[5] : std::string{});
+            openvlsi::ObjectId id = 0;
+            openvlsi::ObjectId generated = 0;
+            session.execute("layout-add-procedural", [&](openvlsi::Project &project) {
+                openvlsi::applyPdkDefaultGrid(project, pdk);
+                id = openvlsi::createProceduralLayout(project, args[2], pdk, script, stack);
+                generated = project.proceduralLayouts.at(id).generatedCell;
+            });
+            const auto run = openvlsi::regenerateProceduralLayout(session.project(), id, executablePath);
+            session.save(args[1]);
+            printJson({{"id", id},
+                       {"name", args[2]},
+                       {"pdk", pdk},
+                       {"stack", stack},
+                       {"generated_cell", generated},
+                       {"generated", run.ok},
+                       {"generation_error", run.ok ? json(nullptr) : json(run.error)},
+                       {"layout_quality", parsedMetadata(run.layoutQuality)},
+                       {"layout_plan", parsedMetadata(run.layoutPlan)},
+                       {"layout_review", parsedMetadata(run.layoutReview)},
+                       {"needs_regeneration",
+                        openvlsi::proceduralLayoutNeedsRegeneration(session.project().proceduralLayouts.at(id))},
+                       {"parameters", [&] {
+                            json parameters = json::array();
+                            for (const auto &parameter : session.project().proceduralLayouts.at(id).parameters)
+                                parameters.push_back(
+                                    {{"id", parameter.id}, {"name", parameter.name}, {"value", parameter.value}});
+                            return parameters;
+                        }()}});
+            return 0;
+        }
+
+        if (command == "layout-set-parameter") {
+            expectArguments(args, 5, 5, "layout-set-parameter <project> <procedural> <name> <value>");
+            openvlsi::ProjectSession session(openvlsi::Project::load(args[1]));
+            const auto id = resolveProceduralLayout(session.project(), args[2]);
+            session.execute("set procedural parameter", [&](openvlsi::Project &project) {
+                auto &layout = project.proceduralLayouts.at(id);
+                const auto parameter = std::find_if(layout.parameters.begin(), layout.parameters.end(),
+                                                    [&](const auto &entry) { return entry.name == args[3]; });
+                if (parameter == layout.parameters.end())
+                    layout.parameters.push_back({project.nextId(), args[3], args[4]});
+                else
+                    parameter->value = args[4];
+            });
+            session.save(args[1]);
+            const auto &layout = session.project().proceduralLayouts.at(id);
+            json parameters = json::array();
+            for (const auto &parameter : layout.parameters)
+                parameters.push_back({{"id", parameter.id}, {"name", parameter.name}, {"value", parameter.value}});
+            printJson({{"id", id},
+                       {"name", layout.name},
+                       {"parameters", std::move(parameters)},
+                       {"needs_regeneration", openvlsi::proceduralLayoutNeedsRegeneration(layout)}});
+            return 0;
+        }
+
+        if (command == "layout-get-script") {
+            expectArguments(args, 3, 3, "layout-get-script <project> <procedural>");
+            const auto project = openvlsi::Project::load(args[1]);
+            const auto id = resolveProceduralLayout(project, args[2]);
+            const auto &layout = project.proceduralLayouts.at(id);
+            json parameters = json::array();
+            for (const auto &parameter : layout.parameters)
+                parameters.push_back({{"id", parameter.id}, {"name", parameter.name}, {"value", parameter.value}});
+            printJson({{"id", id},
+                       {"name", layout.name},
+                       {"pdk", layout.pdk},
+                       {"stack", layout.stack},
+                       {"script", layout.script},
+                       {"needs_regeneration", openvlsi::proceduralLayoutNeedsRegeneration(layout)},
+                       {"generated_cell", layout.generatedCell},
+                       {"generated_script_hash", layout.generatedScriptHash},
+                       {"generated_parameter_hash", layout.generatedParameterHash},
+                       {"generated_pdk_version", layout.generatedPdkVersion},
+                       {"generated_output_hash", layout.generatedOutputHash},
+                       {"layout_quality", parsedMetadata(layout.generatedLayoutQuality)},
+                       {"layout_plan", parsedMetadata(layout.generatedLayoutPlan)},
+                       {"layout_review", parsedMetadata(layout.generatedLayoutReview)},
+                       {"parameters", std::move(parameters)}});
+            return 0;
+        }
+
+        if (command == "layout-set-script") {
+            expectArguments(args, 4, 4, "layout-set-script <project> <procedural> <script-file|->");
+            openvlsi::ProjectSession session(openvlsi::Project::load(args[1]));
+            const auto id = resolveProceduralLayout(session.project(), args[2]);
+            const auto script = args[3] == "-" ? readStdin() : readTextFile(args[3]);
+            session.execute("set procedural script",
+                            [&](openvlsi::Project &project) { project.proceduralLayouts.at(id).script = script; });
+            session.save(args[1]);
+            const auto &layout = session.project().proceduralLayouts.at(id);
+            printJson({{"id", id},
+                       {"name", layout.name},
+                       {"script_length", script.size()},
+                       {"needs_regeneration", openvlsi::proceduralLayoutNeedsRegeneration(layout)}});
+            return 0;
+        }
+
+        if (command == "layout-regenerate") {
+            expectArguments(args, 3, 4, "layout-regenerate <project> <procedural> [timeout-seconds]");
+            openvlsi::ProjectSession session(openvlsi::Project::load(args[1]));
+            const auto id = resolveProceduralLayout(session.project(), args[2]);
+            const auto timeout = args.size() >= 4 ? static_cast<int>(parseInteger(args[3], "timeout seconds")) : 60;
+            openvlsi::ProceduralLayoutRunResult run;
+            session.execute("regenerate procedural layout", [&](openvlsi::Project &project) {
+                run = openvlsi::regenerateProceduralLayout(project, id, executablePath, timeout);
+                if (!run.ok)
+                    throw openvlsi::ProjectError("layout.procedural.generate", run.error);
+            });
+            session.save(args[1]);
+            printJson({{"id", id},
+                       {"name", session.project().proceduralLayouts.at(id).name},
+                       {"ok", true},
+                       {"script_hash", run.scriptHash},
+                       {"output_hash", run.outputHash},
+                       {"pdk_version", run.pdkVersion},
+                       {"log", run.log},
+                       {"layout_quality", parsedMetadata(run.layoutQuality)},
+                       {"layout_plan", parsedMetadata(run.layoutPlan)},
+                       {"layout_review", parsedMetadata(run.layoutReview)}});
+            return 0;
+        }
+
+        if (command == "layout-create-from-schematic") {
+            expectArguments(args, 3, 4, "layout-create-from-schematic <project> <schematic> [layout-name]");
+            const auto project = openvlsi::Project::load(args[1]);
+            const auto schematic = resolveSchematic(project, args[2]);
+            const auto name = args.size() == 4 ? args[3] : std::string{};
+            const auto stack = resolveLayoutStack(project.schematicCells.at(schematic).pdk, {});
+            openvlsi::ProjectSession session(project);
+            openvlsi::ObjectId id = 0;
+            session.execute("layout-create-from-schematic", [&](openvlsi::Project &p) {
+                openvlsi::applyPdkDefaultGrid(p, project.schematicCells.at(schematic).pdk);
+                id = openvlsi::createLayoutFromSchematic(p, schematic, name, stack);
+            });
+            session.save(args[1]);
+            printJson({{"id", id}, {"schematic", schematic}, {"stack", stack}});
+            return 0;
+        }
+
+        if (command == "layout-list") {
+            expectArguments(args, 2, 2, "layout-list <project>");
+            const auto project = openvlsi::Project::load(args[1]);
+            json result = json::array();
+            for (const auto &[id, cell] : project.layoutCells) {
+                result.push_back({{"id", id},
+                                  {"name", cell.name},
+                                  {"pdk", cell.pdk},
+                                  {"stack", cell.stack},
+                                  {"procedural", false},
+                                  {"library", cell.library},
+                                  {"read_only", cell.readOnly},
+                                  {"device", cell.device},
+                                  {"generated_by", cell.generatedBy},
+                                  {"shapes", cell.shapes.size()},
+                                  {"ports", cell.ports.size()},
+                                  {"instances", cell.instances.size()},
+                                  {"reference", cell.reference ? json(cell.reference->path) : json(nullptr)}});
+            }
+            for (const auto &[id, procedural] : project.proceduralLayouts) {
+                result.push_back({{"id", id},
+                                  {"name", procedural.name},
+                                  {"pdk", procedural.pdk},
+                                  {"stack", procedural.stack},
+                                  {"procedural", true},
+                                  {"generated_cell", procedural.generatedCell},
+                                  {"needs_regeneration", openvlsi::proceduralLayoutNeedsRegeneration(procedural)},
+                                  {"generated_pdk_version", procedural.generatedPdkVersion},
+                                  {"parameters", procedural.parameters.size()},
+                                  {"script_length", procedural.script.size()}});
+            }
+            printJson(result);
+            return 0;
+        }
+
+        if (command == "layout-info") {
+            expectArguments(args, 3, 3, "layout-info <project> <cell|procedural>");
+            const auto project = openvlsi::Project::load(args[1]);
+            const auto id = resolveLayoutItem(project, args[2]);
+            if (const auto procedural = project.proceduralLayouts.find(id);
+                procedural != project.proceduralLayouts.end()) {
+                printJson({{"id", id},
+                           {"name", procedural->second.name},
+                           {"pdk", procedural->second.pdk},
+                           {"stack", procedural->second.stack},
+                           {"procedural", true},
+                           {"generated_cell", procedural->second.generatedCell},
+                           {"needs_regeneration", openvlsi::proceduralLayoutNeedsRegeneration(procedural->second)},
+                           {"generated_script_hash", procedural->second.generatedScriptHash},
+                           {"generated_parameter_hash", procedural->second.generatedParameterHash},
+                           {"generated_pdk_version", procedural->second.generatedPdkVersion},
+                           {"generated_output_hash", procedural->second.generatedOutputHash},
+                           {"layout_quality", parsedMetadata(procedural->second.generatedLayoutQuality)},
+                           {"layout_plan", parsedMetadata(procedural->second.generatedLayoutPlan)},
+                           {"layout_review", parsedMetadata(procedural->second.generatedLayoutReview)},
+                           {"parameters",
+                            [&] {
+                                json parameters = json::array();
+                                for (const auto &parameter : procedural->second.parameters)
+                                    parameters.push_back(
+                                        {{"id", parameter.id}, {"name", parameter.name}, {"value", parameter.value}});
+                                return parameters;
+                            }()},
+                           {"script", procedural->second.script}});
+            } else {
+                printJson(layoutInfo(project, project.layoutCells.at(id)));
+            }
+            return 0;
+        }
+
+        if (command == "layout-review") {
+            if (args.size() < 3)
+                argumentError("Usage: openvlsi-cli layout-review <project> <procedural> [--min-utilization <v>] "
+                              "[--max-gap-um <v>] [--require-composition] [--require-plan]");
+            const auto project = openvlsi::Project::load(args[1]);
+            const auto id = resolveProceduralLayout(project, args[2]);
+            const auto &layout = project.proceduralLayouts.at(id);
+            const auto quality = parsedMetadata(layout.generatedLayoutQuality);
+            const auto plan = parsedMetadata(layout.generatedLayoutPlan);
+            const auto review = parsedMetadata(layout.generatedLayoutReview);
+            const bool needsRegeneration = openvlsi::proceduralLayoutNeedsRegeneration(layout);
+            std::optional<double> minUtilization;
+            std::optional<double> maxGap;
+            bool requireComposition = false;
+            bool requirePlan = false;
+            for (std::size_t index = 3; index < args.size(); ++index) {
+                const auto &option = args[index];
+                if (option == "--require-composition") {
+                    requireComposition = true;
+                } else if (option == "--require-plan") {
+                    requirePlan = true;
+                } else if (option == "--min-utilization" || option == "--max-gap-um") {
+                    if (++index >= args.size())
+                        argumentError(option + " requires a value");
+                    const auto value = std::stod(args[index]);
+                    if (option == "--min-utilization")
+                        minUtilization = value;
+                    else
+                        maxGap = value;
+                } else {
+                    argumentError("Unknown layout-review option: " + option);
+                }
+            }
+            std::vector<std::string> issues;
+            if (!quality.is_object())
+                issues.push_back("no layout quality metadata; regenerate the procedural layout first");
+            if (needsRegeneration)
+                issues.push_back("generated layout is stale; regenerate it before review");
+            if (requirePlan && !plan.is_object())
+                issues.push_back("no layout.plan(...) was recorded");
+            if (plan.is_object() && !plan.value("passed", false))
+                issues.push_back("layout compaction plan or gate did not pass");
+            if (quality.is_object()) {
+                if (quality.contains("warnings") && quality["warnings"].is_array()) {
+                    for (const auto &warning : quality["warnings"])
+                        if (warning.is_string())
+                            issues.push_back(warning.get<std::string>());
+                }
+                if (!minUtilization && plan.is_object() && plan.contains("target_utilization") &&
+                    plan["target_utilization"].is_number())
+                    minUtilization = plan["target_utilization"].get<double>();
+                if (minUtilization && quality.value("utilization", 0.0) < *minUtilization)
+                    issues.push_back("utilization is below review target");
+                if (!maxGap && plan.is_object() && plan.contains("max_gap_um") && plan["max_gap_um"].is_number())
+                    maxGap = plan["max_gap_um"].get<double>();
+                if (maxGap && quality.value("max_horizontal_gap_um", 0.0) > *maxGap)
+                    issues.push_back("largest row gap exceeds review target");
+                if (!requireComposition && plan.is_object())
+                    requireComposition = plan.value("require_composition", false);
+                if (requireComposition && !quality.value("composition_used", false))
+                    issues.push_back("composition helpers were required but not used");
+            }
+            std::sort(issues.begin(), issues.end());
+            issues.erase(std::unique(issues.begin(), issues.end()), issues.end());
+            printJson({{"id", id},
+                       {"name", layout.name},
+                       {"available", quality.is_object()},
+                       {"passed", issues.empty()},
+                       {"issues", issues},
+                       {"needs_regeneration", needsRegeneration},
+                       {"layout_quality", quality},
+                       {"layout_plan", plan},
+                       {"layout_review", review}});
+            return 0;
+        }
+
+        if (command == "layout-remove") {
+            expectArguments(args, 3, 4, "layout-remove <project> <cell|procedural> [--dry-run]");
+            bool dryRun = false;
+            if (args.size() == 4) {
+                if (args[3] != "--dry-run")
+                    argumentError("Unknown layout-remove option: " + args[3]);
+                dryRun = true;
+            }
+            auto project = openvlsi::Project::load(args[1]);
+            const auto id = resolveLayoutItem(project, args[2]);
+            std::string name;
+            json references = json::array();
+            std::string reason;
+            if (const auto procedural = project.proceduralLayouts.find(id);
+                procedural != project.proceduralLayouts.end()) {
+                name = procedural->second.name;
+                const auto generatedId = procedural->second.generatedCell;
+                for (const auto &[otherId, otherCell] : project.layoutCells) {
+                    if (otherId == generatedId)
+                        continue;
+                    for (const auto &[_, instance] : otherCell.instances) {
+                        if (instance.cell == generatedId)
+                            references.push_back({{"instance", instance.name}, {"cell", otherCell.name}});
+                    }
+                }
+                if (!references.empty())
+                    reason = "The generated layout is used as an instance";
+            } else {
+                const auto &cell = project.layoutCells.at(id);
+                name = cell.name;
+                if (cell.library || (cell.readOnly && !cell.reference))
+                    reason = "Read-only layout cells cannot be removed";
+                else if (cell.generatedBy != 0 && project.proceduralLayouts.contains(cell.generatedBy))
+                    reason = "The layout is generated by a procedural layout; remove the procedural layout instead";
+                for (const auto &[otherId, otherCell] : project.layoutCells) {
+                    if (otherId == id)
+                        continue;
+                    for (const auto &[_, instance] : otherCell.instances) {
+                        if (instance.cell == id)
+                            references.push_back({{"instance", instance.name}, {"cell", otherCell.name}});
+                    }
+                }
+                if (!references.empty() && reason.empty())
+                    reason = "The layout is used as an instance";
+            }
+            const bool blocked = !reason.empty() || !references.empty();
+            if (dryRun || blocked) {
+                printJson({{"id", id},
+                           {"name", name},
+                           {"deleted", false},
+                           {"dry_run", dryRun},
+                           {"blocked", blocked},
+                           {"reason", reason},
+                           {"references", std::move(references)}});
+                return blocked ? 1 : 0;
+            }
+            openvlsi::ProjectSession session(project);
+            session.execute("remove layout", [&](openvlsi::Project &p) { openvlsi::removeLayoutItem(p, id); });
+            session.save(args[1]);
+            printJson({{"id", id}, {"name", name}, {"deleted", true}});
+            return 0;
+        }
+
+        if (command == "layout-add-layer") {
+            expectArguments(args, 4, 5, "layout-add-layer <project> <name> <number> [datatype]");
+            openvlsi::ProjectSession session(openvlsi::Project::load(args[1]));
+            const auto number = static_cast<int>(parseInteger(args[3], "layer number"));
+            const auto datatype = args.size() >= 5 ? static_cast<int>(parseInteger(args[4], "layer datatype")) : 0;
+            openvlsi::ObjectId id = 0;
+            session.execute("layout-add-layer", [&](openvlsi::Project &project) {
+                id = openvlsi::addLayer(project, args[2], number, 0, {}, datatype);
+            });
+            session.save(args[1]);
+            printJson({{"id", id}, {"name", args[2]}, {"number", number}, {"datatype", datatype}});
+            return 0;
+        }
+
+        if (command == "layout-add-rectangle") {
+            expectArguments(args, 8, 8, "layout-add-rectangle <project> <cell> <layer> <x> <y> <width> <height>");
+            const auto project = openvlsi::Project::load(args[1]);
+            const auto cell = resolveLayout(project, args[2]);
+            const auto layer = resolveLayer(project, args[3]);
+            const openvlsi::Rect rect{parseInteger(args[4], "x"), parseInteger(args[5], "y"), parseInteger(args[6], "width"),
+                                 parseInteger(args[7], "height")};
+            openvlsi::ProjectSession session(project);
+            openvlsi::ObjectId id = 0;
+            session.execute("layout-add-rectangle",
+                            [&](openvlsi::Project &p) { id = openvlsi::addRectangle(p, cell, layer, rect); });
+            session.save(args[1]);
+            printJson({{"id", id}, {"cell", cell}, {"layer", layer}});
+            return 0;
+        }
+
+        if (command == "layout-add-text") {
+            expectArguments(args, 7, 8, "layout-add-text <project> <cell> <layer> <x> <y> <text> [height]");
+            const auto project = openvlsi::Project::load(args[1]);
+            const auto cell = resolveLayout(project, args[2]);
+            const auto layer = resolveLayer(project, args[3]);
+            const auto x = parseInteger(args[4], "x");
+            const auto y = parseInteger(args[5], "y");
+            const auto height = args.size() > 7 ? parseInteger(args[7], "height") : openvlsi::Coordinate{1000};
+            openvlsi::ProjectSession session(project);
+            openvlsi::ObjectId id = 0;
+            session.execute("layout-add-text",
+                            [&](openvlsi::Project &p) { id = openvlsi::addText(p, cell, layer, x, y, args[6], height); });
+            session.save(args[1]);
+            printJson({{"id", id}, {"cell", cell}, {"layer", layer}, {"text", args[6]}});
+            return 0;
+        }
+
+        if (command == "layout-add-polygon") {
+            expectArguments(args, 6, static_cast<std::size_t>(-1),
+                            "layout-add-polygon <project> <cell> <layer> <x,y> <x,y> <x,y> ...");
+            const auto project = openvlsi::Project::load(args[1]);
+            const auto cell = resolveLayout(project, args[2]);
+            const auto layer = resolveLayer(project, args[3]);
+            const auto points = parsePoints(args, 4);
+            openvlsi::ProjectSession session(project);
+            openvlsi::ObjectId id = 0;
+            session.execute("layout-add-polygon",
+                            [&](openvlsi::Project &p) { id = openvlsi::addPolygon(p, cell, layer, points); });
+            session.save(args[1]);
+            printJson({{"id", id}, {"cell", cell}, {"layer", layer}, {"points", points.size()}});
+            return 0;
+        }
+
+        if (command == "layout-add-port") {
+            expectArguments(args, 9, 1000,
+                            "layout-add-port <project> <cell> <name> <layer> <x> <y> <width> <height> [options]");
+            const auto project = openvlsi::Project::load(args[1]);
+            const auto cell = resolveLayout(project, args[2]);
+            const auto layer = resolveLayer(project, args[4]);
+            const openvlsi::Rect rect{parseInteger(args[5], "x"), parseInteger(args[6], "y"), parseInteger(args[7], "width"),
+                                 parseInteger(args[8], "height")};
+            auto direction = openvlsi::PortDirection::inout;
+            auto side = openvlsi::PortSide::left;
+            openvlsi::ObjectId net = 0;
+            std::string label = args[3];
+            bool visible = true;
+            bool locked = false;
+            for (std::size_t index = 9; index < args.size(); ++index) {
+                const auto &option = args[index];
+                if (option == "--direction" && index + 1 < args.size())
+                    direction = parsePortDirectionArgument(args[++index]);
+                else if (option == "--side" && index + 1 < args.size())
+                    side = parsePortSideArgument(args[++index]);
+                else if (option == "--net" && index + 1 < args.size())
+                    net = resolveLayoutNet(project.layoutCells.at(cell), args[++index]);
+                else if (option == "--label" && index + 1 < args.size())
+                    label = args[++index];
+                else if (option == "--hidden")
+                    visible = false;
+                else if (option == "--locked")
+                    locked = true;
+                else
+                    argumentError("Unknown layout-add-port option: " + option);
+            }
+            openvlsi::ProjectSession session(project);
+            openvlsi::ObjectId id = 0;
+            session.execute("layout-add-port", [&](openvlsi::Project &p) {
+                id = openvlsi::addPort(p, cell, args[3], layer, rect, direction, side, net, label);
+                auto &port = p.layoutCells.at(cell).ports.at(id);
+                port.visible = visible;
+                port.locked = locked;
+            });
+            session.save(args[1]);
+            printJson({{"id", id},
+                       {"cell", cell},
+                       {"name", args[3]},
+                       {"layer", layer},
+                       {"direction", openvlsi::portDirectionName(direction)},
+                       {"side", openvlsi::portSideName(side)},
+                       {"net", net == 0 ? json(nullptr) : json(net)}});
+            return 0;
+        }
+
+        if (command == "layout-list-ports") {
+            expectArguments(args, 3, 3, "layout-list-ports <project> <cell>");
+            const auto project = openvlsi::Project::load(args[1]);
+            const auto cell = resolveLayout(project, args[2]);
+            json ports = json::array();
+            for (const auto &[id, port] : project.layoutCells.at(cell).ports) {
+                ports.push_back({{"id", id},
+                                 {"name", port.name},
+                                 {"layer", port.layer},
+                                 {"x", port.rectangle.x},
+                                 {"y", port.rectangle.y},
+                                 {"width", port.rectangle.width},
+                                 {"height", port.rectangle.height},
+                                 {"direction", openvlsi::portDirectionName(port.direction)},
+                                 {"side", openvlsi::portSideName(port.side)},
+                                 {"net", port.net == 0 ? json(nullptr) : json(port.net)},
+                                 {"label", port.label},
+                                 {"visible", port.visible},
+                                 {"locked", port.locked},
+                                 {"source_instance", port.sourceInstance},
+                                 {"source_port", port.sourcePort}});
+            }
+            printJson({{"cell", cell}, {"ports", std::move(ports)}});
+            return 0;
+        }
+
+        if (command == "layout-update-port") {
+            expectArguments(args, 4, 1000, "layout-update-port <project> <cell> <port> [options]");
+            const auto project = openvlsi::Project::load(args[1]);
+            const auto cell = resolveLayout(project, args[2]);
+            auto &cellRef = project.layoutCells.at(cell);
+            const auto portId = resolveLayoutPort(cellRef, args[3]);
+            auto port = cellRef.ports.at(portId);
+            for (std::size_t index = 4; index < args.size(); ++index) {
+                const auto &option = args[index];
+                if (option == "--name" && index + 1 < args.size())
+                    port.name = args[++index];
+                else if (option == "--label" && index + 1 < args.size())
+                    port.label = args[++index];
+                else if (option == "--direction" && index + 1 < args.size())
+                    port.direction = parsePortDirectionArgument(args[++index]);
+                else if (option == "--side" && index + 1 < args.size())
+                    port.side = parsePortSideArgument(args[++index]);
+                else if (option == "--net" && index + 1 < args.size()) {
+                    const auto &value = args[++index];
+                    port.net = value == "none" ? openvlsi::ObjectId{0} : resolveLayoutNet(cellRef, value);
+                } else if (option == "--layer" && index + 1 < args.size()) {
+                    port.layer = resolveLayer(project, args[++index]);
+                } else if (option == "--x" && index + 1 < args.size())
+                    port.rectangle.x = parseInteger(args[++index], "x");
+                else if (option == "--y" && index + 1 < args.size())
+                    port.rectangle.y = parseInteger(args[++index], "y");
+                else if (option == "--width" && index + 1 < args.size())
+                    port.rectangle.width = parseInteger(args[++index], "width");
+                else if (option == "--height" && index + 1 < args.size())
+                    port.rectangle.height = parseInteger(args[++index], "height");
+                else if (option == "--visible")
+                    port.visible = true;
+                else if (option == "--hidden")
+                    port.visible = false;
+                else if (option == "--locked")
+                    port.locked = true;
+                else if (option == "--unlocked")
+                    port.locked = false;
+                else
+                    argumentError("Unknown layout-update-port option: " + option);
+            }
+            openvlsi::ProjectSession session(project);
+            session.execute("layout-update-port", [&](openvlsi::Project &p) { openvlsi::updatePort(p, cell, port); });
+            session.save(args[1]);
+            printJson({{"id", portId}, {"cell", cell}});
+            return 0;
+        }
+
+        if (command == "layout-remove-port") {
+            expectArguments(args, 4, 4, "layout-remove-port <project> <cell> <port>");
+            const auto project = openvlsi::Project::load(args[1]);
+            const auto cell = resolveLayout(project, args[2]);
+            const auto portId = resolveLayoutPort(project.layoutCells.at(cell), args[3]);
+            openvlsi::ProjectSession session(project);
+            session.execute("layout-remove-port", [&](openvlsi::Project &p) { openvlsi::removePort(p, cell, portId); });
+            session.save(args[1]);
+            printJson({{"id", portId}, {"cell", cell}});
+            return 0;
+        }
+
+        if (command == "layout-add-net") {
+            expectArguments(args, 4, 4, "layout-add-net <project> <cell> <name>");
+            const auto project = openvlsi::Project::load(args[1]);
+            const auto cell = resolveLayout(project, args[2]);
+            openvlsi::ProjectSession session(project);
+            openvlsi::ObjectId id = 0;
+            session.execute("layout-add-net", [&](openvlsi::Project &p) { id = openvlsi::createLayoutNet(p, cell, args[3]); });
+            session.save(args[1]);
+            printJson({{"id", id}, {"cell", cell}, {"name", args[3]}});
+            return 0;
+        }
+
+        if (command == "layout-assign-port-net") {
+            expectArguments(args, 5, 5, "layout-assign-port-net <project> <cell> <port> <net|none>");
+            const auto project = openvlsi::Project::load(args[1]);
+            const auto cell = resolveLayout(project, args[2]);
+            const auto portId = resolveLayoutPort(project.layoutCells.at(cell), args[3]);
+            const auto netId =
+                args[4] == "none" ? openvlsi::ObjectId{0} : resolveLayoutNet(project.layoutCells.at(cell), args[4]);
+            openvlsi::ProjectSession session(project);
+            session.execute("layout-assign-port-net",
+                            [&](openvlsi::Project &p) { openvlsi::assignPortNet(p, cell, portId, netId); });
+            session.save(args[1]);
+            printJson({{"port", portId}, {"net", netId == 0 ? json(nullptr) : json(netId)}});
+            return 0;
+        }
+
+        if (command == "layout-add-instance") {
+            expectArguments(args, 7, 8, "layout-add-instance <project> <parent> <child> <name> <x> <y> [orientation]");
+            const auto project = openvlsi::Project::load(args[1]);
+            const auto parent = resolveLayout(project, args[2]);
+            const auto child = resolveLayout(project, args[3]);
+            const auto orientation = args.size() == 8 ? parseOrientation(args[7]) : openvlsi::Orientation::r0;
+            const auto x = parseInteger(args[5], "x");
+            const auto y = parseInteger(args[6], "y");
+            openvlsi::ProjectSession session(project);
+            openvlsi::ObjectId id = 0;
+            session.execute("layout-add-instance", [&](openvlsi::Project &p) {
+                id = openvlsi::addLayoutInstance(p, parent, child, args[4], x, y, orientation);
+            });
+            session.save(args[1]);
+            printJson({{"id", id}, {"parent", parent}, {"child", child}, {"name", args[4]}});
+            return 0;
+        }
+
+        if (command == "layout-duplicate") {
+            expectArguments(args, 4, 1000,
+                            "layout-duplicate <project> <cell> <shape> <shape> ... [--dx <n>] [--dy <n>]");
+            const auto project = openvlsi::Project::load(args[1]);
+            const auto cell = resolveLayout(project, args[2]);
+            std::vector<openvlsi::ObjectId> shapes;
+            std::optional<openvlsi::Coordinate> dx;
+            std::optional<openvlsi::Coordinate> dy;
+            for (std::size_t index = 3; index < args.size(); ++index) {
+                if (args[index] == "--dx" || args[index] == "--dy") {
+                    if (index + 1 >= args.size())
+                        argumentError("Missing value for " + args[index]);
+                    const auto option = args[index];
+                    const auto value = parseInteger(args[++index], option.c_str());
+                    (option == "--dx" ? dx : dy) = value;
+                } else {
+                    shapes.push_back(resolveLayoutShape(project, cell, args[index]));
+                }
+            }
+            if (shapes.empty())
+                argumentError("Select at least one layout shape to duplicate");
+            openvlsi::ProjectSession session(project);
+            std::vector<openvlsi::ObjectId> created;
+            session.execute("layout-duplicate",
+                            [&](openvlsi::Project &p) { created = openvlsi::duplicateLayoutShapes(p, cell, shapes, dx, dy); });
+            session.save(args[1]);
+            printJson({{"cell", cell}, {"shapes", created}});
+            return 0;
+        }
+
+        if (command == "layout-array") {
+            expectArguments(args, 4, 1000,
+                            "layout-array <project> <cell> <shape> <shape> ... --rows <n> --columns <n> "
+                            "[--x-pitch <n>] [--y-pitch <n>]");
+            const auto project = openvlsi::Project::load(args[1]);
+            const auto cell = resolveLayout(project, args[2]);
+            std::vector<openvlsi::ObjectId> shapes;
+            int rows = 0;
+            int columns = 0;
+            openvlsi::Coordinate columnPitch = 0;
+            openvlsi::Coordinate rowPitch = 0;
+            for (std::size_t index = 3; index < args.size(); ++index) {
+                if (args[index] == "--rows" || args[index] == "--columns" || args[index] == "--x-pitch" ||
+                    args[index] == "--y-pitch") {
+                    if (index + 1 >= args.size())
+                        argumentError("Missing value for " + args[index]);
+                    const auto option = args[index];
+                    const auto value = parseInteger(args[++index], option.c_str());
+                    if (option == "--rows")
+                        rows = static_cast<int>(value);
+                    else if (option == "--columns")
+                        columns = static_cast<int>(value);
+                    else if (option == "--x-pitch")
+                        columnPitch = value;
+                    else
+                        rowPitch = value;
+                } else {
+                    shapes.push_back(resolveLayoutShape(project, cell, args[index]));
+                }
+            }
+            if (shapes.empty())
+                argumentError("Select at least one layout shape to array");
+            if (rows <= 0 || columns <= 0)
+                argumentError("layout-array requires positive --rows and --columns");
+            openvlsi::ProjectSession session(project);
+            std::vector<openvlsi::ObjectId> created;
+            session.execute("layout-array", [&](openvlsi::Project &p) {
+                created = openvlsi::arrayLayoutShapes(p, cell, shapes, rows, columns, columnPitch, rowPitch);
+            });
+            session.save(args[1]);
+            printJson({{"cell", cell}, {"shapes", created}});
+            return 0;
+        }
+
+        if (command == "layout-arrange") {
+            expectArguments(args, 5, 1000, "layout-arrange <project> <cell> <operation> <shape> <shape> ...");
+            const auto project = openvlsi::Project::load(args[1]);
+            const auto cell = resolveLayout(project, args[2]);
+            const auto operation = parseLayoutArrange(args[3]);
+            std::vector<openvlsi::ObjectId> shapes;
+            for (std::size_t index = 4; index < args.size(); ++index)
+                shapes.push_back(resolveLayoutShape(project, cell, args[index]));
+            openvlsi::ProjectSession session(project);
+            session.execute("layout-arrange",
+                            [&](openvlsi::Project &p) { openvlsi::arrangeLayoutShapes(p, cell, shapes, operation); });
+            session.save(args[1]);
+            printJson({{"cell", cell}, {"operation", args[3]}, {"shapes", shapes}});
+            return 0;
+        }
+
+        if (command == "layout-bind-device") {
+            expectArguments(args, 6, 6,
+                            "layout-bind-device <project> <layout> <layout-device> <schematic> <schematic-device>");
+            const auto project = openvlsi::Project::load(args[1]);
+            const auto layout = resolveLayout(project, args[2]);
+            const auto layoutDevice = resolveLayoutDevice(project, layout, args[3]);
+            const auto schematic = resolveSchematic(project, args[4]);
+            const auto schematicDevice = resolveSchematicInstance(project, schematic, args[5]);
+            openvlsi::ProjectSession session(project);
+            session.execute("layout-bind-device", [&](openvlsi::Project &p) {
+                openvlsi::bindLayoutDevice(p, layout, layoutDevice, schematic, schematicDevice);
+            });
+            session.save(args[1]);
+            printJson({{"layout", layout},
+                       {"layout_device", layoutDevice},
+                       {"schematic", schematic},
+                       {"schematic_device", schematicDevice}});
+            return 0;
+        }
+
+        if (command == "layout-unbind-device") {
+            expectArguments(args, 4, 4, "layout-unbind-device <project> <layout> <layout-device>");
+            const auto project = openvlsi::Project::load(args[1]);
+            const auto layout = resolveLayout(project, args[2]);
+            const auto layoutDevice = resolveLayoutDevice(project, layout, args[3]);
+            openvlsi::ProjectSession session(project);
+            session.execute("layout-unbind-device",
+                            [&](openvlsi::Project &p) { openvlsi::unbindLayoutDevice(p, layout, layoutDevice); });
+            session.save(args[1]);
+            printJson({{"layout", layout}, {"layout_device", layoutDevice}, {"unbound", true}});
+            return 0;
+        }
+
+        if (command == "layout-device-links") {
+            expectArguments(args, 3, 5, "layout-device-links <project> <layout> [--schematic <schematic>]");
+            const auto project = openvlsi::Project::load(args[1]);
+            const auto layout = resolveLayout(project, args[2]);
+            openvlsi::ObjectId schematic = 0;
+            if (args.size() > 3) {
+                if (args[3] != "--schematic" || args.size() != 5)
+                    argumentError("Usage: layout-device-links <project> <layout> [--schematic <schematic>]");
+                schematic = resolveSchematic(project, args[4]);
+            }
+            json links = json::array();
+            for (const auto &binding : openvlsi::layoutDeviceBindings(project, layout, schematic))
+                links.push_back(layoutDeviceBindingJson(project, binding));
+            printJson({{"layout", layout}, {"links", std::move(links)}});
+            return 0;
+        }
+
+        if (command == "layout-link-schematic") {
+            expectArguments(args, 4, 4, "layout-link-schematic <project> <layout> <schematic>");
+            const auto project = openvlsi::Project::load(args[1]);
+            const auto layout = resolveLayout(project, args[2]);
+            const auto schematic = resolveSchematic(project, args[3]);
+            openvlsi::ProjectSession session(project);
+            session.execute("layout-link-schematic",
+                            [&](openvlsi::Project &p) { openvlsi::linkLayoutToSchematic(p, layout, schematic); });
+            session.save(args[1]);
+            printJson({{"layout", layout}, {"schematic", schematic}});
+            return 0;
+        }
+
+        if (command == "layout-unlink-schematic") {
+            expectArguments(args, 3, 3, "layout-unlink-schematic <project> <layout>");
+            const auto project = openvlsi::Project::load(args[1]);
+            const auto layout = resolveLayout(project, args[2]);
+            openvlsi::ProjectSession session(project);
+            session.execute("layout-unlink-schematic",
+                            [&](openvlsi::Project &p) { openvlsi::unlinkLayoutFromSchematic(p, layout); });
+            session.save(args[1]);
+            printJson({{"layout", layout}, {"unlinked", true}});
+            return 0;
+        }
+
+        if (command == "layout-export-gds") {
+            if (args.size() < 4 || args.size() > 5)
+                argumentError("Usage: openvlsi-cli layout-export-gds <project> <cell> <output.gds|oas> [--flatten]");
+            const auto project = openvlsi::Project::load(args[1]);
+            const auto cell = resolveLayout(project, args[2]);
+            const bool flatten = args.size() == 5 && args[4] == "--flatten";
+            if (args.size() == 5 && !flatten)
+                argumentError("Unknown layout-export-gds option: " + args[4]);
+            const auto topCell = openvlsi::LayoutInterchange::exportStream(project, cell, args[3], flatten);
+            printJson({{"cell", cell}, {"output", args[3]}, {"flattened", flatten}, {"top_cell", topCell}});
+            return 0;
+        }
+
+        if (command == "layout-export-lef") {
+            expectArguments(args, 4, 4, "layout-export-lef <project> <cell> <output.lef>");
+            const auto project = openvlsi::Project::load(args[1]);
+            const auto cell = resolveLayout(project, args[2]);
+            openvlsi::LayoutInterchange::exportLef(project, cell, args[3]);
+            printJson({{"cell", cell}, {"output", args[3]}});
+            return 0;
+        }
+
+        if (command == "layout-export-def") {
+            expectArguments(args, 4, 4, "layout-export-def <project> <cell> <output.def>");
+            const auto project = openvlsi::Project::load(args[1]);
+            const auto cell = resolveLayout(project, args[2]);
+            openvlsi::LayoutInterchange::exportDef(project, cell, args[3]);
+            printJson({{"cell", cell}, {"output", args[3]}});
+            return 0;
+        }
+
+        if (command == "layout-import-gds") {
+            if (args.size() < 3)
+                argumentError("Usage: openvlsi-cli layout-import-gds <input.gds|oas> <project> "
+                              "[port-label-layer] [--top-cell <name>] [--force]");
+            openvlsi::LayoutImportOptions options;
+            bool force = false;
+            for (std::size_t index = 3; index < args.size(); ++index) {
+                if (args[index] == "--top-cell") {
+                    if (++index >= args.size())
+                        argumentError("Missing value for --top-cell");
+                    options.topCell = args[index];
+                } else if (args[index] == "--force") {
+                    force = true;
+                } else {
+                    options.portLabelLayer = static_cast<int>(parseInteger(args[index], "port-label-layer"));
+                }
+            }
+            requireImportTargetAvailable(args[2], force);
+            std::vector<std::string> warnings;
+            options.warnings = &warnings;
+            auto project = openvlsi::LayoutInterchange::importStream(args[1], options);
+            auto name = projectNameForPath(args[2]);
+            if (project.name.empty())
+                project.name = name;
+            project.identity = "project-" + project.name;
+            project.save(args[2]);
+            json warningJson = json::array();
+            for (const auto &warning : warnings)
+                warningJson.push_back(warning);
+            printJson(
+                {{"path", (projectRootForCli(args[2]) / "project.ovpro").string()},
+                 {"name", project.name},
+                 {"cells", project.layoutCells.size()},
+                 {"top_cell", project.layoutCells.empty() ? std::string{} : project.layoutCells.begin()->second.name},
+                 {"ports", project.layoutCells.empty() ? 0 : project.layoutCells.begin()->second.ports.size()},
+                 {"warnings", std::move(warningJson)}});
+            return 0;
+        }
+
+        if (command == "layout-import-lef") {
+            expectArguments(args, 3, 4, "layout-import-lef <input.lef> <project> [--force]");
+            const bool force = args.size() == 4 && args[3] == "--force";
+            if (args.size() == 4 && !force)
+                argumentError("Unknown layout-import-lef option: " + args[3]);
+            requireImportTargetAvailable(args[2], force);
+            auto project = openvlsi::LayoutInterchange::importLef(args[1]);
+            project.identity = "project-" + project.name;
+            project.save(args[2]);
+            printJson({{"path", (projectRootForCli(args[2]) / "project.ovpro").string()},
+                       {"name", project.name},
+                       {"cells", project.layoutCells.size()},
+                       {"ports", project.layoutCells.empty() ? 0 : project.layoutCells.begin()->second.ports.size()}});
+            return 0;
+        }
+
+        if (command == "layout-import-def") {
+            expectArguments(args, 3, 4, "layout-import-def <input.def> <project> [--force]");
+            const bool force = args.size() == 4 && args[3] == "--force";
+            if (args.size() == 4 && !force)
+                argumentError("Unknown layout-import-def option: " + args[3]);
+            requireImportTargetAvailable(args[2], force);
+            auto project = openvlsi::LayoutInterchange::importDef(args[1]);
+            project.identity = "project-" + project.name;
+            project.save(args[2]);
+            printJson({{"path", (projectRootForCli(args[2]) / "project.ovpro").string()},
+                       {"name", project.name},
+                       {"cells", project.layoutCells.size()},
+                       {"ports", project.layoutCells.empty() ? 0 : project.layoutCells.begin()->second.ports.size()}});
+            return 0;
+        }
+
+        if (command == "layout-connectivity") {
+            expectArguments(args, 3, 3, "layout-connectivity <project> <cell>");
+            const auto project = openvlsi::Project::load(args[1]);
+            const auto cell = resolveLayout(project, args[2]);
+            json groups = json::array();
+            for (const auto &group : openvlsi::extractLayoutNets(project, cell)) {
+                groups.push_back({{"net", group.net == 0 ? json(nullptr) : json(group.net)},
+                                  {"name", group.name},
+                                  {"aliases", group.aliases},
+                                  {"shapes", group.shapes},
+                                  {"ports", group.ports},
+                                  {"connections", group.connections}});
+            }
+            printJson({{"cell", cell}, {"nets", std::move(groups)}});
+            return 0;
+        }
+
+        if (command == "implementation-create") {
+            if (args.size() < 3)
+                argumentError("Usage: openvlsi-cli implementation-create <project> <name> --top <module> --pdk <pdk> "
+                              "[--stack <stack>] [--source <file>]...");
+            auto project = openvlsi::Project::load(args[1]);
+            openvlsi::ImplementationConfig config;
+            config.name = args[2];
+            config.top = args[2];
+            for (std::size_t index = 3; index < args.size(); ++index)
+                applyImplementationConfigOption(project, args, index, config);
+            if (config.stack.empty())
+                config.stack = resolveLayoutStack(config.pdk, {});
+            openvlsi::ObjectId id = 0;
+            openvlsi::ProjectSession session(project);
+            session.execute("create implementation run",
+                            [&](openvlsi::Project &p) { id = openvlsi::createImplementationRun(p, config); });
+            session.save(args[1]);
+            printJson(implementationSummary(session.project().implementationRuns.at(id)));
+            return 0;
+        }
+
+        if (command == "implementation-update") {
+            if (args.size() < 3)
+                argumentError("Usage: openvlsi-cli implementation-update <project> <run> [--from <stage>] "
+                              "[implementation options]");
+            auto project = openvlsi::Project::load(args[1]);
+            const auto runId = resolveImplementationRun(project, args[2]);
+            auto config = project.implementationRuns.at(runId).config;
+            auto invalidateFrom = openvlsi::ImplementationStage::elaboration;
+            for (std::size_t index = 3; index < args.size(); ++index) {
+                if (args[index] == "--from") {
+                    if (++index >= args.size())
+                        argumentError("Missing value for --from");
+                    const auto parsed = openvlsi::parseImplementationStage(args[index]);
+                    if (!parsed || *parsed == openvlsi::ImplementationStage::created)
+                        argumentError("Invalid implementation stage: " + args[index]);
+                    invalidateFrom = *parsed;
+                    continue;
+                }
+                applyImplementationConfigOption(project, args, index, config);
+            }
+            if (config.stack.empty())
+                config.stack = resolveLayoutStack(config.pdk, {});
+            const auto diagnostics = openvlsi::validateImplementationConfig(project, config);
+            const auto fatal = std::find_if(diagnostics.begin(), diagnostics.end(), [](const auto &diagnostic) {
+                return diagnostic.severity == openvlsi::Diagnostic::Severity::error;
+            });
+            if (fatal != diagnostics.end())
+                throw openvlsi::ProjectError(fatal->code, fatal->message);
+            openvlsi::ProjectSession session(project);
+            session.execute("update implementation run", [&](openvlsi::Project &p) {
+                openvlsi::updateImplementationConfig(p.implementationRuns.at(runId), std::move(config), invalidateFrom);
+            });
+            session.save(args[1]);
+            printJson(implementationSummary(session.project().implementationRuns.at(runId)));
+            return 0;
+        }
+
+        if (command == "implementation-list") {
+            expectArguments(args, 2, 2, "implementation-list <project>");
+            const auto project = openvlsi::Project::load(args[1]);
+            json result = json::array();
+            for (const auto &[_, run] : project.implementationRuns)
+                result.push_back(implementationSummary(run));
+            printJson(result);
+            return 0;
+        }
+
+        if (command == "implementation-status") {
+            expectArguments(args, 3, 3, "implementation-status <project> <run>");
+            const auto project = openvlsi::Project::load(args[1]);
+            const auto runId = resolveImplementationRun(project, args[2]);
+            printJson(openvlsi::implementationRunJson(project.implementationRuns.at(runId)));
+            return 0;
+        }
+
+        if (command == "implementation-toolchain") {
+            expectArguments(args, 1, 1, "implementation-toolchain");
+            printJson(openvlsi::implementationToolchainJson(openvlsi::discoverImplementationToolchain()));
+            return 0;
+        }
+
+        if (command == "implementation-prepare") {
+            expectArguments(args, 3, 3, "implementation-prepare <project> <run>");
+            auto project = openvlsi::Project::load(args[1]);
+            const auto runId = resolveImplementationRun(project, args[2]);
+            auto &run = project.implementationRuns.at(runId);
+            const auto package = packageForPdk(run.config.pdk);
+            if (!package || !package->pdk)
+                throw openvlsi::ProjectError("implementation.pdk",
+                                        "No installed PDK package provides '" + run.config.pdk + "'");
+            std::vector<openvlsi::Diagnostic> diagnostics;
+            const auto platform = openvlsi::resolveImplementationPlatform(*package, run.config.stack, diagnostics);
+            auto preparation = openvlsi::prepareImplementationRun(project, run, platform, projectRootForCli(args[1]));
+            diagnostics.insert(diagnostics.end(), preparation.diagnostics.begin(), preparation.diagnostics.end());
+            openvlsi::ProjectSession session(project);
+            session.save(args[1]);
+            json scripts = json::array();
+            for (const auto &script : preparation.scripts)
+                scripts.push_back(script.generic_string());
+            json rtl = json::array();
+            for (const auto &file : preparation.rtlFiles)
+                rtl.push_back(file);
+            json diagnosticArray = json::array();
+            for (const auto &diagnostic : diagnostics)
+                diagnosticArray.push_back(diagnosticJson(diagnostic));
+            printJson({{"ready", preparation.ready},
+                       {"run", implementationSummary(session.project().implementationRuns.at(runId))},
+                       {"run_directory", preparation.runDirectory.generic_string()},
+                       {"scripts", std::move(scripts)},
+                       {"rtl_files", std::move(rtl)},
+                       {"diagnostics", std::move(diagnosticArray)},
+                       {"toolchain", openvlsi::implementationToolchainJson(openvlsi::discoverImplementationToolchain())}});
+            return 0;
+        }
+
+        if (command == "implementation-run") {
+            if (args.size() < 3)
+                argumentError("Usage: openvlsi-cli implementation-run <project> <run> [--from <stage>] [--to <stage>] "
+                              "[--timeout <seconds>] [--verbose]");
+            auto project = openvlsi::Project::load(args[1]);
+            const auto runId = resolveImplementationRun(project, args[2]);
+            auto &run = project.implementationRuns.at(runId);
+            openvlsi::ImplementationExecutionOptions options;
+            bool verbose = false;
+            for (std::size_t index = 3; index < args.size(); ++index) {
+                const auto &option = args[index];
+                const auto value = [&]() -> const std::string & {
+                    if (++index >= args.size())
+                        argumentError("Missing value for " + option);
+                    return args[index];
+                };
+                if (option == "--from") {
+                    const auto parsed = openvlsi::parseImplementationStage(value());
+                    if (!parsed || *parsed == openvlsi::ImplementationStage::created)
+                        argumentError("Invalid implementation stage: " + args[index]);
+                    options.from = *parsed;
+                } else if (option == "--to") {
+                    const auto parsed = openvlsi::parseImplementationStage(value());
+                    if (!parsed || *parsed == openvlsi::ImplementationStage::created)
+                        argumentError("Invalid implementation stage: " + args[index]);
+                    options.to = *parsed;
+                } else if (option == "--timeout") {
+                    run.config.timeoutSeconds = static_cast<int>(parseInteger(value(), "timeout"));
+                } else if (option == "--verbose") {
+                    verbose = true;
+                } else {
+                    argumentError("Unknown implementation-run option: " + option);
+                }
+            }
+            const auto package = packageForPdk(run.config.pdk);
+            if (!package || !package->pdk)
+                throw openvlsi::ProjectError("implementation.pdk",
+                                        "No installed PDK package provides '" + run.config.pdk + "'");
+            std::vector<openvlsi::Diagnostic> diagnostics;
+            const auto platform = openvlsi::resolveImplementationPlatform(*package, run.config.stack, diagnostics);
+            if (!diagnostics.empty()) {
+                const auto fatal = std::find_if(diagnostics.begin(), diagnostics.end(), [](const auto &diagnostic) {
+                    return diagnostic.severity == openvlsi::Diagnostic::Severity::error;
+                });
+                if (fatal != diagnostics.end())
+                    throw openvlsi::ProjectError(fatal->code, fatal->message);
+            }
+
+            const auto projectRoot = projectRootForCli(args[1]);
+            openvlsi::ProcessCancellation cancellation;
+            options.cancellation = &cancellation;
+            options.progress = [](const openvlsi::ImplementationProgress &progress) {
+                if (!progress.message.empty())
+                    std::cerr << "[" << openvlsi::implementationStageName(progress.stage) << "] " << progress.message
+                              << "\n";
+            };
+            if (verbose) {
+                options.log = [](const std::string &chunk) { std::cerr << chunk; };
+            }
+            options.changed = [&](const openvlsi::ImplementationRun &) { project.save(args[1]); };
+
+            gActiveCancellation = &cancellation;
+            const auto previousInterrupt = std::signal(SIGINT, handleImplementationSignal);
+            const auto previousTerminate = std::signal(SIGTERM, handleImplementationSignal);
+            const auto result = openvlsi::executeImplementationRun(project, run, platform, projectRoot, options);
+            std::signal(SIGINT, previousInterrupt);
+            std::signal(SIGTERM, previousTerminate);
+            gActiveCancellation = nullptr;
+            project.save(args[1]);
+
+            json diagnosticArray = json::array();
+            for (const auto &diagnostic : result.diagnostics)
+                diagnosticArray.push_back(diagnosticJson(diagnostic));
+            json response = {{"success", result.success},
+                             {"cancelled", result.cancelled},
+                             {"run", openvlsi::implementationRunJson(project.implementationRuns.at(runId))},
+                             {"diagnostics", std::move(diagnosticArray)}};
+            if (result.completedStage != openvlsi::ImplementationStage::created)
+                response["completed_stage"] = openvlsi::implementationStageName(result.completedStage);
+            printJson(response);
+            return result.success ? 0 : 1;
+        }
+
+        if (command == "implementation-map") {
+            if (args.size() < 3)
+                argumentError("Usage: openvlsi-cli implementation-map <project> <run> [--output <path>] [--verbose]");
+            auto project = openvlsi::Project::load(args[1]);
+            const auto runId = resolveImplementationRun(project, args[2]);
+            auto &run = project.implementationRuns.at(runId);
+            std::filesystem::path output;
+            bool verbose = false;
+            for (std::size_t index = 3; index < args.size(); ++index) {
+                const auto &option = args[index];
+                const auto value = [&]() -> const std::string & {
+                    if (++index >= args.size())
+                        argumentError("Missing value for " + option);
+                    return args[index];
+                };
+                if (option == "--output")
+                    output = value();
+                else if (option == "--verbose")
+                    verbose = true;
+                else
+                    argumentError("Unknown implementation-map option: " + option);
+            }
+            if (!output.empty() && output.is_relative())
+                output = std::filesystem::absolute(output);
+            const auto package = packageForPdk(run.config.pdk);
+            if (!package || !package->pdk)
+                throw openvlsi::ProjectError("implementation.pdk",
+                                        "No installed PDK package provides '" + run.config.pdk + "'");
+            std::vector<openvlsi::Diagnostic> diagnostics;
+            const auto platform = openvlsi::resolveImplementationPlatform(*package, run.config.stack, diagnostics);
+            if (!diagnostics.empty()) {
+                const auto fatal = std::find_if(diagnostics.begin(), diagnostics.end(), [](const auto &diagnostic) {
+                    return diagnostic.severity == openvlsi::Diagnostic::Severity::error;
+                });
+                if (fatal != diagnostics.end())
+                    throw openvlsi::ProjectError(fatal->code, fatal->message);
+            }
+            std::function<void(const std::string &)> logger;
+            if (verbose)
+                logger = [](const std::string &chunk) { std::cerr << chunk; };
+            const auto result = openvlsi::mapImplementationRun(run, platform, projectRootForCli(args[1]), output, logger);
+            project.save(args[1]);
+            printJson({{"success", result.success},
+                       {"error", result.error},
+                       {"netlist", result.netlist.generic_string()},
+                       {"run", openvlsi::implementationRunJson(project.implementationRuns.at(runId))}});
+            return result.success ? 0 : 1;
+        }
+
+        if (command == "implementation-log") {
+            if (args.size() < 3)
+                argumentError("Usage: openvlsi-cli implementation-log <project> <run> [--stage <stage>] [--tail <lines>]");
+            const auto project = openvlsi::Project::load(args[1]);
+            const auto runId = resolveImplementationRun(project, args[2]);
+            const auto &run = project.implementationRuns.at(runId);
+            auto stage = run.currentStage == openvlsi::ImplementationStage::created ? openvlsi::ImplementationStage::final
+                                                                               : run.currentStage;
+            std::size_t maximumLines = 0;
+            for (std::size_t index = 3; index < args.size(); ++index) {
+                const auto &option = args[index];
+                const auto value = [&]() -> const std::string & {
+                    if (++index >= args.size())
+                        argumentError("Missing value for " + option);
+                    return args[index];
+                };
+                if (option == "--stage") {
+                    const auto parsed = openvlsi::parseImplementationStage(value());
+                    if (!parsed || *parsed == openvlsi::ImplementationStage::created)
+                        argumentError("Invalid implementation stage: " + args[index]);
+                    stage = *parsed;
+                } else if (option == "--tail") {
+                    maximumLines = static_cast<std::size_t>(parseInteger(value(), "tail"));
+                } else {
+                    argumentError("Unknown implementation-log option: " + option);
+                }
+            }
+            auto text = openvlsi::readImplementationLog(run, projectRootForCli(args[1]), stage, 1024 * 1024);
+            std::vector<std::string> lines;
+            std::istringstream stream(text);
+            std::string line;
+            while (std::getline(stream, line))
+                lines.push_back(line);
+            if (maximumLines > 0 && lines.size() > maximumLines)
+                lines.erase(lines.begin(), lines.end() - static_cast<std::ptrdiff_t>(maximumLines));
+            const auto relative = openvlsi::implementationStageLogRelativePath(stage);
+            const auto path = projectRootForCli(args[1]) / run.directory / relative;
+            printJson({{"stage", openvlsi::implementationStageName(stage)},
+                       {"path", path.generic_string()},
+                       {"lines", lines.size()},
+                       {"text", [&] {
+                            std::ostringstream output;
+                            for (const auto &entry : lines)
+                                output << entry << "\n";
+                            return output.str();
+                        }()}});
+            return 0;
+        }
+
+        if (command == "implementation-cancel") {
+            expectArguments(args, 3, 3, "implementation-cancel <project> <run>");
+            const auto project = openvlsi::Project::load(args[1]);
+            const auto runId = resolveImplementationRun(project, args[2]);
+            std::string error;
+            if (!openvlsi::cancelImplementationRun(project.implementationRuns.at(runId), projectRootForCli(args[1]), error))
+                throw openvlsi::ProjectError("implementation.cancel", error);
+            printJson({{"run", runId}, {"name", project.implementationRuns.at(runId).name}, {"cancelled", true}});
+            return 0;
+        }
+
+        if (command == "implementation-import") {
+            if (args.size() < 3)
+                argumentError("Usage: openvlsi-cli implementation-import <project> <run> [--layout-name <name>] "
+                              "[--replace]");
+            auto project = openvlsi::Project::load(args[1]);
+            const auto runId = resolveImplementationRun(project, args[2]);
+            auto &run = project.implementationRuns.at(runId);
+            std::string layoutName;
+            bool replace = false;
+            for (std::size_t index = 3; index < args.size(); ++index) {
+                if (args[index] == "--layout-name") {
+                    if (++index >= args.size())
+                        argumentError("Missing value for --layout-name");
+                    layoutName = args[index];
+                } else if (args[index] == "--replace") {
+                    replace = true;
+                } else {
+                    argumentError("Unknown implementation-import option: " + args[index]);
+                }
+            }
+            const auto package = packageForPdk(run.config.pdk);
+            if (!package || !package->pdk)
+                throw openvlsi::ProjectError("implementation.pdk",
+                                        "No installed PDK package provides '" + run.config.pdk + "'");
+            auto imported = openvlsi::importImplementationLayout(project, run, *package, projectRootForCli(args[1]),
+                                                            layoutName, replace);
+            project.save(args[1]);
+            json response = {{"layout", imported.layout},
+                             {"stream", imported.referencePath.generic_string()},
+                             {"run", openvlsi::implementationRunJson(run)}};
+            const auto &layout = project.layoutCells.at(imported.layout);
+            response["name"] = layout.name;
+            response["pdk"] = layout.pdk;
+            response["stack"] = layout.stack;
+            response["library"] = layout.library;
+            response["device"] = layout.device;
+            response["read_only"] = layout.readOnly;
+            response["shapes"] = layout.shapes.size();
+            response["ports"] = layout.ports.size();
+            response["nets"] = layout.nets.size();
+            response["instances"] = layout.instances.size();
+            json diagnostics = json::array();
+            for (const auto &diagnostic : imported.diagnostics) {
+                diagnostics.push_back(
+                    json{{"severity", diagnostic.severity == openvlsi::Diagnostic::Severity::error ? "error" : "warning"},
+                         {"code", diagnostic.code},
+                         {"message", diagnostic.message}});
+            }
+            response["diagnostics"] = std::move(diagnostics);
+            printJson(response);
+            return 0;
+        }
+
+        if (command == "implementation-export-gds") {
+            if (args.size() < 3)
+                argumentError("Usage: openvlsi-cli implementation-export-gds <project> <run> [--output <path>]");
+            auto project = openvlsi::Project::load(args[1]);
+            const auto runId = resolveImplementationRun(project, args[2]);
+            auto &run = project.implementationRuns.at(runId);
+            std::filesystem::path output;
+            for (std::size_t index = 3; index < args.size(); ++index) {
+                if (args[index] == "--output") {
+                    if (++index >= args.size())
+                        argumentError("Missing value for --output");
+                    output = args[index];
+                } else {
+                    argumentError("Unknown implementation-export-gds option: " + args[index]);
+                }
+            }
+            const auto package = packageForPdk(run.config.pdk);
+            if (!package || !package->pdk)
+                throw openvlsi::ProjectError("implementation.pdk",
+                                        "No installed PDK package provides '" + run.config.pdk + "'");
+            std::vector<openvlsi::Diagnostic> diagnostics;
+            const auto platform = openvlsi::resolveImplementationPlatform(*package, run.config.stack, diagnostics);
+            const auto fatal = std::find_if(diagnostics.begin(), diagnostics.end(), [](const auto &diagnostic) {
+                return diagnostic.severity == openvlsi::Diagnostic::Severity::error;
+            });
+            if (fatal != diagnostics.end())
+                throw openvlsi::ProjectError(fatal->code, fatal->message);
+            openvlsi::ProjectSession session(project);
+            auto exported = openvlsi::exportImplementationGds(session.project().implementationRuns.at(runId), platform,
+                                                         projectRootForCli(args[1]), output);
+            session.save(args[1]);
+            json diagnosticArray = json::array();
+            for (const auto &diagnostic : exported.diagnostics)
+                diagnosticArray.push_back(diagnosticJson(diagnostic));
+            printJson({{"success", exported.success},
+                       {"path", exported.success ? json(exported.path.generic_string()) : json(nullptr)},
+                       {"def", exported.defPath.generic_string()},
+                       {"log", exported.logPath.generic_string()},
+                       {"missing_cells", exported.missingCells},
+                       {"empty_cells", exported.emptyCells},
+                       {"error", exported.error},
+                       {"diagnostics", std::move(diagnosticArray)},
+                       {"run", implementationSummary(session.project().implementationRuns.at(runId))}});
+            return exported.success ? 0 : 1;
+        }
+
+        if (command == "implementation-delete") {
+            expectArguments(args, 3, 5, "implementation-delete <project> <run> [--purge] [--dry-run]");
+            auto project = openvlsi::Project::load(args[1]);
+            const auto runId = resolveImplementationRun(project, args[2]);
+            const auto name = project.implementationRuns.at(runId).name;
+            const auto directory = project.implementationRuns.at(runId).directory;
+            bool purge = false;
+            bool dryRun = false;
+            for (std::size_t index = 3; index < args.size(); ++index) {
+                if (args[index] == "--purge")
+                    purge = true;
+                else if (args[index] == "--dry-run")
+                    dryRun = true;
+                else
+                    argumentError("Unknown implementation-delete option: " + args[index]);
+            }
+            if (dryRun) {
+                printJson({{"id", runId},
+                           {"name", name},
+                           {"directory", directory},
+                           {"purge", purge},
+                           {"deleted", false},
+                           {"dry_run", true}});
+                return 0;
+            }
+            openvlsi::ProjectSession session(project);
+            session.execute("remove implementation run",
+                            [&](openvlsi::Project &p) { openvlsi::removeImplementationRun(p, runId); });
+            session.save(args[1]);
+            bool purged = false;
+            if (purge && !directory.empty()) {
+                const auto root = projectRootForCli(args[1]).lexically_normal();
+                const auto path = (root / directory).lexically_normal();
+                const auto allowed = (root / "build" / "impl").lexically_normal();
+                if (path.string().starts_with(allowed.string() + "/")) {
+                    std::error_code status;
+                    purged = std::filesystem::remove_all(path, status) > 0 && !status;
+                }
+            }
+            printJson({{"id", runId}, {"name", name}, {"deleted", true}, {"purged", purged}});
+            return 0;
+        }
+
+        if (command == "simulation-add") {
+            expectArguments(args, 4, static_cast<std::size_t>(-1),
+                            "simulation-add <project> <name> <schematic> [analysis] [stop] [step] "
+                            "[signals (comma-separated or multiple arguments)]");
+            const auto project = openvlsi::Project::load(args[1]);
+            const auto schematic = resolveSchematic(project, args[3]);
+            const auto &schematicCell = project.schematicCells.at(schematic);
+            const bool mixedSignal =
+                !schematicCell.systemVerilogSchematic && openvlsi::schematicContainsHdl(project, schematic);
+            openvlsi::SimulationItem simulation;
+            simulation.name = args[2];
+            simulation.schematic = schematic;
+            if (schematicCell.systemVerilogSchematic) {
+                simulation.simulator = "iverilog";
+                simulation.analysis = "digital";
+            } else if (mixedSignal) {
+                simulation.simulator = "mixed";
+                simulation.analysis = "transient";
+                simulation.stop = 1.0e-6;
+                simulation.step = 1.0e-9;
+            }
+            if (args.size() >= 5 && !mixedSignal)
+                simulation.analysis = normalizeAnalysisName(args[4]);
+            // Frequency-domain analyses take [stop] as the sweep end and [step]
+            // as points per decade; time-domain analyses take stop/step.
+            if (args.size() >= 6) {
+                if (simulation.analysis == "ac")
+                    simulation.acStop = parseDouble(args[5], "ac stop frequency");
+                else if (simulation.analysis == "noise")
+                    simulation.noiseStop = parseDouble(args[5], "noise stop frequency");
+                else
+                    simulation.stop = parseDouble(args[5], "stop time");
+            }
+            if (args.size() >= 7) {
+                if (simulation.analysis == "ac")
+                    simulation.acPoints = std::max(1, static_cast<int>(parseDouble(args[6], "ac points per decade")));
+                else if (simulation.analysis == "noise")
+                    simulation.noisePoints =
+                        std::max(1, static_cast<int>(parseDouble(args[6], "noise points per decade")));
+                else
+                    simulation.step = parseDouble(args[6], "step time");
+            }
+            if (args.size() >= 8) {
+                std::string signals;
+                for (std::size_t index = 7; index < args.size(); ++index) {
+                    if (!signals.empty())
+                        signals += ",";
+                    signals += args[index];
+                }
+                simulation.captureSignals = std::move(signals);
+            }
+            openvlsi::ProjectSession session(project);
+            openvlsi::ObjectId graphId = 0;
+            session.execute("simulation-add", [&](openvlsi::Project &p) {
+                openvlsi::requireUniqueSimulationName(p, simulation.name);
+                simulation.id = p.nextId();
+                p.simulations.emplace(simulation.id, simulation);
+                openvlsi::SimulationGraph graph;
+                graph.id = p.nextId();
+                graph.name = "Graph 1";
+                graph.xAxis = "time";
+                graph.ySignals = splitSignals(simulation.captureSignals);
+                graphId = graph.id;
+                p.simulations.at(simulation.id).graphs.push_back(std::move(graph));
+            });
+            session.save(args[1]);
+            printJson({{"id", simulation.id},
+                       {"name", simulation.name},
+                       {"schematic", schematic},
+                       {"simulator", simulation.simulator},
+                       {"analysis", simulation.analysis},
+                       {"signals", simulation.captureSignals},
+                       {"graph", graphId}});
+            return 0;
+        }
+
+        if (command == "simulation-list") {
+            expectArguments(args, 2, 2, "simulation-list <project>");
+            const auto project = openvlsi::Project::load(args[1]);
+            printJson(projectSummary(project, args[1])["simulations"]);
+            return 0;
+        }
+
+        if (command == "simulation-remove") {
+            expectArguments(args, 3, 4, "simulation-remove <project> <simulation> [--dry-run]");
+            bool dryRun = false;
+            if (args.size() == 4) {
+                if (args[3] != "--dry-run")
+                    argumentError("Unknown simulation-remove option: " + args[3]);
+                dryRun = true;
+            }
+            auto project = openvlsi::Project::load(args[1]);
+            const auto id = resolveSimulation(project, args[2]);
+            const auto &simulation = project.simulations.at(id);
+            if (dryRun) {
+                printJson({{"id", id},
+                           {"name", simulation.name},
+                           {"deleted", false},
+                           {"dry_run", true},
+                           {"graphs", simulation.graphs.size()}});
+                return 0;
+            }
+            const auto name = simulation.name;
+            openvlsi::ProjectSession session(project);
+            session.execute("remove simulation", [&](openvlsi::Project &p) { openvlsi::removeSimulationItem(p, id); });
+            session.save(args[1]);
+            printJson({{"id", id}, {"name", name}, {"deleted", true}});
+            return 0;
+        }
+
+        if (command == "simulation-configure") {
+            expectArguments(args, 3, static_cast<std::size_t>(-1),
+                            "simulation-configure <project> <simulation> [analysis options]");
+            auto session = openvlsi::ProjectSession(openvlsi::Project::load(args[1]));
+            const auto simulationId = resolveSimulation(session.project(), args[2]);
+            auto updated = session.project().simulations.at(simulationId);
+            for (std::size_t index = 3; index < args.size(); ++index) {
+                const auto option = args[index];
+                const auto value = [&]() -> const std::string & {
+                    if (index + 1 >= args.size())
+                        argumentError("Missing value for " + option);
+                    return args[++index];
+                };
+                if (option == "--analysis")
+                    updated.analysis = normalizeAnalysisName(value());
+                else if (option == "--simulator")
+                    updated.simulator = value();
+                else if (option == "--start")
+                    updated.start = parseDouble(value(), "start");
+                else if (option == "--stop")
+                    updated.stop = parseDouble(value(), "stop");
+                else if (option == "--step")
+                    updated.step = parseDouble(value(), "step");
+                else if (option == "--temperature")
+                    updated.temperature = parseDouble(value(), "temperature");
+                else if (option == "--model-section")
+                    updated.modelSection = value();
+                else if (option == "--dc-source")
+                    updated.dcSource = value();
+                else if (option == "--dc-start")
+                    updated.dcStart = parseDouble(value(), "DC start");
+                else if (option == "--dc-stop")
+                    updated.dcStop = parseDouble(value(), "DC stop");
+                else if (option == "--dc-step")
+                    updated.dcStep = parseDouble(value(), "DC step");
+                else if (option == "--ac-variation")
+                    updated.acVariation = value();
+                else if (option == "--ac-points")
+                    updated.acPoints = static_cast<int>(parseInteger(value(), "AC points"));
+                else if (option == "--ac-start")
+                    updated.acStart = parseDouble(value(), "AC start");
+                else if (option == "--ac-stop")
+                    updated.acStop = parseDouble(value(), "AC stop");
+                else if (option == "--noise-output")
+                    updated.noiseOutput = value();
+                else if (option == "--noise-input")
+                    updated.noiseInput = value();
+                else if (option == "--noise-variation")
+                    updated.noiseVariation = value();
+                else if (option == "--noise-points")
+                    updated.noisePoints = static_cast<int>(parseInteger(value(), "noise points"));
+                else if (option == "--noise-start")
+                    updated.noiseStart = parseDouble(value(), "noise start");
+                else if (option == "--noise-stop")
+                    updated.noiseStop = parseDouble(value(), "noise stop");
+                else if (option == "--tf-output")
+                    updated.tfOutput = value();
+                else if (option == "--tf-source")
+                    updated.tfSource = value();
+                else if (option == "--param") {
+                    const auto [name, number] = parseAssignment(value(), "parameter");
+                    updated.parameters[name] = number;
+                } else if (option == "--source") {
+                    const auto [name, number] = parseAssignment(value(), "source override");
+                    updated.sourceOverrides[name] = number;
+                } else if (option == "--signals")
+                    updated.captureSignals = value();
+                else if (option == "--directives")
+                    updated.directives = value();
+                else if (option == "--clear-params")
+                    updated.parameters.clear();
+                else if (option == "--clear-sources")
+                    updated.sourceOverrides.clear();
+                else
+                    argumentError("Unknown simulation-configure option: " + option);
+            }
+            session.execute("configure simulation",
+                            [&](openvlsi::Project &project) { project.simulations.at(simulationId) = updated; });
+            session.save(args[1]);
+            printJson(simulationJson(session.project().simulations.at(simulationId)));
+            return 0;
+        }
+        if (command == "simulation-corner-defaults") {
+            expectArguments(args, 3, 3, "simulation-corner-defaults <project> <simulation>");
+            auto session = openvlsi::ProjectSession(openvlsi::Project::load(args[1]));
+            const auto simulationId = resolveSimulation(session.project(), args[2]);
+            const auto &simulation = session.project().simulations.at(simulationId);
+            const auto schematic = session.project().schematicCells.find(simulation.schematic);
+            if (schematic == session.project().schematicCells.end())
+                throw openvlsi::ProjectError("simulation.schematic", "Simulation references a missing schematic");
+            const auto corners = openvlsi::pdkSimulationCorners(schematic->second.pdk);
+            session.execute("populate simulation corners",
+                            [&](openvlsi::Project &project) { project.simulations.at(simulationId).corners = corners; });
+            session.save(args[1]);
+            printJson({{"simulation", simulationId}, {"corners", corners.size()}});
+            return 0;
+        }
+        if (command == "simulation-corner-add") {
+            expectArguments(args, 5, static_cast<std::size_t>(-1),
+                            "simulation-corner-add <project> <simulation> <name> [--section <section>] "
+                            "[--temperature <c>] [--supply name=value]... [--param name=value]...");
+            auto session = openvlsi::ProjectSession(openvlsi::Project::load(args[1]));
+            const auto simulationId = resolveSimulation(session.project(), args[2]);
+            openvlsi::SimulationCorner corner;
+            corner.name = args[3];
+            for (std::size_t index = 4; index < args.size(); ++index) {
+                const auto option = args[index];
+                const auto value = [&]() -> const std::string & {
+                    if (index + 1 >= args.size())
+                        argumentError("Missing value for " + option);
+                    return args[++index];
+                };
+                if (option == "--section")
+                    corner.modelSection = value();
+                else if (option == "--temperature")
+                    corner.temperature = parseDouble(value(), "corner temperature");
+                else if (option == "--supply") {
+                    const auto [name, number] = parseAssignment(value(), "corner supply");
+                    corner.sourceOverrides[name] = number;
+                } else if (option == "--param") {
+                    const auto [name, number] = parseAssignment(value(), "corner parameter");
+                    corner.parameters[name] = number;
+                } else
+                    argumentError("Unknown simulation-corner-add option: " + option);
+            }
+            session.execute("add simulation corner", [&](openvlsi::Project &project) {
+                auto &corners = project.simulations.at(simulationId).corners;
+                const auto found =
+                    std::find_if(corners.begin(), corners.end(),
+                                 [&](const openvlsi::SimulationCorner &entry) { return entry.name == corner.name; });
+                if (found == corners.end())
+                    corners.push_back(corner);
+                else
+                    *found = corner;
+            });
+            session.save(args[1]);
+            printJson(cornerJson(corner));
+            return 0;
+        }
+        if (command == "simulation-corner-list") {
+            expectArguments(args, 3, 3, "simulation-corner-list <project> <simulation>");
+            const auto project = openvlsi::Project::load(args[1]);
+            const auto simulationId = resolveSimulation(project, args[2]);
+            json corners = json::array();
+            for (const auto &corner : project.simulations.at(simulationId).corners)
+                corners.push_back(cornerJson(corner));
+            printJson({{"simulation", simulationId}, {"corners", std::move(corners)}});
+            return 0;
+        }
+        if (command == "simulation-corner-remove") {
+            expectArguments(args, 4, 4, "simulation-corner-remove <project> <simulation> <name>");
+            auto session = openvlsi::ProjectSession(openvlsi::Project::load(args[1]));
+            const auto simulationId = resolveSimulation(session.project(), args[2]);
+            bool removed = false;
+            session.execute("remove simulation corner", [&](openvlsi::Project &project) {
+                auto &corners = project.simulations.at(simulationId).corners;
+                const auto before = corners.size();
+                std::erase_if(corners, [&](const openvlsi::SimulationCorner &entry) { return entry.name == args[3]; });
+                removed = corners.size() != before;
+            });
+            session.save(args[1]);
+            printJson({{"simulation", simulationId}, {"name", args[3]}, {"removed", removed}});
+            return 0;
+        }
+        if (command == "simulation-sweep-add") {
+            expectArguments(args, 5, static_cast<std::size_t>(-1),
+                            "simulation-sweep-add <project> <simulation> <parameter> <value...>");
+            auto session = openvlsi::ProjectSession(openvlsi::Project::load(args[1]));
+            const auto simulationId = resolveSimulation(session.project(), args[2]);
+            openvlsi::SimulationSweep sweep;
+            sweep.parameter = args[3];
+            for (std::size_t index = 4; index < args.size(); ++index)
+                sweep.values.push_back(parseDouble(args[index], "sweep value"));
+            session.execute("add simulation sweep", [&](openvlsi::Project &project) {
+                auto &sweeps = project.simulations.at(simulationId).sweeps;
+                const auto found = std::find_if(sweeps.begin(), sweeps.end(), [&](const openvlsi::SimulationSweep &entry) {
+                    return entry.parameter == sweep.parameter;
+                });
+                if (found == sweeps.end())
+                    sweeps.push_back(sweep);
+                else
+                    *found = sweep;
+            });
+            session.save(args[1]);
+            printJson({{"parameter", sweep.parameter}, {"values", sweep.values}});
+            return 0;
+        }
+        if (command == "simulation-sweep-list") {
+            expectArguments(args, 3, 3, "simulation-sweep-list <project> <simulation>");
+            const auto project = openvlsi::Project::load(args[1]);
+            const auto simulationId = resolveSimulation(project, args[2]);
+            json sweeps = json::array();
+            for (const auto &sweep : project.simulations.at(simulationId).sweeps)
+                sweeps.push_back({{"parameter", sweep.parameter}, {"values", sweep.values}});
+            printJson({{"simulation", simulationId}, {"sweeps", std::move(sweeps)}});
+            return 0;
+        }
+        if (command == "simulation-sweep-remove") {
+            expectArguments(args, 4, 4, "simulation-sweep-remove <project> <simulation> <parameter>");
+            auto session = openvlsi::ProjectSession(openvlsi::Project::load(args[1]));
+            const auto simulationId = resolveSimulation(session.project(), args[2]);
+            bool removed = false;
+            session.execute("remove simulation sweep", [&](openvlsi::Project &project) {
+                auto &sweeps = project.simulations.at(simulationId).sweeps;
+                const auto before = sweeps.size();
+                std::erase_if(sweeps, [&](const openvlsi::SimulationSweep &entry) { return entry.parameter == args[3]; });
+                removed = sweeps.size() != before;
+            });
+            session.save(args[1]);
+            printJson({{"simulation", simulationId}, {"parameter", args[3]}, {"removed", removed}});
+            return 0;
+        }
+        if (command == "simulation-monte-carlo") {
+            expectArguments(args, 3, static_cast<std::size_t>(-1),
+                            "simulation-monte-carlo <project> <simulation> [--samples n] "
+                            "[--temperature-sigma c] [--supply-sigma-percent p] [--supply-source name] "
+                            "[--supply-nominal v] [--param-sigma name=percent]... [--seed n] [--disable]");
+            auto session = openvlsi::ProjectSession(openvlsi::Project::load(args[1]));
+            const auto simulationId = resolveSimulation(session.project(), args[2]);
+            auto options = session.project().simulations.at(simulationId).monteCarlo;
+            options.enabled = true;
+            for (std::size_t index = 3; index < args.size(); ++index) {
+                const auto option = args[index];
+                if (option == "--disable") {
+                    options.enabled = false;
+                    continue;
+                }
+                const auto value = [&]() -> const std::string & {
+                    if (index + 1 >= args.size())
+                        argumentError("Missing value for " + option);
+                    return args[++index];
+                };
+                if (option == "--samples")
+                    options.samples = static_cast<int>(parseInteger(value(), "Monte Carlo samples"));
+                else if (option == "--temperature-sigma")
+                    options.temperatureSigma = parseDouble(value(), "temperature sigma");
+                else if (option == "--supply-sigma-percent")
+                    options.supplySigmaPercent = parseDouble(value(), "supply sigma");
+                else if (option == "--supply-source")
+                    options.supplySource = value();
+                else if (option == "--supply-nominal")
+                    options.supplyNominal = parseDouble(value(), "supply nominal");
+                else if (option == "--seed")
+                    options.seed = static_cast<std::uint32_t>(parseInteger(value(), "Monte Carlo seed"));
+                else if (option == "--param-sigma") {
+                    const auto [name, number] = parseAssignment(value(), "parameter sigma");
+                    options.parameterSigmaPercent[name] = number;
+                } else
+                    argumentError("Unknown simulation-monte-carlo option: " + option);
+            }
+            session.execute("configure simulation monte carlo",
+                            [&](openvlsi::Project &project) { project.simulations.at(simulationId).monteCarlo = options; });
+            session.save(args[1]);
+            const auto &stored = session.project().simulations.at(simulationId).monteCarlo;
+            printJson({{"simulation", simulationId},
+                       {"enabled", stored.enabled},
+                       {"samples", stored.samples},
+                       {"temperature_sigma", stored.temperatureSigma},
+                       {"supply_sigma_percent", stored.supplySigmaPercent},
+                       {"supply_source", stored.supplySource},
+                       {"supply_nominal", stored.supplyNominal},
+                       {"parameter_sigma_percent", stored.parameterSigmaPercent},
+                       {"seed", stored.seed}});
+            return 0;
+        }
+        if (command == "simulation-measure-add") {
+            expectArguments(args, 5, static_cast<std::size_t>(-1),
+                            "simulation-measure-add <project> <simulation> <name> <metric> [--signal s] "
+                            "[--input s] [--voltage v] [--threshold v] [--tolerance v]");
+            auto session = openvlsi::ProjectSession(openvlsi::Project::load(args[1]));
+            const auto simulationId = resolveSimulation(session.project(), args[2]);
+            openvlsi::SimulationMeasurementSpec spec;
+            spec.name = args[3];
+            spec.metric = args[4];
+            for (std::size_t index = 5; index < args.size(); ++index) {
+                const auto option = args[index];
+                const auto value = [&]() -> const std::string & {
+                    if (index + 1 >= args.size())
+                        argumentError("Missing value for " + option);
+                    return args[++index];
+                };
+                if (option == "--signal")
+                    spec.signal = value();
+                else if (option == "--input")
+                    spec.input = value();
+                else if (option == "--voltage")
+                    spec.voltage = parseDouble(value(), "measurement voltage");
+                else if (option == "--threshold")
+                    spec.threshold = parseDouble(value(), "measurement threshold");
+                else if (option == "--tolerance")
+                    spec.tolerance = parseDouble(value(), "measurement tolerance");
+                else
+                    argumentError("Unknown simulation-measure-add option: " + option);
+            }
+            session.execute("add simulation measurement", [&](openvlsi::Project &project) {
+                auto &measurements = project.simulations.at(simulationId).measurements;
+                const auto found =
+                    std::find_if(measurements.begin(), measurements.end(),
+                                 [&](const openvlsi::SimulationMeasurementSpec &entry) { return entry.name == spec.name; });
+                if (found == measurements.end())
+                    measurements.push_back(spec);
+                else
+                    *found = spec;
+            });
+            session.save(args[1]);
+            printJson(measurementSpecJson(spec));
+            return 0;
+        }
+        if (command == "simulation-measure-list") {
+            expectArguments(args, 3, 3, "simulation-measure-list <project> <simulation>");
+            const auto project = openvlsi::Project::load(args[1]);
+            const auto simulationId = resolveSimulation(project, args[2]);
+            json measurements = json::array();
+            for (const auto &spec : project.simulations.at(simulationId).measurements)
+                measurements.push_back(measurementSpecJson(spec));
+            printJson({{"simulation", simulationId}, {"measurements", std::move(measurements)}});
+            return 0;
+        }
+        if (command == "simulation-measure-remove") {
+            expectArguments(args, 4, 4, "simulation-measure-remove <project> <simulation> <name>");
+            auto session = openvlsi::ProjectSession(openvlsi::Project::load(args[1]));
+            const auto simulationId = resolveSimulation(session.project(), args[2]);
+            bool removed = false;
+            session.execute("remove simulation measurement", [&](openvlsi::Project &project) {
+                auto &measurements = project.simulations.at(simulationId).measurements;
+                const auto before = measurements.size();
+                std::erase_if(measurements,
+                              [&](const openvlsi::SimulationMeasurementSpec &entry) { return entry.name == args[3]; });
+                removed = measurements.size() != before;
+            });
+            session.save(args[1]);
+            printJson({{"simulation", simulationId}, {"name", args[3]}, {"removed", removed}});
+            return 0;
+        }
+        if (command == "simulation-experiment") {
+            expectArguments(args, 3, static_cast<std::size_t>(-1),
+                            "simulation-experiment <project> <simulation> [timeout-ms] [--no-store] "
+                            "[--output <path>]");
+            auto project = openvlsi::Project::load(args[1]);
+            const auto simulationId = resolveSimulation(project, args[2]);
+            const auto simulation = project.simulations.at(simulationId);
+            std::chrono::milliseconds timeout{60000};
+            bool store = true;
+            std::filesystem::path outputPath;
+            for (std::size_t index = 3; index < args.size(); ++index) {
+                const auto option = args[index];
+                if (option == "--no-store") {
+                    store = false;
+                } else if (option == "--output") {
+                    if (index + 1 >= args.size())
+                        argumentError("Missing value for --output");
+                    outputPath = args[++index];
+                } else if (option.starts_with("--")) {
+                    argumentError("Unknown simulation-experiment option: " + option);
+                } else {
+                    timeout = std::chrono::milliseconds(std::max<openvlsi::Coordinate>(1, parseInteger(option, "timeout")));
+                }
+            }
+            const auto root = projectRootForCli(args[1]);
+            const auto points = openvlsi::runSimulationExperiment(project, simulation, timeout, {}, root);
+            json pointJson = json::array();
+            json stored = json::array();
+            for (const auto &point : points) {
+                pointJson.push_back(experimentPointJson(point));
+                if (!store || root.empty())
+                    continue;
+                const auto request = openvlsi::simulationRequestForItem(project, simulation, root);
+                openvlsi::SimulationRunContext context;
+                context.projectRoot = root;
+                context.projectIdentity = project.identity;
+                context.projectName = project.name;
+                context.simulationId = simulation.id;
+                context.simulationName = simulation.name;
+                context.variant = point.variant;
+                context.schematicId = simulation.schematic;
+                if (const auto schematic = project.schematicCells.find(simulation.schematic);
+                    schematic != project.schematicCells.end())
+                    context.schematicName = schematic->second.name;
+                context.request = request;
+                context.directives = simulation.directives;
+                context.graphs = simulation.graphs;
+                const auto artifact = openvlsi::writeSimulationRun(context, point.result);
+                stored.push_back(artifact.path.string());
+            }
+            json result = {
+                {"simulation", simulation.name}, {"points", std::move(pointJson)}, {"stored", std::move(stored)}};
+            if (!outputPath.empty()) {
+                std::ofstream output(outputPath);
+                if (!output)
+                    throw openvlsi::ProjectError("simulation.save", "Unable to open experiment output path");
+                output << result.dump(2) << "\n";
+            }
+            printJson(result);
+            return 0;
+        }
+        if (command == "simulation-run") {
+            expectArguments(args, 3, 5, "simulation-run <project> <simulation> [timeout-ms] [output.json]");
+            std::size_t end = args.size();
+            std::string outputPath;
+            if (end > 3 && std::filesystem::path(args.back()).extension() == ".json") {
+                outputPath = args.back();
+                --end;
+            }
+            if (end > 4)
+                argumentError("Usage: openvlsi-cli simulation-run <project> <simulation> [timeout-ms] [output.json]");
+            const auto timeout = std::chrono::milliseconds(
+                end > 3 ? std::max<openvlsi::Coordinate>(1, parseInteger(args[3], "timeout")) : 60000);
+
+            auto project = openvlsi::Project::load(args[1]);
+            const auto simulationId = resolveSimulation(project, args[2]);
+            const auto &simulation = project.simulations.at(simulationId);
+            const auto schematic = project.schematicCells.find(simulation.schematic);
+            if (schematic == project.schematicCells.end())
+                throw openvlsi::ProjectError("simulation.schematic", "Simulation references a missing schematic");
+
+            std::vector<std::string> notes;
+            const auto request = openvlsi::simulationRequestForItem(project, simulation, projectRootForCli(args[1]), &notes);
+            openvlsi::SimulationRunner runner;
+            const auto result = runner.run(request, timeout, [](const openvlsi::SimulationProgress &progress) {
+                std::clog << "progress: " << progress.fraction << " " << progress.message << "\n";
+            });
+            if (result.state == openvlsi::JobState::succeeded && !result.traces.empty()) {
+                auto updated = project.simulations.at(simulationId);
+                if (openvlsi::populateSimulationSignalsFromTraces(updated, result.traces)) {
+                    project.simulations[simulationId] = std::move(updated);
+                    project.save(args[1]);
+                }
+            }
+
+            openvlsi::SimulationRunContext context;
+            context.projectRoot = projectRootForCli(args[1]);
+            context.projectIdentity = project.identity;
+            context.projectName = project.name;
+            context.simulationId = simulationId;
+            context.simulationName = simulation.name;
+            context.schematicId = simulation.schematic;
+            context.schematicName = schematic->second.name;
+            context.request = request;
+            context.directives = simulation.directives;
+            context.netlistNotes = std::move(notes);
+            context.graphs = simulation.graphs;
+
+            std::filesystem::path storedPath;
+            std::string runId;
+            if (outputPath.empty()) {
+                const auto artifact = openvlsi::writeSimulationRun(context, result);
+                storedPath = artifact.path;
+                runId = artifact.runId;
+            } else {
+                std::ofstream output(outputPath);
+                if (!output)
+                    throw openvlsi::ProjectError("simulation.save", "Unable to open simulation result path");
+                output << openvlsi::serializeSimulationRun(context, result);
+                storedPath = outputPath;
+            }
+            json summary = {{"state", openvlsi::jobStateName(result.state)},
+                            {"analysis", result.analysis},
+                            {"x_axis", result.xAxis},
+                            {"x_unit", result.xUnit},
+                            {"time_points", result.time.size()},
+                            {"traces", result.traces.size()},
+                            {"scalars", result.scalars},
+                            {"measurements", json::array()},
+                            {"stored", storedPath.string()},
+                            {"error", result.error}};
+            for (const auto &measurement : result.measurements)
+                summary["measurements"].push_back(measurementResultJson(measurement));
+            summary["warnings"] = result.warnings;
+            summary["capture_signals"] = simulation.captureSignals;
+            if (!runId.empty())
+                summary["run_id"] = runId;
+            printJson(summary);
+            if (result.state != openvlsi::JobState::succeeded)
+                throw openvlsi::ProjectError("simulation." + openvlsi::jobStateName(result.state), result.error);
+            return 0;
+        }
+
+        if (command == "simulation-trace") {
+            expectArguments(args, 3, 5, "simulation-trace <project> <simulation> [signals] [max-points]");
+            const auto project = openvlsi::Project::load(args[1]);
+            const auto simulationId = resolveSimulation(project, args[2]);
+            const auto stored = openvlsi::latestSimulationRun(projectRootForCli(args[1]), simulationId);
+            if (!stored)
+                throw openvlsi::ProjectError("simulation.result", "No stored run was found for this simulation");
+            if (stored->result.time.empty() || stored->result.traces.empty())
+                throw openvlsi::ProjectError("simulation.result", "The stored run has no time vector or traces");
+            const auto wanted = args.size() >= 4 ? splitSignals(args[3]) : std::vector<std::string>{};
+            const auto maxPoints = args.size() >= 5 ? parseInteger(args[4], "max-points") : 2000;
+            std::vector<const openvlsi::SimulationTrace *> selected;
+            for (const auto &trace : stored->result.traces) {
+                if (wanted.empty())
+                    continue;
+                for (const auto &name : wanted) {
+                    if (trace.name == name || trace.name.ends_with("." + name)) {
+                        selected.push_back(&trace);
+                        break;
+                    }
+                }
+            }
+            if (selected.empty() && wanted.empty()) {
+                for (const auto &trace : stored->result.traces) {
+                    selected.push_back(&trace);
+                    if (selected.size() >= 8)
+                        break;
+                }
+            }
+            if (selected.empty())
+                throw openvlsi::ProjectError("simulation.result", "No stored trace matched the requested signals");
+            const auto totalPoints = std::min(stored->result.time.size(), selected.front()->values.size());
+            const auto limit = static_cast<std::size_t>(std::max<std::int64_t>(2, maxPoints));
+            std::vector<std::size_t> indices;
+            if (totalPoints <= limit) {
+                for (std::size_t index = 0; index < totalPoints; ++index)
+                    indices.push_back(index);
+            } else {
+                for (std::size_t index = 0; index + 1 < limit; ++index)
+                    indices.push_back(index * (totalPoints - 1) / (limit - 1));
+                indices.push_back(totalPoints - 1);
+            }
+            const bool decimated = indices.size() < totalPoints;
+            json time = json::array();
+            for (const auto index : indices)
+                time.push_back(stored->result.time[index]);
+            json traces = json::array();
+            for (const auto *trace : selected) {
+                json values = json::array();
+                for (const auto index : indices)
+                    values.push_back(index < trace->values.size() ? json(trace->values[index]) : json(nullptr));
+                traces.push_back({{"name", trace->name}, {"values", std::move(values)}});
+            }
+            printJson({{"simulation", stored->simulationName},
+                       {"run_id", stored->runId},
+                       {"analysis", stored->result.analysis},
+                       {"x_axis", stored->result.xAxis},
+                       {"x_unit", stored->result.xUnit},
+                       {"time_points", totalPoints},
+                       {"returned_points", indices.size()},
+                       {"decimated", decimated},
+                       {"time", std::move(time)},
+                       {"signals", std::move(traces)},
+                       {"scalars", stored->result.scalars}});
+            return 0;
+        }
+
+        if (command == "simulation-measure") {
+            expectArguments(args, 3, static_cast<std::size_t>(-1),
+                            "simulation-measure <project> <simulation> [signal] [threshold] "
+                            "[--metric gain|bandwidth|phase_margin|slew_rate|settling_time|power] "
+                            "[--signal s] [--input s] [--voltage v] [--tolerance v]");
+            const auto project = openvlsi::Project::load(args[1]);
+            const auto simulationId = resolveSimulation(project, args[2]);
+            const auto stored = openvlsi::latestSimulationRun(projectRootForCli(args[1]), simulationId);
+            if (!stored)
+                throw openvlsi::ProjectError("simulation.result", "No stored run was found for this simulation");
+            if (stored->result.time.empty() || stored->result.traces.empty())
+                throw openvlsi::ProjectError("simulation.result", "The stored run has no time vector or traces");
+            std::string metric;
+            std::string selected;
+            std::string input;
+            double threshold = std::numeric_limits<double>::quiet_NaN();
+            double voltage = 0.0;
+            double tolerance = 0.02;
+            std::size_t positional = 0;
+            for (std::size_t index = 3; index < args.size(); ++index) {
+                const auto option = args[index];
+                const auto value = [&]() -> const std::string & {
+                    if (index + 1 >= args.size())
+                        argumentError("Missing value for " + option);
+                    return args[++index];
+                };
+                if (option == "--metric")
+                    metric = value();
+                else if (option == "--signal")
+                    selected = value();
+                else if (option == "--input")
+                    input = value();
+                else if (option == "--voltage")
+                    voltage = parseDouble(value(), "measurement voltage");
+                else if (option == "--tolerance")
+                    tolerance = parseDouble(value(), "measurement tolerance");
+                else if (option == "--threshold")
+                    threshold = parseDouble(value(), "threshold");
+                else if (positional++ == 0)
+                    selected = option;
+                else
+                    threshold = parseDouble(option, "threshold");
+            }
+            if (!metric.empty()) {
+                openvlsi::SimulationMeasurementSpec spec;
+                spec.name = "measurement";
+                spec.metric = metric;
+                spec.signal = selected;
+                spec.input = input;
+                spec.voltage = voltage;
+                spec.tolerance = tolerance;
+                if (std::isfinite(threshold))
+                    spec.threshold = threshold;
+                const auto measurements = openvlsi::evaluateMeasurements({spec}, stored->result);
+                printJson({{"simulation", stored->simulationName},
+                           {"schematic", stored->schematicName},
+                           {"run_id", stored->runId},
+                           {"measurement", measurementResultJson(measurements.front())}});
+                return 0;
+            }
+            json measurements = json::array();
+            for (const auto &trace : stored->result.traces) {
+                if (!selected.empty() && trace.name != selected)
+                    continue;
+                measurements.push_back(measurementJson(openvlsi::measureSignal(trace, stored->result.time, threshold)));
+            }
+            json declarative = json::array();
+            if (const auto simulation = project.simulations.find(simulationId);
+                simulation != project.simulations.end()) {
+                for (const auto &measurement :
+                     openvlsi::evaluateMeasurements(simulation->second.measurements, stored->result))
+                    declarative.push_back(measurementResultJson(measurement));
+            }
+            if (measurements.empty() && declarative.empty())
+                argumentError("No captured signal matched '" + selected + "'");
+            printJson({{"simulation", stored->simulationName},
+                       {"schematic", stored->schematicName},
+                       {"run_id", stored->runId},
+                       {"analysis", stored->result.analysis},
+                       {"x_axis", stored->result.xAxis},
+                       {"time_points", stored->result.time.size()},
+                       {"measurements", measurements},
+                       {"declarative_measurements", std::move(declarative)}});
+            return 0;
+        }
+
+        if (command == "simulation-graph-add") {
+            expectArguments(args, 4, 6, "simulation-graph-add <project> <simulation> <name> [x-axis] [y-signals]");
+            const auto project = openvlsi::Project::load(args[1]);
+            const auto simulationId = resolveSimulation(project, args[2]);
+            const auto &simulation = project.simulations.at(simulationId);
+            openvlsi::SimulationGraph graph;
+            graph.name = args[3];
+            if (args.size() >= 5 && !args[4].empty() && args[4] != "-")
+                graph.xAxis = args[4];
+            if (args.size() >= 6) {
+                if (args[5] != "-")
+                    graph.ySignals = splitSignals(args[5]);
+            } else {
+                graph.ySignals = splitSignals(simulation.captureSignals);
+            }
+            openvlsi::ProjectSession session(project);
+            openvlsi::ObjectId graphId = 0;
+            session.execute("simulation-graph-add",
+                            [&](openvlsi::Project &p) { graphId = openvlsi::addSimulationGraph(p, simulationId, graph); });
+            session.save(args[1]);
+            const auto &stored = session.project().simulations.at(simulationId);
+            for (const auto &entry : stored.graphs) {
+                if (entry.id == graphId) {
+                    printJson(simulationGraphJson(entry));
+                    break;
+                }
+            }
+            return 0;
+        }
+
+        if (command == "simulation-graph-list") {
+            expectArguments(args, 3, 3, "simulation-graph-list <project> <simulation>");
+            const auto project = openvlsi::Project::load(args[1]);
+            const auto simulationId = resolveSimulation(project, args[2]);
+            json graphs = json::array();
+            for (const auto &graph : project.simulations.at(simulationId).graphs)
+                graphs.push_back(simulationGraphJson(graph));
+            printJson(graphs);
+            return 0;
+        }
+
+        if (command == "simulation-graph-info") {
+            expectArguments(args, 4, 4, "simulation-graph-info <project> <simulation> <graph>");
+            const auto project = openvlsi::Project::load(args[1]);
+            const auto simulationId = resolveSimulation(project, args[2]);
+            const auto &graph = resolveSimulationGraph(project.simulations.at(simulationId), args[3]);
+            printJson(simulationGraphJson(graph));
+            return 0;
+        }
+
+        if (command == "simulation-graph-update") {
+            expectArguments(args, 4, static_cast<std::size_t>(-1),
+                            "simulation-graph-update <project> <simulation> <graph> [name] [x-axis] [y-signals] "
+                            "[--view linear|db|phase] [--fft on|off] [--fft-window window] [--fft-points n] "
+                            "[--show-measurements on|off] [--derived name=expr] [--overlay run-id[=label]] "
+                            "[--clear-derived] [--clear-overlays] [--clear-markers]");
+            const auto project = openvlsi::Project::load(args[1]);
+            const auto simulationId = resolveSimulation(project, args[2]);
+            const auto &current = resolveSimulationGraph(project.simulations.at(simulationId), args[3]);
+            auto updated = current;
+            std::size_t positional = 0;
+            for (std::size_t index = 4; index < args.size(); ++index) {
+                const auto &option = args[index];
+                const auto value = [&]() -> const std::string & {
+                    if (index + 1 >= args.size())
+                        argumentError("Missing value for " + option);
+                    return args[++index];
+                };
+                if (option == "--view") {
+                    const auto text = value();
+                    const auto parsed = openvlsi::parseWaveformView(text);
+                    if (!parsed)
+                        argumentError("Unknown waveform view: " + text);
+                    updated.view = openvlsi::waveformViewName(*parsed);
+                } else if (option == "--fft") {
+                    updated.fft = parseToggle(value(), "--fft");
+                } else if (option == "--fft-window") {
+                    updated.fftWindow = value();
+                } else if (option == "--fft-points") {
+                    updated.fftPoints = static_cast<int>(parseInteger(value(), "FFT points"));
+                } else if (option == "--show-measurements") {
+                    updated.showMeasurements = parseToggle(value(), "--show-measurements");
+                } else if (option == "--derived") {
+                    const auto [derivedName, expression] = parseTextAssignment(value(), "derived trace");
+                    const auto found = std::find_if(
+                        updated.derivedTraces.begin(), updated.derivedTraces.end(),
+                        [&](const openvlsi::SimulationDerivedTrace &trace) { return trace.name == derivedName; });
+                    if (found == updated.derivedTraces.end())
+                        updated.derivedTraces.push_back({derivedName, expression});
+                    else
+                        found->expression = expression;
+                } else if (option == "--overlay") {
+                    const auto text = value();
+                    const auto separator = text.find('=');
+                    const auto runId = separator == std::string::npos ? text : text.substr(0, separator);
+                    const auto label = separator == std::string::npos ? std::string{} : text.substr(separator + 1);
+                    if (runId.empty())
+                        argumentError("Overlay run id must not be empty");
+                    const auto found =
+                        std::find_if(updated.overlays.begin(), updated.overlays.end(),
+                                     [&](const openvlsi::SimulationOverlayRun &overlay) { return overlay.runId == runId; });
+                    openvlsi::SimulationOverlayRun overlay{runId, label};
+                    if (found == updated.overlays.end())
+                        updated.overlays.push_back(std::move(overlay));
+                    else
+                        *found = std::move(overlay);
+                } else if (option == "--clear-derived") {
+                    updated.derivedTraces.clear();
+                } else if (option == "--clear-overlays") {
+                    updated.overlays.clear();
+                } else if (option == "--clear-markers") {
+                    updated.markers.clear();
+                } else if (option.starts_with("--")) {
+                    argumentError("Unknown simulation-graph-update option: " + option);
+                } else if (positional++ == 0) {
+                    if (!option.empty() && option != "-")
+                        updated.name = option;
+                } else if (positional == 2) {
+                    if (!option.empty() && option != "-")
+                        updated.xAxis = option;
+                } else if (positional == 3) {
+                    if (option != "-")
+                        updated.ySignals = splitSignals(option);
+                }
+            }
+            openvlsi::ProjectSession session(project);
+            const auto graphId = updated.id;
+            session.execute("simulation-graph-update",
+                            [&](openvlsi::Project &p) { openvlsi::updateSimulationGraph(p, simulationId, graphId, updated); });
+            session.save(args[1]);
+            const auto &stored = session.project().simulations.at(simulationId);
+            for (const auto &entry : stored.graphs) {
+                if (entry.id == graphId) {
+                    printJson(simulationGraphJson(entry));
+                    break;
+                }
+            }
+            return 0;
+        }
+
+        if (command == "simulation-graph-derive" || command == "simulation-graph-derive-remove") {
+            expectArguments(args, 5, 6, "simulation-graph-derive <project> <simulation> <graph> <name> [expression]");
+            const auto remove = command == "simulation-graph-derive-remove";
+            if (!remove && args.size() < 6)
+                argumentError("simulation-graph-derive needs a waveform expression");
+            auto project = openvlsi::Project::load(args[1]);
+            const auto simulationId = resolveSimulation(project, args[2]);
+            const auto current = resolveSimulationGraph(project.simulations.at(simulationId), args[3]);
+            auto updated = current;
+            if (remove) {
+                std::erase_if(updated.derivedTraces,
+                              [&](const openvlsi::SimulationDerivedTrace &trace) { return trace.name == args[4]; });
+            } else {
+                const auto found =
+                    std::find_if(updated.derivedTraces.begin(), updated.derivedTraces.end(),
+                                 [&](const openvlsi::SimulationDerivedTrace &trace) { return trace.name == args[4]; });
+                if (found == updated.derivedTraces.end())
+                    updated.derivedTraces.push_back({args[4], args[5]});
+                else
+                    found->expression = args[5];
+            }
+            openvlsi::ProjectSession session(project);
+            session.execute(remove ? "remove graph derived trace" : "add graph derived trace",
+                            [&](openvlsi::Project &p) { openvlsi::updateSimulationGraph(p, simulationId, updated.id, updated); });
+            session.save(args[1]);
+            printJson(simulationGraphJson(updated));
+            return 0;
+        }
+
+        if (command == "simulation-graph-overlay" || command == "simulation-graph-overlay-remove") {
+            expectArguments(args, 5, 6, "simulation-graph-overlay <project> <simulation> <graph> <run-id> [label]");
+            auto project = openvlsi::Project::load(args[1]);
+            const auto simulationId = resolveSimulation(project, args[2]);
+            const auto current = resolveSimulationGraph(project.simulations.at(simulationId), args[3]);
+            auto updated = current;
+            const auto remove = command == "simulation-graph-overlay-remove";
+            if (remove) {
+                std::erase_if(updated.overlays,
+                              [&](const openvlsi::SimulationOverlayRun &overlay) { return overlay.runId == args[4]; });
+            } else {
+                openvlsi::SimulationOverlayRun overlay;
+                overlay.runId = args[4];
+                overlay.label = args.size() >= 6 ? args[5] : std::string{};
+                if (overlay.label.empty()) {
+                    if (const auto stored = openvlsi::findSimulationRun(projectRootForCli(args[1]), overlay.runId);
+                        stored && !stored->variant.empty())
+                        overlay.label = stored->variant;
+                }
+                const auto found =
+                    std::find_if(updated.overlays.begin(), updated.overlays.end(),
+                                 [&](const openvlsi::SimulationOverlayRun &entry) { return entry.runId == overlay.runId; });
+                if (found == updated.overlays.end())
+                    updated.overlays.push_back(std::move(overlay));
+                else
+                    *found = std::move(overlay);
+            }
+            openvlsi::ProjectSession session(project);
+            session.execute(remove ? "remove graph overlay" : "add graph overlay",
+                            [&](openvlsi::Project &p) { openvlsi::updateSimulationGraph(p, simulationId, updated.id, updated); });
+            session.save(args[1]);
+            printJson(simulationGraphJson(updated));
+            return 0;
+        }
+
+        if (command == "simulation-graph-marker-add" || command == "simulation-graph-marker-remove") {
+            expectArguments(args, 5, static_cast<std::size_t>(-1),
+                            "simulation-graph-marker-add <project> <simulation> <graph> <label> <x> "
+                            "[--y value] [--signal name]");
+            auto project = openvlsi::Project::load(args[1]);
+            const auto simulationId = resolveSimulation(project, args[2]);
+            const auto current = resolveSimulationGraph(project.simulations.at(simulationId), args[3]);
+            auto updated = current;
+            const auto remove = command == "simulation-graph-marker-remove";
+            if (!remove && args.size() < 6)
+                argumentError("simulation-graph-marker-add needs a marker label and X value");
+            if (remove) {
+                std::erase_if(updated.markers,
+                              [&](const openvlsi::SimulationGraphMarker &marker) { return marker.label == args[4]; });
+            } else {
+                openvlsi::SimulationGraphMarker marker;
+                marker.label = args[4];
+                marker.x = parseDouble(args[5], "marker X");
+                for (std::size_t index = 6; index < args.size(); ++index) {
+                    const auto &option = args[index];
+                    const auto value = [&]() -> const std::string & {
+                        if (index + 1 >= args.size())
+                            argumentError("Missing value for " + option);
+                        return args[++index];
+                    };
+                    if (option == "--y") {
+                        marker.y = parseDouble(value(), "marker Y");
+                        marker.hasY = true;
+                    } else if (option == "--signal") {
+                        marker.signal = value();
+                    } else {
+                        argumentError("Unknown marker option: " + option);
+                    }
+                }
+                std::erase_if(updated.markers,
+                              [&](const openvlsi::SimulationGraphMarker &entry) { return entry.label == marker.label; });
+                updated.markers.push_back(std::move(marker));
+            }
+            openvlsi::ProjectSession session(project);
+            session.execute(remove ? "remove graph marker" : "add graph marker",
+                            [&](openvlsi::Project &p) { openvlsi::updateSimulationGraph(p, simulationId, updated.id, updated); });
+            session.save(args[1]);
+            printJson(simulationGraphJson(updated));
+            return 0;
+        }
+
+        if (command == "simulation-runs") {
+            expectArguments(args, 2, 3, "simulation-runs <project> [simulation]");
+            const auto project = openvlsi::Project::load(args[1]);
+            std::optional<openvlsi::ObjectId> simulationId;
+            if (args.size() >= 3)
+                simulationId = resolveSimulation(project, args[2]);
+            json runs = json::array();
+            for (const auto &run : openvlsi::listSimulationRunSummaries(projectRootForCli(args[1]), simulationId)) {
+                runs.push_back({{"run_id", run.runId},
+                                {"variant", run.variant},
+                                {"created_at", run.createdAt},
+                                {"simulation", run.simulationId},
+                                {"simulation_name", run.simulationName},
+                                {"schematic", run.schematicId},
+                                {"path", run.path.string()}});
+            }
+            printJson({{"runs", std::move(runs)}});
+            return 0;
+        }
+
+        if (command == "simulation-graph-limits") {
+            expectArguments(args, 4, 8,
+                            "simulation-graph-limits <project> <simulation> <graph> [x-min] [x-max] [y-min] [y-max]");
+            const auto project = openvlsi::Project::load(args[1]);
+            const auto simulationId = resolveSimulation(project, args[2]);
+            const auto &current = resolveSimulationGraph(project.simulations.at(simulationId), args[3]);
+            auto updated = current;
+            const auto applyLimit = [](const std::string &text, std::optional<double> &value, const char *label) {
+                if (text == "-")
+                    value.reset();
+                else
+                    value = parseDouble(text, label);
+            };
+            if (args.size() >= 5 && !args[4].empty())
+                applyLimit(args[4], updated.xMin, "x-min");
+            if (args.size() >= 6 && !args[5].empty())
+                applyLimit(args[5], updated.xMax, "x-max");
+            if (args.size() >= 7 && !args[6].empty())
+                applyLimit(args[6], updated.yMin, "y-min");
+            if (args.size() >= 8 && !args[7].empty())
+                applyLimit(args[7], updated.yMax, "y-max");
+            openvlsi::ProjectSession session(project);
+            const auto graphId = updated.id;
+            session.execute("simulation-graph-limits",
+                            [&](openvlsi::Project &p) { openvlsi::updateSimulationGraph(p, simulationId, graphId, updated); });
+            session.save(args[1]);
+            const auto &stored = session.project().simulations.at(simulationId);
+            for (const auto &entry : stored.graphs) {
+                if (entry.id == graphId) {
+                    printJson(simulationGraphJson(entry));
+                    break;
+                }
+            }
+            return 0;
+        }
+
+        if (command == "simulation-graph-delete") {
+            expectArguments(args, 4, 4, "simulation-graph-delete <project> <simulation> <graph>");
+            const auto project = openvlsi::Project::load(args[1]);
+            const auto simulationId = resolveSimulation(project, args[2]);
+            const auto &simulation = project.simulations.at(simulationId);
+            if (simulation.graphs.size() <= 1)
+                throw openvlsi::ProjectError("simulation.graph.last", "A simulation must have at least one graph");
+            const auto &graph = resolveSimulationGraph(simulation, args[3]);
+            const auto graphId = graph.id;
+            const auto graphName = graph.name;
+            openvlsi::ProjectSession session(project);
+            session.execute("simulation-graph-delete",
+                            [&](openvlsi::Project &p) { openvlsi::removeSimulationGraph(p, simulationId, graphId); });
+            session.save(args[1]);
+            printJson({{"id", graphId}, {"name", graphName}, {"simulation", simulationId}, {"deleted", true}});
+            return 0;
+        }
+
+        if (command == "script-add") {
+            expectArguments(args, 3, 4, "script-add <project> <name> [source-file]");
+            auto project = openvlsi::Project::load(args[1]);
+            std::string source;
+            if (args.size() > 3)
+                source = args[3] == "-" ? readStdin() : readTextFile(args[3]);
+            const auto id = openvlsi::createProjectReport(project, projectRootForCli(args[1]), args[2], source);
+            project.save(args[1]);
+            const auto &report = project.reports.at(id);
+            printJson({{"id", id}, {"name", report.name}, {"path", report.path}});
+            return 0;
+        }
+
+        if (command == "script-list") {
+            expectArguments(args, 2, 2, "script-list <project>");
+            const auto project = openvlsi::Project::load(args[1]);
+            printJson(projectSummary(project, args[1])["simulation_scripts"]);
+            return 0;
+        }
+
+        if (command == "script-info") {
+            expectArguments(args, 3, 3, "script-info <project> <script>");
+            const auto project = openvlsi::Project::load(args[1]);
+            const auto id = resolveReport(project, args[2]);
+            const auto &report = project.reports.at(id);
+            printJson({{"id", id}, {"name", report.name}, {"path", report.path}});
+            return 0;
+        }
+
+        if (command == "script-read") {
+            expectArguments(args, 3, 3, "script-read <project> <script>");
+            const auto project = openvlsi::Project::load(args[1]);
+            const auto id = resolveReport(project, args[2]);
+            const auto &report = project.reports.at(id);
+            printJson({{"id", id},
+                       {"name", report.name},
+                       {"path", report.path},
+                       {"source", openvlsi::readProjectReportSource(projectRootForCli(args[1]), report)}});
+            return 0;
+        }
+
+        if (command == "script-write") {
+            expectArguments(args, 4, 4, "script-write <project> <script> <source-file|->");
+            const auto project = openvlsi::Project::load(args[1]);
+            const auto id = resolveReport(project, args[2]);
+            const auto &report = project.reports.at(id);
+            const auto source = args[3] == "-" ? readStdin() : readTextFile(args[3]);
+            openvlsi::writeProjectReportSource(projectRootForCli(args[1]), report, source);
+            printJson({{"id", id}, {"name", report.name}, {"path", report.path}, {"bytes", source.size()}});
+            return 0;
+        }
+
+        if (command == "script-run") {
+            expectArguments(args, 3, 5, "script-run <project> <script> [timeout-ms] [--json]");
+            const auto project = openvlsi::Project::load(args[1]);
+            const auto id = resolveReport(project, args[2]);
+            const auto &report = project.reports.at(id);
+            bool fullJson = false;
+            std::optional<openvlsi::Coordinate> timeoutArgument;
+            for (std::size_t index = 3; index < args.size(); ++index) {
+                if (args[index] == "--json")
+                    fullJson = true;
+                else if (!timeoutArgument)
+                    timeoutArgument = parseInteger(args[index], "timeout");
+                else
+                    argumentError("Usage: openvlsi-cli script-run <project> <script> [timeout-ms] [--json]");
+            }
+            const auto timeoutMs = timeoutArgument.value_or(30000);
+            const auto timeout = std::chrono::milliseconds(std::max<openvlsi::Coordinate>(1, timeoutMs));
+            const auto result = openvlsi::runProjectReport(projectRootForCli(args[1]), report, executablePath, timeout);
+            const bool ok = !result.timedOut && result.exitCode == 0;
+            json graphs = json::array();
+            if (!result.graphsText.empty()) {
+                const auto document = json::parse(result.graphsText, nullptr, false);
+                if (!document.is_discarded() && document.contains("graphs"))
+                    graphs = document.at("graphs");
+            }
+            if (fullJson) {
+                printJson({{"id", id},
+                           {"name", report.name},
+                           {"path", report.path},
+                           {"ok", ok},
+                           {"timed_out", result.timedOut},
+                           {"exit_code", result.exitCode},
+                           {"stdout", result.stdoutText},
+                           {"stderr", result.stderrText},
+                           {"graphs", std::move(graphs)}});
+            } else {
+                json graphSummary = json::array();
+                for (const auto &graph : graphs)
+                    graphSummary.push_back({{"name", graph.value("name", "")},
+                                            {"points", graph.value("x", json::array()).size()},
+                                            {"series", graph.value("series", json::array()).size()}});
+                printJson({{"id", id},
+                           {"name", report.name},
+                           {"path", report.path},
+                           {"ok", ok},
+                           {"timed_out", result.timedOut},
+                           {"exit_code", result.exitCode},
+                           {"stdout", result.stdoutText},
+                           {"stderr", result.stderrText},
+                           {"graphs", graphSummary}});
+            }
+            if (result.timedOut)
+                throw openvlsi::ProjectError("script.timeout", "Simulation script timed out");
+            if (result.exitCode != 0)
+                throw openvlsi::ProjectError("script.failed",
+                                        "Simulation script exited with code " + std::to_string(result.exitCode));
+            return 0;
+        }
+
+        if (command == "script-delete") {
+            expectArguments(args, 3, 5, "script-delete <project> <script> [--purge] [--dry-run]");
+            auto project = openvlsi::Project::load(args[1]);
+            const auto id = resolveReport(project, args[2]);
+            const auto report = project.reports.at(id);
+            bool purge = false;
+            bool dryRun = false;
+            for (std::size_t index = 3; index < args.size(); ++index) {
+                if (args[index] == "--purge")
+                    purge = true;
+                else if (args[index] == "--dry-run")
+                    dryRun = true;
+                else
+                    argumentError("Unknown script-delete option: " + args[index]);
+            }
+            if (dryRun) {
+                printJson({{"id", id},
+                           {"name", report.name},
+                           {"path", report.path},
+                           {"deleted", false},
+                           {"dry_run", true},
+                           {"purge", purge}});
+                return 0;
+            }
+            project.reports.erase(id);
+            project.save(args[1]);
+            if (purge) {
+                std::error_code status;
+                std::filesystem::remove(projectRootForCli(args[1]) / report.path, status);
+                if (status)
+                    throw openvlsi::ProjectError("script.delete", "Unable to purge script file: " + status.message());
+            }
+            printJson({{"id", id}, {"name", report.name}, {"path", report.path}, {"deleted", true}, {"purged", purge}});
+            return 0;
+        }
+
+        if (command == "simulate" || command == "simulate-netlist") {
+            const bool fromSchematic = command == "simulate";
+            const std::size_t base = fromSchematic ? 3 : 2;
+            expectArguments(args, base, base + 5,
+                            fromSchematic
+                                ? "simulate <project> <schematic> [stop] [step] [timeout-ms] [signals] [output.json]"
+                                : "simulate-netlist <netlist-file> [stop] [step] [timeout-ms] [signals] [output.json]");
+
+            std::size_t end = args.size();
+            std::string outputPath;
+            if (end > base && std::filesystem::path(args.back()).extension() == ".json") {
+                outputPath = args.back();
+                --end;
+            }
+
+            openvlsi::SimulationRequest request;
+            openvlsi::SimulationRunContext context;
+            if (fromSchematic) {
+                const auto project = openvlsi::Project::load(args[1]);
+                const auto schematicId = resolveSchematic(project, args[2]);
+                const auto &schematic = project.schematicCells.at(schematicId);
+                request.workingDirectory = projectRootForCli(args[1]);
+                if (schematic.systemVerilogSchematic) {
+                    request.simulator = "iverilog";
+                    request.analysis = "digital";
+                    const auto source = openvlsi::buildSystemVerilogSimulationSource(project, schematicId);
+                    std::istringstream lines(source);
+                    std::string line;
+                    while (std::getline(lines, line))
+                        request.netlist.push_back(line);
+                } else if (openvlsi::schematicContainsHdl(project, schematicId)) {
+                    std::string error;
+                    if (!openvlsi::prepareMixedSignalRequest(request, project, schematicId, &error))
+                        throw openvlsi::ProjectError("simulation.mixed", error);
+                    openvlsi::applyPdkSimulationSetup(schematic.pdk, request);
+                } else {
+                    request.netlist = openvlsi::buildSimulationNetlist(project, schematicId);
+                    openvlsi::applyPdkSimulationSetup(schematic.pdk, request);
+                }
+                context.projectRoot = args[1];
+                context.projectIdentity = project.identity;
+                context.projectName = project.name;
+                context.simulationId = 0;
+                context.simulationName = "cli-" + schematic.name;
+                context.schematicId = schematicId;
+                context.schematicName = schematic.name;
+            } else {
+                std::ifstream netlist(args[1]);
+                if (!netlist)
+                    throw openvlsi::ProjectError("cli.file", "Unable to read netlist: " + args[1]);
+                if (std::filesystem::path(args[1]).extension() == ".sv") {
+                    request.simulator = "iverilog";
+                    request.analysis = "digital";
+                    request.workingDirectory = std::filesystem::current_path();
+                }
+                std::string line;
+                while (std::getline(netlist, line))
+                    request.netlist.push_back(line);
+                context.projectRoot = std::filesystem::current_path();
+                context.projectIdentity = "netlist";
+                context.projectName = "netlist";
+                context.simulationId = 0;
+                context.simulationName = std::filesystem::path(args[1]).stem().string();
+                context.schematicId = 0;
+                context.schematicName = context.simulationName;
+            }
+
+            std::size_t option = base;
+            if (end > option)
+                request.stop = parseDouble(args[option++], "stop time");
+            if (end > option)
+                request.step = parseDouble(args[option++], "step time");
+            const auto timeout = end > option ? std::chrono::milliseconds(parseInteger(args[option++], "timeout"))
+                                              : std::chrono::milliseconds(10000);
+            if (end > option)
+                request.probeSignals = splitSignals(args[option++]);
+            if (end > option)
+                throw openvlsi::ProjectError("cli.arguments", "Too many simulation arguments");
+            context.request = request;
+
+            openvlsi::SimulationRunner runner;
+            const auto result = runner.run(request, timeout, [](const openvlsi::SimulationProgress &progress) {
+                std::clog << "progress: " << progress.fraction << " " << progress.message << "\n";
+            });
+
+            std::filesystem::path storedPath;
+            std::string runId;
+            if (outputPath.empty()) {
+                const auto artifact = openvlsi::writeSimulationRun(context, result);
+                storedPath = artifact.path;
+                runId = artifact.runId;
+            } else {
+                std::ofstream output(outputPath);
+                if (!output)
+                    throw openvlsi::ProjectError("simulation.save", "Unable to open simulation result path");
+                output << openvlsi::serializeSimulationRun(context, result);
+                storedPath = outputPath;
+            }
+
+            json summary = {{"state", openvlsi::jobStateName(result.state)},
+                            {"analysis", result.analysis},
+                            {"time_points", result.time.size()},
+                            {"traces", result.traces.size()},
+                            {"stored", storedPath.string()},
+                            {"error", result.error}};
+            if (!runId.empty())
+                summary["run_id"] = runId;
+            printJson(summary);
+            if (result.state != openvlsi::JobState::succeeded)
+                throw openvlsi::ProjectError("simulation." + openvlsi::jobStateName(result.state), result.error);
+            return 0;
+        }
+
+        unknownCommand(command);
+    } catch (const openvlsi::ProjectError &error) {
+        std::cerr << "error[" << error.code() << "]: " << error.what() << "\n";
+        return 2;
+    } catch (const std::exception &error) {
+        std::cerr << "error[internal]: " << error.what() << "\n";
+        return 3;
+    }
+}

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Execute a project-level ICE simulation script and emit Markdown on stdout."""
+"""Execute a project-level OpenVLSI simulation script and emit Markdown on stdout."""
 
 from __future__ import annotations
 
@@ -15,14 +15,14 @@ import traceback
 from typing import Any, Mapping, Sequence
 
 
-def _import_icelib_sim():
+def _import_openvlsilib_sim():
     try:
-        import icepy_sim as sim
+        import openvlsipy_sim as sim
     except ImportError:
         repository_python = Path(__file__).resolve().parents[2] / "python"
         if repository_python.is_dir():
             sys.path.insert(0, str(repository_python))
-        import icepy_sim as sim
+        import openvlsipy_sim as sim
     return sim
 
 
@@ -62,7 +62,7 @@ class SimulationScriptContext:
 
     def __init__(self, project_root: Path):
         self.project_root = project_root
-        self._sim = _import_icelib_sim()
+        self._sim = _import_openvlsilib_sim()
         self._graphs: list[dict[str, Any]] = []
 
     def simulations(self):
@@ -195,7 +195,7 @@ class SimulationScriptContext:
 
 
 def _load_script(path: Path):
-    spec = importlib.util.spec_from_file_location("ice_simulation_script", path)
+    spec = importlib.util.spec_from_file_location("openvlsi_simulation_script", path)
     if spec is None or spec.loader is None:
         raise RuntimeError(f"Unable to load simulation script: {path}")
     module = importlib.util.module_from_spec(spec)
@@ -236,7 +236,7 @@ def main() -> int:
 
         if args.graph_output:
             payload = {
-                "format": "ice-simulation-script-graphs",
+                "format": "openvlsi-simulation-script-graphs",
                 "version": 1,
                 "graphs": context.graphs,
             }

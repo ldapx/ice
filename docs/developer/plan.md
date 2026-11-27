@@ -1,6 +1,6 @@
 # Documentation Guide
 
-ICE documentation is split by audience. User pages explain how to accomplish
+OpenVLSI documentation is split by audience. User pages explain how to accomplish
 tasks with the shipped interfaces. Developer pages describe contracts, build
 workflow, extension points, and project direction. This separation keeps
 task-oriented guidance short without hiding the engineering details.
@@ -10,7 +10,7 @@ task-oriented guidance short without hiding the engineering details.
 ```text
 docs/
 ├── index.md                     # landing page and audience chooser
-├── user/                        # using ICE
+├── user/                        # using OpenVLSI
 │   ├── index.md
 │   ├── getting-started.md
 │   ├── gui.md
@@ -18,11 +18,11 @@ docs/
 │   ├── simulation.md
 │   ├── symbols.md
 │   ├── packages.md              # install, resolve, and select packages
-│   ├── icepy.md
+│   ├── openvlsipy.md
 │   ├── procedural-layout.md
-│   ├── ice-mcp.md
+│   ├── openvlsi-mcp.md
 │   └── agent-cookbook.md
-├── developer/                   # building and extending ICE
+├── developer/                   # building and extending OpenVLSI
 │   ├── index.md
 │   ├── building.md
 │   ├── architecture.md
@@ -43,7 +43,7 @@ docs/
 ## User Guide
 
 Use the User Guide for anything a person does with a released or locally built
-ICE:
+OpenVLSI:
 
 - install or build prerequisites, launch the app, and create a project;
 - use the desktop workspaces, CLI commands, simulation flow, and package
@@ -72,7 +72,7 @@ package format and authoring belong in {doc}`packages`.
 ## Project
 
 The Project pages record product intent and delivery scope. {doc}`/project/vision`
-explains why ICE exists and what it should become. {doc}`/project/roadmap`
+explains why OpenVLSI exists and what it should become. {doc}`/project/roadmap`
 records capabilities, dependencies, and acceptance criteria.
 
 When pages disagree:
@@ -118,6 +118,6 @@ from `assets/layout/procedural_runner.py`. Docstrings in that module are the
 source of truth for the published builder reference. See
 {doc}`/user/procedural-layout` for the rendered page.
 
-Python bindings (`icepy`) are an optional compiled extension, so their prose
-stays in {doc}`/user/icepy`; do not make the documentation build depend on the
+Python bindings (`openvlsipy`) are an optional compiled extension, so their prose
+stays in {doc}`/user/openvlsipy`; do not make the documentation build depend on the
 extension being built.

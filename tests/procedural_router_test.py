@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Smoke-test the procedural layout Manhattan autorouter.
 
-Run from the ICE repository root:
+Run from the OpenVLSI repository root:
 
     python3 tests/procedural_router_test.py
 """
@@ -19,7 +19,7 @@ RUNNER = ROOT / "assets" / "layout" / "procedural_runner.py"
 
 
 def load_runner():
-    spec = importlib.util.spec_from_file_location("ice_procedural_runner", RUNNER)
+    spec = importlib.util.spec_from_file_location("openvlsi_procedural_runner", RUNNER)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -272,7 +272,7 @@ def test_multi_layer_two_via_hops():
 
 def test_package_connectivity_supplies_stack_and_via_sizes():
     runner = load_runner()
-    with tempfile.TemporaryDirectory(prefix="ice-connectivity-") as directory:
+    with tempfile.TemporaryDirectory(prefix="openvlsi-connectivity-") as directory:
         root = Path(directory)
         (root / "technology").mkdir()
         (root / "technology" / "connectivity.json").write_text(

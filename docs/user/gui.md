@@ -1,8 +1,8 @@
-# ICE GUI and Layout Editor
+# OpenVLSI GUI and Layout Editor
 
-This document defines the user-interface direction for the `ice` executable. It
+This document defines the user-interface direction for the `openvlsi` executable. It
 focuses on the desktop shell and the schematic/layout editing experience.
-Domain objects and mutations belong to `icelib`; the GUI presents and invokes
+Domain objects and mutations belong to `openvlsilib`; the GUI presents and invokes
 them.
 
 ## Goals
@@ -45,8 +45,8 @@ The main window should provide:
 
 The shell should manage documents and views, but not own their domain data.
 Panels should be dockable and replaceable without changing the core model. The
-`ice` executable links against `icelib` and must not duplicate the model used by
-`ice-cli`, `ice-pkg`, or `ice-mcp`.
+`openvlsi` executable links against `openvlsilib` and must not duplicate the model used by
+`openvlsi-cli`, `openvlsi-pkg`, or `openvlsi-mcp`.
 
 When no project is open, the central area shows a startup view with create and
 open project actions, recent projects, community links, and news. Each recent
@@ -68,10 +68,10 @@ The GUI should support:
 
 Creating a project asks for a project name, a project folder, and whether to
 create a folder named after the project. The project root is initialized with
-`project.icepro`, `sch/`, `lay/`, `impl/`, `sim/`, `scripts/`, `build/`,
+`project.ovpro`, `sch/`, `lay/`, `impl/`, `sim/`, `scripts/`, `build/`,
 `.gitignore`, and `AGENTS.md`. Schematics, layouts, implementation runs, and
-simulations are stored as individual JSON files with `.icesch`, `.icelay`,
-`.iceimpl`, and `.icesim` extensions.
+simulations are stored as individual JSON files with `.ovsch`, `.ovlay`,
+`.ovimpl`, and `.ovsim` extensions.
 
 Project state, view state, and transient job state should be separate:
 
@@ -83,7 +83,7 @@ Project state, view state, and transient job state should be separate:
 
 Schematic and layout file tabs are closable. Their labels include the file
 extension (`.sp` for text SPICE schematics, `.sv` for SystemVerilog source
-cells, `.icesch` for drawn schematics, `.icelay` for static layouts, or `.py`
+cells, `.ovsch` for drawn schematics, `.ovlay` for static layouts, or `.py`
 for procedural layouts) and a leading `●` while that file has unsaved edits.
 Hierarchy file entries use the same extensions; nested instance entries keep
 their instance names. If
@@ -92,7 +92,7 @@ form to open an existing file or create a new one. Opening a project starts with
 no schematic or layout file tabs open; open files from the hierarchy or the
 empty workspace form.
 
-The GUI watches `project.icepro` and the `sch/`, `lay/`, `impl/`, and `sim/` directories.
+The GUI watches `project.ovpro` and the `sch/`, `lay/`, `impl/`, and `sim/` directories.
 External changes to an open file are reflected immediately when that file has no
 unsaved GUI edits. If the same file has unsaved edits, its tab shows a warning
 and saving asks whether to preserve the local or external version for each
@@ -117,7 +117,7 @@ The implementation tabs are global views over one selected implementation
 run. Selecting a run in the left `Runs` tree changes the active run; selecting
 one of its physical stage rows switches the `Physical Design` pane. Multiple
 runs therefore do not multiply the top-level tab count. Execution remains
-available through `ice-cli implementation-run`, MCP, and `icepy`, and its output
+available through `openvlsi-cli implementation-run`, MCP, and `openvlsipy`, and its output
 is reported in the bottom Messages dock.
 
 `Physical Design` is one workspace controlled by the left `Runs` tree. The
@@ -146,7 +146,7 @@ and Layout:
   endcap, tap, antenna, and cover cells are hidden by default; changing
   visibility preserves zoom and pan.
 - **Middle:** an interactive canvas. The physical stages load their stage ODB
-  through the `ice-openroad` reader asynchronously, with the legacy DEF import
+  through the `openvlsi-openroad` reader asynchronously, with the legacy DEF import
   as a fallback. A vertical icon toolbar left of the canvas provides fit, zoom,
   find, rulers, labels, clear, and image export. Middle-button drag pans the
   canvas, and a bottom-left scale bar shows the current view in nm, µm, or mm.
@@ -208,14 +208,14 @@ netlist opens a read-only Verilog editor. The right column lists the
 run directory but are not shown in this list.
 
 Graph generation is split from the synthesis itself so a large design cannot
-block the stage. Yosys writes DOT files, then ICE renders them to SVG with a
+block the stage. Yosys writes DOT files, then OpenVLSI renders them to SVG with a
 bounded Graphviz run. When the detailed post-synthesis graph is too large to
-lay out, ICE uses a compact graph captured before memory and technology
+lay out, OpenVLSI uses a compact graph captured before memory and technology
 mapping, so the result stays viewable. If no graph can be rendered, the DOT is
 kept as a text artifact and a warning is written to the Jobs/Messages views.
 
 Floorplan reads the run's `2_tech_map.v`. If the mapped netlist is missing when
-the floorplan stage starts, ICE runs the technology-mapping step automatically
+the floorplan stage starts, OpenVLSI runs the technology-mapping step automatically
 after a successful synthesis; the **Export .v** action remains available for an
 explicit export. Its settings expose utilization
 (a fraction of the core area, so `0.5` means 50%), aspect ratio, optional
@@ -258,7 +258,7 @@ still runs and the canvases show an explanatory message. The final stage also
 attempts a KLayout merge of the routed DEF with the platform standard-cell GDS
 decks and records `final/6_final.gds`; missing decks or KLayout are reported as
 warnings. Importing a finished DEF into a layout cell is exposed through
-`ice-cli implementation-import`, MCP, and `icepy`; `ice-cli
+`openvlsi-cli implementation-import`, MCP, and `openvlsipy`; `openvlsi-cli
 implementation-export-gds` and `implementation_export_gds` rerun or redirect the
 stream export.
 
@@ -384,7 +384,7 @@ simulations. Adding a testbench asks only for its name; the source cell is
 PDK-independent. The A/MS Simulation schematic chooser excludes SystemVerilog
 testbench cells. The
 source is compiled with `iverilog`, run with `vvp`, and the generated VCD is
-loaded as the result traces. If the source has no `$dumpfile`/`$dumpvars`, ICE
+loaded as the result traces. If the source has no `$dumpfile`/`$dumpvars`, OpenVLSI
 adds a small wrapper module that dumps the design. The first successful run fills
 the **Signals to capture** list and any empty graph Y selections from the VCD
 traces.
@@ -434,7 +434,7 @@ overlays, and markers never modify the stored simulation samples.
 A drawn schematic cell can declare parameters in its **Properties** panel when
 no instance is selected. Component values may reference those parameters with
 SPICE brace expressions such as `{R}`, `{C}`, or `{W}`. When the cell is placed
-as a hierarchical block, ICE emits the declarations as `.subckt ... params:`
+as a hierarchical block, OpenVLSI emits the declarations as `.subckt ... params:`
 defaults and passes matching instance parameters from the parent as per-instance
 overrides. Selecting the block instance in the parent and editing `R` therefore
 produces `X1 ... block R=2k` while other parameters keep their defaults. A
@@ -451,7 +451,7 @@ and richer hierarchy editing.
 
 ## Layout editor
 
-ICE uses **port** for the interface of a layout cell and **pin** for a
+OpenVLSI uses **port** for the interface of a layout cell and **pin** for a
 schematic symbol or instance terminal. LEF, DEF, and GDS still use their own
 `PIN`/pin-label vocabulary at the file-format boundary.
 
@@ -490,7 +490,7 @@ number-based palette. Creating a custom layer opens a form with the layer name, 
 GDS number, color picker, fill pattern, and a live style preview. The toolbar
 next to the search field can show only drawing layers. Its single eye button
 shows all layers when any layer is hidden and switches to hide all when every
-layer is visible. Ports are intrinsic ICE annotations with a required layer
+layer is visible. Ports are intrinsic OpenVLSI annotations with a required layer
 association for routing; they are not controlled by a PDK layer filter. Layout entries use a notebook-pen icon.
 Each layout node lists its child layout/device instances, planned devices,
 rectangles, polygons, paths, and texts directly, with a distinct icon for each
@@ -535,7 +535,7 @@ can declare user-editable parameters with `layout.parameter(name, default)`.
 Parameters appear in a form above the script editor; edit a value and press
 **Regenerate layout** to apply it. `layout.device("nmos", ...)` places a device
 from the active package's device library, including generated PCells and fixed
-`.icelay` devices, with flattened geometry, prefixed ports, and device metadata
+`.ovlay` devices, with flattened geometry, prefixed ports, and device metadata
 for LVS. The call returns a placement object with absolute port rectangles
 (`placement.G`, `placement.ports["G"]`). Pass `nets={"G": "GATE", ...}` to bind
 device terminals to layout nets and keep them through extraction.
@@ -581,14 +581,14 @@ out = layout.route(
 Right-click a procedural layout and choose **Regenerate layout** (or use the
 editor's **Regenerate layout** button) to replace the generated child's geometry
 from the current script. Scripts run with `python3`, or the interpreter selected
-by `ICE_PYTHON`, with a 60-second timeout; command-line and MCP regeneration accept a timeout override. A failed run reports the Python
+by `OPENVLSI_PYTHON`, with a 60-second timeout; command-line and MCP regeneration accept a timeout override. A failed run reports the Python
 error and leaves the previous generated geometry unchanged. A `↻` marker in the
 file tab means the script changed since the last successful generation. The
 generated child is read-only; edit the script or parameter form and regenerate
 instead of drawing over generated geometry. Boolean `union`, `intersection`,
 `subtract`, and `xor` operations are available, and polygons accept hole
 contours. The layout API also exposes
-`layout.add_dummy_fill(...)`. This is intentionally PDK-agnostic: ICE forwards
+`layout.add_dummy_fill(...)`. This is intentionally PDK-agnostic: OpenVLSI forwards
 the request to the active package's `layout/dummy_fill.py` implementation after
 the user script finishes. The IHP SG13G2 package implements square dummy metal
 fill for Metal1-5 and TopMetal1-2 using rules adapted from the `gdsfill`
@@ -597,7 +597,7 @@ is used. The active PDK package's device library appears in **Devices**, with
 search, category filtering, and a geometry preview in **Properties**. See
 {doc}`procedural-layout` for the complete builder, device, and routing API.
 Parameterized devices are Python PCells generated on selection; fixed devices
-are backed by `layout/devices/fixed/*.icelay` cells. IHP SG13G2, Sky130, and GF180MCU
+are backed by `layout/devices/fixed/*.ovlay` cells. IHP SG13G2, Sky130, and GF180MCU
 packages ship their own libraries, and switching the active layout to a cell
 from another PDK loads that package's devices. Imported digital layouts appear
 in the same tab under **Digital**. The device list
@@ -605,7 +605,7 @@ starts with no selection; selecting a device switches to **Place Device** and
 shows a cursor-following preview, while activating **Select** clears the list
 selection.
 Clicking in the canvas places a layout instance of the device cell. The first
-placement creates the read-only project `.icelay` cell; repeated placements
+placement creates the read-only project `.ovlay` cell; repeated placements
 reuse that cell, so instances share parameters and geometry. Each instance
 appears separately under its parent layout in the hierarchy and can be
 selected, moved, and deleted directly in the canvas. Selecting a placed
@@ -623,10 +623,10 @@ The generator contract is
 `<pdk-root>/layout/devices/generator.py --pdk-root <package> --module <module>
 --class <class> --params-file <json> --output <json>`. IHP evaluates the
 vendored upstream PyCell sources (and KLayout's `pya` module) through
-`icepy.pcells`. Sky130 and GF180MCU use ICE-native PCells implemented directly
-with the `icepy` layout builder. ICE uses `python3` unless `ICE_PYTHON` points
+`openvlsipy.pcells`. Sky130 and GF180MCU use OpenVLSI-native PCells implemented directly
+with the `openvlsipy` layout builder. OpenVLSI uses `python3` unless `OPENVLSI_PYTHON` points
 to another interpreter. If the package generator or Python module is
-unavailable, ICE reports the error and leaves the existing geometry unchanged.
+unavailable, OpenVLSI reports the error and leaves the existing geometry unchanged.
 
 The Sky130 and GF180MCU MOS PCells draw isolated fingers, licon/mcon cuts,
 body taps, and well/implant layers. Device width is the channel width of each
@@ -687,7 +687,7 @@ its layer's PDK minimum width, and the width is not user-editable. Path points
 follow the layout grid snap setting. After the
 first path click, scroll the wheel to move the
 next segment up or down one metal
-layer; ICE inserts the corresponding via at the connection point automatically.
+layer; OpenVLSI inserts the corresponding via at the connection point automatically.
 Starting or ending a path on a port snaps to the port center and selects the
 port's drawing layer when that layer is in the routing stack. While the Path
 tool is active, every visible port shows a dot at its center; clicking a port
@@ -757,7 +757,7 @@ constant screen width as you zoom, and shows minor and major tick marks with
 distance labels along its length.
 
 The **Comment** tool (Shift+C, layout text labels) places an annotation on the
-currently selected layer. Click the canvas, enter the string, and ICE creates a
+currently selected layer. Click the canvas, enter the string, and OpenVLSI creates a
 movable text object with a 1 um nominal height. It is stored in the project and exported as
 GDSII TEXT records, but it does not create conductive geometry.
 
@@ -773,7 +773,7 @@ a single object, while still participating in connectivity, DRC, and GDSII
 BOUNDARY export like ordinary layout polygons. Text polygons are excluded from
 Boolean operations.
 
-The **Create Port** tool places a named ICE port on the selected layer. With a
+The **Create Port** tool places a named OpenVLSI port on the selected layer. With a
 single available layer that layer is used automatically; with multiple layers,
 select one before drawing. Drag from one corner to the other to define the port
 rectangle. Ports are visible as accent-colored rectangles with
@@ -781,12 +781,12 @@ centered labels, are selectable/movable/resizable, and can be locked or hidden.
 The Properties panel edits the port name, label, direction, physical side,
 layer, net, size, visibility, and lock state. Use the layer field to associate
 the port with the routing layer that automatic routing and the Path tool
-should use. Port metadata is stored in `.icelay`, including its required layer
+should use. Port metadata is stored in `.ovlay`, including its required layer
 association. GDS/OASIS export projects ports onto their associated layers;
 there are no layerless ports.
 Layout nets are created through the port net field or
-`ice-cli layout-add-net`; assign a net by name in Properties or with
-`ice-cli layout-assign-port-net`. The **Hierarchy** panel lists each layout's
+`openvlsi-cli layout-add-net`; assign a net by name in Properties or with
+`openvlsi-cli layout-assign-port-net`. The **Hierarchy** panel lists each layout's
 ports with visibility checkboxes and port details in the tooltip. Child-cell ports
 are drawn read-only inside instances; double-clicking one promotes it to a
 parent port that keeps the source instance and child port link.
@@ -794,14 +794,14 @@ parent port that keeps the source instance and child port link.
 **File → Open Layout Interchange** imports GDSII or OASIS. It asks which layer
 carries port-label TEXT records (`-1` imports text as ordinary text shapes
 only) and optionally a top-cell name for libraries with multiple candidates.
-Recovered ports are intrinsic ICE ports; the label layer is only an import
+Recovered ports are intrinsic OpenVLSI ports; the label layer is only an import
 filter.
 Structures become layout cells connected by instances; unsupported
 non-orthogonal or scaled references are flattened with a warning. OASIS is
 read and written natively without KLayout or an intermediate file.
 **Save Layout Interchange** writes the active cell as GDSII or OASIS and asks
 whether to flatten the instance hierarchy. The default preserves hierarchy.
-LEF and DEF pin exchange is available through `ice-cli` and `ice-mcp`.
+LEF and DEF pin exchange is available through `openvlsi-cli` and `openvlsi-mcp`.
 
 Select a planned device box to highlight it. Double-click it, or right-click it,
 to choose **Draw Layout Manually** or **Place Layout Device…**. Voltage/current
@@ -844,7 +844,7 @@ also lists markers from the current Physical Design preview; activating one
 switches to the physical canvas and selects and zooms to that marker.
 
 **Tools → Run LVS** compares the active layout against its source schematic.
-ICE infers the schematic from planned-device links, then from matching layout
+OpenVLSI infers the schematic from planned-device links, then from matching layout
 and schematic names, and asks for a schematic when the match is ambiguous. LVS
 checks device presence, reference names, device types, shared parameters on
 placed device instances, and net topology from planned connections. Device
@@ -1003,7 +1003,7 @@ the same project model, CLI, and MCP configuration.
 The Simulation panel **+** menu offers **Add Simulation…** and **Add Simulation
 Script…**. Simulation scripts are
 project-level Python files under `scripts/`,
-recorded in `project.icepro`, and listed as top-level entries in the simulation
+recorded in `project.ovpro`, and listed as top-level entries in the simulation
 hierarchy alongside simulations. Adding a script does not require an active
 simulation and always creates a new Python file from the built-in template.
 
@@ -1026,7 +1026,7 @@ script opens **File** first, and a run that produces graphs switches to
 and `y` arrays computed by the script. Running the script replaces the
 previously generated graph tabs and refreshes its hierarchy children. The latest
 graph payload is cached under `build/simulation-scripts/` and reloaded when the
-script is selected, including runs started from `ice-cli`.
+script is selected, including runs started from `openvlsi-cli`.
 
 Python source edits autosave after a short pause. The script **Graphs** page has
 the same vertical tool column as normal simulation graphs, with **Run**,
@@ -1072,7 +1072,7 @@ stdio.
   for the active session's prompt.
 - Agent permission requests open a modal dialog listing the options supplied by
   the agent.
-- Agent questions use ACP form elicitation. ICE advertises form support, renders
+- Agent questions use ACP form elicitation. OpenVLSI advertises form support, renders
   the requested fields (single choice, multi-select, boolean, numeric, and text),
   and returns the answers to the agent. Declining the dialog returns a declined
   elicitation response.
@@ -1088,7 +1088,7 @@ stdio.
 ACP support is built from the bundled `third_party/agentsdk-cpp` submodule into
 a shared `libagentsdk` library. Initialize the submodule with
 `git submodule update --init --recursive` before building. The installed
-`ice`/`ice-mcp` binaries load the shared library from the installation's `lib`
+`openvlsi`/`openvlsi-mcp` binaries load the shared library from the installation's `lib`
 directory.
 
 ## Styling

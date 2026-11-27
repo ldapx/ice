@@ -1,0 +1,3824 @@
+#include "layout_canvas.hpp"
+
+#include "layout_render.hpp"
+
+#include "ui_colors.hpp"
+#include "ui_helpers.hpp"
+
+#include <QApplication>
+#include <QContextMenuEvent>
+#include <QFont>
+#include <QFontMetricsF>
+#include <QGraphicsItemGroup>
+#include <QGraphicsPolygonItem>
+#include <QGraphicsRectItem>
+#include <QGraphicsScene>
+#include <QGraphicsSceneMouseEvent>
+#include <QGraphicsSimpleTextItem>
+#include <QKeyEvent>
+#include <QLineEdit>
+#include <QLineF>
+#include <QMenu>
+#include <QMouseEvent>
+#include <QPainter>
+#include <QPainterPath>
+#include <QPainterPathStroker>
+#include <QPen>
+#include <QRegularExpression>
+#include <QRegularExpressionValidator>
+#include <QResizeEvent>
+#include <QSignalBlocker>
+#include <QStyleOptionGraphicsItem>
+#include <QTimer>
+#include <QWheelEvent>
+
+#include <algorithm>
+#include <cmath>
+#include <limits>
+#include <optional>
+#include <set>
+
+namespace {
+class LayoutPreviewGraphicsItem : public QGraphicsItem {
+  public:
+    LayoutPreviewGraphicsItem(const openvlsi::LayoutPreviewModel &model, openvlsi::LayoutRenderer::LayerStyleMap styles,
+                              openvlsi::LayoutRenderer::DeviceStyleMap deviceStyles,
+                              openvlsi::LayoutRenderer::PaintOptions options)
+        : ownedModel_(model), model_(&*ownedModel_), styles_(std::move(styles)), deviceStyles_(std::move(deviceStyles)),
+          options_(std::move(options)) {
+        initialize();
+    }
+
+    LayoutPreviewGraphicsItem(const openvlsi::LayoutPreviewModel *model, openvlsi::LayoutRenderer::LayerStyleMap styles,
+                              openvlsi::LayoutRenderer::DeviceStyleMap deviceStyles,
+                              openvlsi::LayoutRenderer::PaintOptions options)
+        : model_(model), styles_(std::move(styles)), deviceStyles_(std::move(deviceStyles)),
+          options_(std::move(options)) {
+        initialize();
+    }
+
+    QRectF boundingRect() const override { return bounds_; }
+
+    void paint(QPainter *painter, const QStyleOptionGraphicsItem *, QWidget *) override {
+        if (!model_)
+            return;
+        openvlsi::LayoutRenderer::paintAtOrigin(*painter, *model_, styles_, deviceStyles_, QPointF(0.0, 0.0), options_);
+    }
+
+  private:
+    void initialize() {
+        options_.showPorts = true;
+        options_.showPlannedDevices = true;
+        options_.showLabels = false;
+        if (model_ && model_->bounds.isValid()) {
+            bounds_ = QRectF(model_->bounds.x(), -(model_->bounds.y() + model_->bounds.height()),
+                             model_->bounds.width(), model_->bounds.height());
+        }
+        setAcceptedMouseButtons(Qt::NoButton);
+    }
+
+    std::optional<openvlsi::LayoutPreviewModel> ownedModel_;
+    const openvlsi::LayoutPreviewModel *model_ = nullptr;
+    openvlsi::LayoutRenderer::LayerStyleMap styles_;
+    openvlsi::LayoutRenderer::DeviceStyleMap deviceStyles_;
+    openvlsi::LayoutRenderer::PaintOptions options_;
+    QRectF bounds_;
+};
+} // namespace
+
+QGraphicsItem *createLayoutPreviewItem(const openvlsi::LayoutPreviewModel &model,
+                                       const openvlsi::LayoutRenderer::LayerStyleMap &styles,
+                                       const openvlsi::LayoutRenderer::DeviceStyleMap &deviceStyles,
+                                       const openvlsi::LayoutRenderer::PaintOptions &options) {
+    return new LayoutPreviewGraphicsItem(model, styles, deviceStyles, options);
+}
+
+QGraphicsItem *createLayoutPreviewItem(const openvlsi::LayoutPreviewModel *model,
+                                       const openvlsi::LayoutRenderer::LayerStyleMap &styles,
+                                       const openvlsi::LayoutRenderer::DeviceStyleMap &deviceStyles,
+                                       const openvlsi::LayoutRenderer::PaintOptions &options) {
+    return new LayoutPreviewGraphicsItem(model, styles, deviceStyles, options);
+}
+
+LayoutCanvas::LayoutCanvas(QWidget *parent) : QGraphicsView(parent) {}
+LayoutCanvas::~LayoutCanvas() = default;
+
+namespace {
+QPointF constrainedPathPoint(QPointF anchor, QPointF point, bool orthogonal) {
+    if (!orthogonal)
+        return point;
+    const qreal dx = point.x() - anchor.x();
+    const qreal dy = point.y() - anchor.y();
+    if (std::abs(dx) >= std::abs(dy))
+        return {point.x(), anchor.y()};
+    return {anchor.x(), point.y()};
+}
+
+// Planned devices are schematic-level placeholders, so their canvas item draws
+// its own label and selection feedback instead of depending on a child text
+// item (which would steal drag events from the box).
+class PlannedDeviceItem : public QGraphicsItem {
+  public:
+    PlannedDeviceItem(QString name, QSizeF size) : name_(std::move(name)), size_(size) {}
+
+    QRectF boundingRect() const override { return QRectF(QPointF(0.0, 0.0), size_); }
+
+    QPainterPath shape() const override {
+        QPainterPath path;
+        path.addRect(boundingRect());
+        return path;
+    }
+
+    void paint(QPainter *painter, const QStyleOptionGraphicsItem *, QWidget *) override {
+        const auto rect = boundingRect();
+        const bool selected = isSelected();
+        const auto accent = openvlsi::uiColor(openvlsi::UiColor::Accent4);
+        const auto outline = openvlsi::uiColor(selected ? openvlsi::UiColor::Accent5 : openvlsi::UiColor::Accent4);
+        const auto radius = std::min(rect.width(), rect.height()) * 0.08;
+        painter->setRenderHint(QPainter::Antialiasing);
+
+        // Use fully opaque fill to completely cover any previous drawing
+        QColor fill = accent;
+        fill.setAlpha(255);
+        QPen pen(outline);
+        pen.setCosmetic(true);
+        pen.setWidthF(selected ? 2.5 : 1.5);
+        painter->setPen(pen);
+        painter->setBrush(fill);
+        painter->drawRoundedRect(rect, radius, radius);
+
+        if (name_.isEmpty())
+            return;
+        QFont font = painter->font();
+        qreal pixelSize = std::max<qreal>(1.0, rect.height() * 0.28);
+        font.setPixelSize(std::max(1, static_cast<int>(std::lround(pixelSize))));
+        QFontMetricsF metrics(font);
+        const auto available = rect.width() * 0.86;
+        const auto textWidth = metrics.horizontalAdvance(name_);
+        if (textWidth > available && textWidth > 0.0) {
+            pixelSize *= available / textWidth;
+            font.setPixelSize(std::max(1, static_cast<int>(std::lround(pixelSize))));
+        }
+        painter->setFont(font);
+        painter->setPen(openvlsi::uiColor(openvlsi::UiColor::Text1));
+        painter->drawText(rect, Qt::AlignCenter | Qt::TextSingleLine, name_);
+    }
+
+  private:
+    QString name_;
+    QSizeF size_;
+};
+
+class PlannedConnectionItem : public QGraphicsItem {
+  public:
+    PlannedConnectionItem(openvlsi::ObjectId id, QLineF line, QColor color)
+        : id_(id), line_(std::move(line)), color_(std::move(color)) {
+        setData(0, QVariant::fromValue<qulonglong>(id_));
+        setData(2, QStringLiteral("planned-connection"));
+        setFlag(QGraphicsItem::ItemIsSelectable);
+        setAcceptedMouseButtons(Qt::LeftButton | Qt::RightButton);
+        setZValue(-5.0);
+    }
+
+    QRectF boundingRect() const override {
+        const auto bounds = QRectF(line_.p1(), line_.p2()).normalized();
+        const auto margin = std::max(hitWidth() * 0.5, 8.0 / viewScale()) + 2.0 / viewScale();
+        return bounds.adjusted(-margin, -margin, margin, margin);
+    }
+
+    QPainterPath shape() const override {
+        QPainterPath path;
+        path.moveTo(line_.p1());
+        path.lineTo(line_.p2());
+        QPainterPathStroker stroker;
+        stroker.setWidth(hitWidth());
+        stroker.setCapStyle(Qt::RoundCap);
+        return stroker.createStroke(path);
+    }
+
+    void paint(QPainter *painter, const QStyleOptionGraphicsItem *, QWidget *) override {
+        painter->save();
+        painter->setRenderHint(QPainter::Antialiasing);
+        if (isSelected()) {
+            QColor halo = color_;
+            halo.setAlpha(90);
+            QPen haloPen(halo);
+            haloPen.setCosmetic(true);
+            haloPen.setWidthF(7.0);
+            painter->setPen(haloPen);
+            painter->drawLine(line_);
+        }
+        QPen pen(isSelected() ? openvlsi::uiColor(openvlsi::UiColor::Accent5) : color_);
+        pen.setCosmetic(true);
+        pen.setWidthF(isSelected() ? 2.5 : 1.5);
+        painter->setPen(pen);
+        painter->drawLine(line_);
+        painter->restore();
+    }
+
+  private:
+    qreal viewScale() const {
+        qreal scale = 1.0;
+        if (scene() && !scene()->views().empty())
+            scale = std::max<qreal>(1.0e-6, scene()->views().front()->transform().m11());
+        return scale;
+    }
+
+    qreal hitWidth() const { return 12.0 / viewScale(); }
+
+    openvlsi::ObjectId id_ = 0;
+    QLineF line_;
+    QColor color_;
+};
+
+class LayoutPathItem : public QGraphicsItem {
+  public:
+    LayoutPathItem(openvlsi::ObjectId id, std::vector<QPointF> points, qreal width, std::vector<qreal> segmentWidths,
+                   std::vector<bool> segmentVisible, std::vector<QColor> segmentColors,
+                   std::vector<std::vector<QColor>> pointViaColors, bool readOnly, bool pointEditable,
+                   bool endpointHandlesOnly, LayoutPathPointsMovedCallback pointsMoved,
+                   LayoutPathPointInsertedCallback pointInserted, LayoutPathPointsDeletedCallback pointsDeleted)
+        : id_(id), points_(std::move(points)), width_(std::max<qreal>(1.0, width)),
+          segmentWidths_(std::move(segmentWidths)), segmentVisible_(std::move(segmentVisible)),
+          segmentColors_(std::move(segmentColors)), pointViaColors_(std::move(pointViaColors)), readOnly_(readOnly),
+          pointEditable_(pointEditable), endpointHandlesOnly_(endpointHandlesOnly),
+          pointsMoved_(std::move(pointsMoved)), pointInserted_(std::move(pointInserted)),
+          pointsDeleted_(std::move(pointsDeleted)) {
+        for (const auto segmentWidth : segmentWidths_)
+            width_ = std::max(width_, segmentWidth);
+        setData(0, QVariant::fromValue<qulonglong>(id_));
+        setFlag(QGraphicsItem::ItemIsSelectable);
+        if (!readOnly_)
+            setFlag(QGraphicsItem::ItemIsMovable);
+        setZValue(4.0);
+        setToolTip(QStringLiteral("Path %1").arg(id_));
+    }
+
+    QRectF boundingRect() const override {
+        const auto stroke = strokedPath().boundingRect();
+        // Keep room for screen-sized handles and the enlarged hit area even
+        // when the view is zoomed out.
+        const qreal margin = std::max({qreal(64.0), width_ * 0.5 + 8.0, handleSize() * 2.0});
+        return stroke.adjusted(-margin, -margin, margin, margin);
+    }
+
+    QPainterPath shape() const override {
+        QPainterPath result = strokedPath();
+        for (int index = 0; index < static_cast<int>(points_.size()); ++index) {
+            if (index < static_cast<int>(pointViaColors_.size()) &&
+                !pointViaColors_[static_cast<std::size_t>(index)].empty())
+                result.addRect(viaRect(index));
+        }
+        // Handles stay hittable even when the path is not selected yet, so a
+        // press near a point never falls through to the rubber-band selection.
+        for (int index = 0; index < static_cast<int>(points_.size()); ++index)
+            if (handleEditable(index))
+                result.addRect(handleHitRect(index));
+        return result;
+    }
+
+    QPainterPath highlightPath() const { return strokedPath(); }
+
+    void paint(QPainter *painter, const QStyleOptionGraphicsItem *, QWidget *) override {
+        if (points_.size() < 2)
+            return;
+        painter->save();
+        painter->setRenderHint(QPainter::Antialiasing);
+        for (std::size_t start = 0; start + 1 < points_.size();) {
+            if (!segmentIsVisible(start)) {
+                ++start;
+                continue;
+            }
+            const auto color = colorForSegment(start);
+            std::size_t end = start + 1;
+            while (end + 1 < points_.size() && segmentIsVisible(end) && colorForSegment(end) == color)
+                ++end;
+            const auto path = runPath(start, end);
+            if (isSelected()) {
+                QColor halo = color;
+                halo.setAlpha(70);
+                QPen haloPen(halo);
+                haloPen.setWidthF(6.0);
+                haloPen.setJoinStyle(Qt::RoundJoin);
+                painter->setPen(haloPen);
+                painter->setBrush(Qt::NoBrush);
+                painter->drawPath(path);
+            }
+            painter->setPen(Qt::NoPen);
+            painter->setBrush(color);
+            painter->drawPath(path);
+            start = end;
+        }
+
+        for (int index = 0; index < static_cast<int>(points_.size()); ++index) {
+            if (index >= static_cast<int>(pointViaColors_.size()))
+                break;
+            for (const auto &color : pointViaColors_[static_cast<std::size_t>(index)]) {
+                QColor fill = color;
+                fill.setAlpha(180);
+                QPen viaPen(color);
+                viaPen.setCosmetic(true);
+                viaPen.setWidthF(1.0);
+                painter->setPen(viaPen);
+                painter->setBrush(fill);
+                painter->drawRect(viaRect(index));
+            }
+        }
+
+        if (!isSelected() || !pointEditingEnabled_) {
+            painter->restore();
+            return;
+        }
+        const auto accent = openvlsi::uiColor(openvlsi::UiColor::Accent5);
+        QPen handlePen(accent);
+        handlePen.setCosmetic(true);
+        handlePen.setWidthF(1.5);
+        QBrush handleBrush(openvlsi::uiColor(openvlsi::UiColor::Background1));
+        QPen selectedPen(openvlsi::uiColor(openvlsi::UiColor::Background1));
+        selectedPen.setCosmetic(true);
+        selectedPen.setWidthF(1.5);
+        QBrush selectedBrush(accent);
+        for (int index = 0; index < static_cast<int>(points_.size()); ++index) {
+            if (!handleEditable(index))
+                continue;
+            // Invert the handle colors while the point itself is selected so
+            // Delete clearly targets the selected points instead of the path.
+            const bool selected = selectedHandles_.contains(index);
+            painter->setPen(selected ? selectedPen : handlePen);
+            painter->setBrush(selected ? selectedBrush : handleBrush);
+            painter->drawRect(handleRect(index));
+        }
+        painter->restore();
+    }
+
+    void mousePressEvent(QGraphicsSceneMouseEvent *event) override {
+        if (!readOnly_ && pointEditable_) {
+            if (event->button() == Qt::LeftButton && pointEditingEnabled_) {
+                const int handle = nearestHandle(event->pos());
+                if (handle >= 0) {
+                    if (!isSelected()) {
+                        if (!(event->modifiers() & Qt::ControlModifier) && scene())
+                            scene()->clearSelection();
+                        setSelected(true);
+                    }
+                    const bool additive = event->modifiers().testFlag(Qt::ControlModifier);
+                    selectHandle(handle, additive);
+                    if (!additive)
+                        beginHandleDrag(handle);
+                    event->accept();
+                    return;
+                }
+            } else if (event->button() == Qt::RightButton && isSelected() && pointEditingEnabled_ &&
+                       !endpointHandlesOnly_) {
+                const int handle = nearestHandle(event->pos());
+                if (handle >= 0 && points_.size() > 2 && pointsDeleted_) {
+                    if (!selectedHandles_.contains(handle))
+                        selectHandle(handle, false);
+                    const auto count = selectedHandles_.size();
+                    QMenu menu;
+                    auto *remove = menu.addAction(count > 1 ? QStringLiteral("Delete %1 path points").arg(count)
+                                                            : QStringLiteral("Delete path point"));
+                    if (menu.exec(event->screenPos()) == remove) {
+                        deleteSelectedHandles();
+                        event->accept();
+                        return;
+                    }
+                }
+            }
+        }
+        QGraphicsItem::mousePressEvent(event);
+    }
+
+    void mouseMoveEvent(QGraphicsSceneMouseEvent *event) override {
+        if (!draggingHandles_.empty()) {
+            dragHandleToScenePosition(event->scenePos());
+            event->accept();
+            return;
+        }
+        QGraphicsItem::mouseMoveEvent(event);
+    }
+
+    void mouseReleaseEvent(QGraphicsSceneMouseEvent *event) override {
+        if (!draggingHandles_.empty()) {
+            endHandleDrag();
+            event->accept();
+            return;
+        }
+        QGraphicsItem::mouseReleaseEvent(event);
+    }
+
+    void mouseDoubleClickEvent(QGraphicsSceneMouseEvent *event) override {
+        if (!readOnly_ && pointEditable_ && pointEditingEnabled_ && !endpointHandlesOnly_ &&
+            event->button() == Qt::LeftButton && nearestHandle(event->pos()) < 0 && pointInserted_) {
+            const auto local = mapFromScene(event->scenePos());
+            const int segment = nearestSegment(local);
+            if (segment >= 0) {
+                const auto point = event->scenePos();
+                prepareGeometryChange();
+                points_.insert(points_.begin() + segment, mapFromScene(point));
+                std::set<int> shifted;
+                for (const auto selected : selectedHandles_)
+                    shifted.insert(selected >= segment ? selected + 1 : selected);
+                selectedHandles_ = std::move(shifted);
+                update();
+                pointInserted_(id_, segment, point);
+                event->accept();
+                return;
+            }
+        }
+        QGraphicsItem::mouseDoubleClickEvent(event);
+    }
+
+    openvlsi::ObjectId pathId() const { return id_; }
+
+    const std::set<int> &selectedHandles() const { return selectedHandles_; }
+    bool hasSelectedHandles() const { return pointEditingEnabled_ && !selectedHandles_.empty(); }
+    bool isHandleSelected(int index) const { return selectedHandles_.contains(index); }
+
+    void selectHandle(int index, bool additive = false) {
+        if (!pointEditingEnabled_ || !handleEditable(index))
+            return;
+        if (additive && !endpointHandlesOnly_) {
+            if (!selectedHandles_.erase(index))
+                selectedHandles_.insert(index);
+        } else if (additive) {
+            // Routed paths expose two endpoint handles but their geometry is
+            // regenerated from the route; keep only the endpoint being edited.
+            selectedHandles_.clear();
+            selectedHandles_.insert(index);
+        } else if (!selectedHandles_.contains(index)) {
+            selectedHandles_.clear();
+            selectedHandles_.insert(index);
+        }
+        update();
+    }
+
+    void setSelectedHandles(const std::vector<int> &indices) {
+        selectedHandles_.clear();
+        if (pointEditingEnabled_) {
+            for (const auto index : indices) {
+                if (!handleEditable(index))
+                    continue;
+                if (endpointHandlesOnly_) {
+                    selectedHandles_.clear();
+                    selectedHandles_.insert(index);
+                    break;
+                }
+                selectedHandles_.insert(index);
+            }
+        }
+        update();
+    }
+
+    void clearHandleSelection() {
+        if (selectedHandles_.empty())
+            return;
+        selectedHandles_.clear();
+        update();
+    }
+
+    bool deleteSelectedHandles() {
+        if (readOnly_ || !pointEditable_ || !pointEditingEnabled_ || selectedHandles_.empty() || !pointsDeleted_ ||
+            points_.size() <= 2 || points_.size() < selectedHandles_.size() + 2)
+            return false;
+        std::vector<int> indices;
+        indices.reserve(selectedHandles_.size());
+        for (const auto index : selectedHandles_) {
+            if (!handleEditable(index))
+                return false;
+            indices.push_back(index);
+        }
+        selectedHandles_.clear();
+        update();
+        pointsDeleted_(id_, indices);
+        return true;
+    }
+
+    void setPointEditingEnabled(bool enabled) {
+        const auto effective = enabled && pointEditable_;
+        if (pointEditingEnabled_ == effective)
+            return;
+        pointEditingEnabled_ = effective;
+        if (!effective) {
+            cancelHandleDrag();
+            clearHandleSelection();
+        }
+        update();
+    }
+
+    int handleAtScenePosition(const QPointF &scenePos) const {
+        if (readOnly_ || !pointEditable_ || !pointEditingEnabled_)
+            return -1;
+        return nearestHandle(mapFromScene(scenePos));
+    }
+
+    QPointF handleScenePosition(int index) const {
+        if (index < 0 || index >= static_cast<int>(points_.size()))
+            return {};
+        return mapToScene(points_[static_cast<std::size_t>(index)]);
+    }
+
+    void beginHandleDrag(int index) {
+        if (!pointEditingEnabled_ || !handleEditable(index))
+            return;
+        if (!selectedHandles_.contains(index)) {
+            selectedHandles_.clear();
+            selectedHandles_.insert(index);
+        }
+        draggingHandles_.clear();
+        handleDragStarts_.clear();
+        for (const auto selected : selectedHandles_) {
+            if (!handleEditable(selected))
+                continue;
+            draggingHandles_.insert(selected);
+            handleDragStarts_.emplace(selected, points_[static_cast<std::size_t>(selected)]);
+        }
+        if (!draggingHandles_.contains(index)) {
+            draggingHandles_.clear();
+            handleDragStarts_.clear();
+            return;
+        }
+        handleDragAnchor_ = points_[static_cast<std::size_t>(index)];
+        update();
+    }
+
+    void dragHandleToScenePosition(const QPointF &scenePos) {
+        if (readOnly_ || !pointEditable_ || !pointEditingEnabled_ || draggingHandles_.empty())
+            return;
+        const auto delta = mapFromScene(scenePos) - handleDragAnchor_;
+        prepareGeometryChange();
+        for (const auto &[index, start] : handleDragStarts_)
+            points_[static_cast<std::size_t>(index)] = start + delta;
+        update();
+    }
+
+    bool endHandleDrag() {
+        if (draggingHandles_.empty())
+            return false;
+        std::vector<int> indices;
+        std::vector<QPointF> positions;
+        for (const auto &[index, start] : handleDragStarts_) {
+            const auto &current = points_[static_cast<std::size_t>(index)];
+            if (current == start)
+                continue;
+            indices.push_back(index);
+            positions.push_back(mapToScene(current));
+        }
+        draggingHandles_.clear();
+        handleDragStarts_.clear();
+        if (indices.empty())
+            return false;
+        if (pointsMoved_)
+            pointsMoved_(id_, indices, positions);
+        return true;
+    }
+
+    void cancelHandleDrag() {
+        if (!handleDragStarts_.empty()) {
+            prepareGeometryChange();
+            for (const auto &[index, start] : handleDragStarts_)
+                points_[static_cast<std::size_t>(index)] = start;
+        }
+        draggingHandles_.clear();
+        handleDragStarts_.clear();
+        update();
+    }
+
+  protected:
+    QVariant itemChange(GraphicsItemChange change, const QVariant &value) override {
+        // Point selection is tied to the path's own selection. Clearing it here
+        // keeps Delete from removing a hidden point after another figure is
+        // selected or the path is deselected.
+        if (change == ItemSelectedHasChanged && !value.toBool())
+            clearHandleSelection();
+        return QGraphicsItem::itemChange(change, value);
+    }
+
+  private:
+    bool handleEditable(int index) const {
+        if (readOnly_ || !pointEditable_ || index < 0 || index >= static_cast<int>(points_.size()))
+            return false;
+        const auto pointIndex = static_cast<std::size_t>(index);
+        const bool adjacentVisible = (pointIndex > 0 && segmentIsVisible(pointIndex - 1)) ||
+                                     (pointIndex + 1 < points_.size() && segmentIsVisible(pointIndex));
+        if (!adjacentVisible)
+            return false;
+        if (endpointHandlesOnly_ && index != 0 && index != static_cast<int>(points_.size()) - 1)
+            return false;
+        return true;
+    }
+
+    bool hasVia(std::size_t index) const { return index < pointViaColors_.size() && !pointViaColors_[index].empty(); }
+
+    qreal widthForSegment(std::size_t index) const {
+        return index < segmentWidths_.size() ? std::max<qreal>(1.0, segmentWidths_[index]) : width_;
+    }
+
+    bool segmentIsVisible(std::size_t index) const { return index >= segmentVisible_.size() || segmentVisible_[index]; }
+
+    QPainterPath runPath(std::size_t start, std::size_t end) const {
+        QPainterPath path;
+        if (start >= points_.size() || end >= points_.size() || start >= end)
+            return path;
+        // Extend runs that touch a via so the copper reaches the far edge of
+        // the via square instead of stopping at its center.
+        std::vector<QPointF> run;
+        std::vector<qreal> runWidths;
+        run.reserve(end - start + 1);
+        runWidths.reserve(end - start);
+        for (std::size_t index = start; index <= end; ++index)
+            run.push_back(points_[index]);
+        for (std::size_t index = start; index < end; ++index)
+            runWidths.push_back(widthForSegment(index));
+        if (runWidths.empty())
+            return path;
+        const auto startExtension = runWidths.front() * 0.5;
+        const auto endExtension = runWidths.back() * 0.5;
+        if (hasVia(start)) {
+            const auto delta = run[1] - run[0];
+            const auto length = std::hypot(delta.x(), delta.y());
+            if (length > 0.0)
+                run.front() -= delta * (startExtension / length);
+        }
+        if (hasVia(end)) {
+            const auto delta = run.back() - run[run.size() - 2];
+            const auto length = std::hypot(delta.x(), delta.y());
+            if (length > 0.0)
+                run.back() += delta * (endExtension / length);
+        }
+        const auto outline = layoutPathOutline(run, runWidths);
+        if (!outline.isEmpty())
+            path.addPolygon(outline);
+        return path;
+    }
+
+    QColor colorForSegment(std::size_t index) const {
+        if (segmentColors_.empty())
+            return openvlsi::uiColor(openvlsi::UiColor::Accent4);
+        return segmentColors_[std::min(index, segmentColors_.size() - 1)];
+    }
+
+    QPainterPath strokedPath() const {
+        QPainterPath result;
+        for (std::size_t start = 0; start + 1 < points_.size();) {
+            if (!segmentIsVisible(start)) {
+                ++start;
+                continue;
+            }
+            const auto color = colorForSegment(start);
+            std::size_t end = start + 1;
+            while (end + 1 < points_.size() && segmentIsVisible(end) && colorForSegment(end) == color)
+                ++end;
+            result.addPath(runPath(start, end));
+            start = end;
+        }
+        return result;
+    }
+
+    qreal handleSize() const {
+        qreal scale = 1.0;
+        if (scene() && !scene()->views().empty())
+            scale = std::max<qreal>(1.0e-6, scene()->views().front()->transform().m11());
+        return 8.0 / scale;
+    }
+
+    QRectF handleRect(int index) const {
+        const auto size = handleSize();
+        return QRectF(points_[static_cast<std::size_t>(index)].x() - size * 0.5,
+                      points_[static_cast<std::size_t>(index)].y() - size * 0.5, size, size);
+    }
+
+    QRectF handleHitRect(int index) const {
+        const auto pad = handleSize();
+        return handleRect(index).adjusted(-pad, -pad, pad, pad);
+    }
+
+    QRectF viaRect(int index) const {
+        const auto half = width_ * 0.5;
+        return QRectF(points_[static_cast<std::size_t>(index)].x() - half,
+                      points_[static_cast<std::size_t>(index)].y() - half, width_, width_);
+    }
+
+    int nearestHandle(const QPointF &position) const {
+        int nearest = -1;
+        qreal nearestDistance = std::numeric_limits<qreal>::max();
+        for (int index = 0; index < static_cast<int>(points_.size()); ++index) {
+            if (!handleEditable(index) || !handleHitRect(index).contains(position))
+                continue;
+            const auto distance = QLineF(position, points_[static_cast<std::size_t>(index)]).length();
+            if (distance < nearestDistance) {
+                nearestDistance = distance;
+                nearest = index;
+            }
+        }
+        return nearest;
+    }
+
+    int nearestSegment(const QPointF &position) const {
+        if (points_.size() < 2)
+            return -1;
+        qreal bestDistance = std::numeric_limits<qreal>::max();
+        int bestIndex = -1;
+        for (std::size_t index = 1; index < points_.size(); ++index) {
+            if (!segmentIsVisible(index - 1))
+                continue;
+            const auto start = points_[index - 1];
+            const auto end = points_[index];
+            const auto delta = end - start;
+            const auto lengthSquared = QPointF::dotProduct(delta, delta);
+            const auto fraction =
+                lengthSquared > 0.0
+                    ? std::clamp(QPointF::dotProduct(position - start, delta) / lengthSquared, qreal(0.0), qreal(1.0))
+                    : qreal(0.0);
+            const auto candidate = start + delta * fraction;
+            const auto distance = QLineF(position, candidate).length();
+            if (distance < bestDistance) {
+                bestDistance = distance;
+                bestIndex = static_cast<int>(index);
+            }
+        }
+        return bestDistance <= width_ * 0.5 + handleSize() ? bestIndex : -1;
+    }
+
+    openvlsi::ObjectId id_ = 0;
+    std::vector<QPointF> points_;
+    qreal width_ = 1.0;
+    std::vector<qreal> segmentWidths_;
+    std::vector<bool> segmentVisible_;
+    std::vector<QColor> segmentColors_;
+    std::vector<std::vector<QColor>> pointViaColors_;
+    bool readOnly_ = false;
+    bool pointEditable_ = true;
+    bool endpointHandlesOnly_ = false;
+    bool pointEditingEnabled_ = true;
+    std::set<int> selectedHandles_;
+    std::set<int> draggingHandles_;
+    std::map<int, QPointF> handleDragStarts_;
+    QPointF handleDragAnchor_;
+    LayoutPathPointsMovedCallback pointsMoved_;
+    LayoutPathPointInsertedCallback pointInserted_;
+    LayoutPathPointsDeletedCallback pointsDeleted_;
+};
+
+class LayoutResizeHandleItem : public QGraphicsItem {
+  public:
+    LayoutResizeHandleItem(openvlsi::ObjectId shapeId, int handle, bool polygonVertex = false) {
+        setData(3, polygonVertex ? QStringLiteral("polygon-handle") : QStringLiteral("resize-handle"));
+        setData(4, QVariant::fromValue<qulonglong>(shapeId));
+        setData(5, handle);
+        setZValue(20.0);
+        setFlag(QGraphicsItem::ItemIgnoresTransformations);
+        setAcceptedMouseButtons(Qt::NoButton);
+        setVisible(false);
+    }
+
+    QRectF boundingRect() const override { return QRectF(-12.0, -12.0, 24.0, 24.0); }
+
+    QPainterPath shape() const override {
+        QPainterPath path;
+        path.addRect(boundingRect());
+        return path;
+    }
+
+    void paint(QPainter *painter, const QStyleOptionGraphicsItem *, QWidget *) override {
+        const auto accent = openvlsi::uiColor(openvlsi::UiColor::Accent5);
+        QPen pen(accent);
+        pen.setCosmetic(true);
+        pen.setWidthF(1.5);
+        painter->setPen(pen);
+        painter->setBrush(openvlsi::uiColor(openvlsi::UiColor::Background1));
+        painter->drawRect(QRectF(-4.0, -4.0, 8.0, 8.0));
+    }
+};
+
+QString formatLayoutLength(qreal length) {
+    if (length >= 1000000.0)
+        return QStringLiteral("%1 mm").arg(length / 1000000.0, 0, 'g', 4);
+    if (length >= 1000.0)
+        return QStringLiteral("%1 um").arg(length / 1000.0, 0, 'g', 4);
+    if (length >= 1.0)
+        return QStringLiteral("%1 nm").arg(length, 0, 'g', 4);
+    return QStringLiteral("%1 pm").arg(length * 1000.0, 0, 'g', 4);
+}
+
+class LayoutRulerItem : public QGraphicsItem {
+  public:
+    LayoutRulerItem() {
+        setZValue(50.0);
+        setFlag(QGraphicsItem::ItemUsesExtendedStyleOption);
+        setAcceptedMouseButtons(Qt::NoButton);
+    }
+
+    void setLine(const QLineF &line) {
+        prepareGeometryChange();
+        line_ = line;
+        update();
+    }
+
+    void prepareForScaleChange() { prepareGeometryChange(); }
+
+    QRectF boundingRect() const override {
+        const auto margin = 160.0 / viewScale();
+        return QRectF(line_.p1(), line_.p2()).normalized().adjusted(-margin, -margin, margin, margin);
+    }
+
+    QPainterPath shape() const override { return {}; }
+
+    void paint(QPainter *painter, const QStyleOptionGraphicsItem *option, QWidget *) override {
+        const auto scale = viewScale();
+        if (scale <= 0.0 || line_.length() < 1.0e-9)
+            return;
+        const auto color = openvlsi::uiColor(openvlsi::UiColor::Accent1);
+        painter->setRenderHint(QPainter::Antialiasing);
+        QPen linePen(color);
+        linePen.setCosmetic(true);
+        linePen.setWidthF(2.0);
+        painter->setPen(linePen);
+        painter->drawLine(line_);
+
+        const auto delta = line_.p2() - line_.p1();
+        const auto length = std::hypot(delta.x(), delta.y());
+        if (length <= 0.0)
+            return;
+        const auto direction = delta / length;
+        const QPointF normal(-direction.y(), direction.x());
+
+        const auto target = 80.0 / scale;
+        const auto magnitude = std::pow(10.0, std::floor(std::log10(std::max(target, 1.0e-12))));
+        const auto normalized = target / magnitude;
+        const auto factor = normalized <= 1.0 ? 1.0 : normalized <= 2.0 ? 2.0 : normalized <= 5.0 ? 5.0 : 10.0;
+        const auto major = magnitude * factor;
+        const auto minor = major / 5.0;
+        if (minor <= 0.0)
+            return;
+
+        const auto minorTick = 4.0 / scale;
+        const auto majorTick = 9.0 / scale;
+        QPen tickPen(color);
+        tickPen.setCosmetic(true);
+        tickPen.setWidthF(1.0);
+
+        qreal t0 = 0.0;
+        qreal t1 = 1.0;
+        const auto exposed = option ? option->exposedRect : boundingRect();
+        const auto clipAxis = [&](qreal origin, qreal step, qreal low, qreal high) {
+            if (std::abs(step) < 1.0e-12)
+                return origin >= low && origin <= high;
+            qreal a = (low - origin) / step;
+            qreal b = (high - origin) / step;
+            if (a > b)
+                std::swap(a, b);
+            t0 = std::max(t0, a);
+            t1 = std::min(t1, b);
+            return t0 <= t1;
+        };
+        if (!clipAxis(line_.p1().x(), delta.x(), exposed.left(), exposed.right()) ||
+            !clipAxis(line_.p1().y(), delta.y(), exposed.top(), exposed.bottom()))
+            return;
+
+        const auto startDistance = t0 * length;
+        const auto endDistance = t1 * length;
+        const auto firstTick = static_cast<long long>(std::floor(startDistance / minor));
+        const auto lastTick = static_cast<long long>(std::ceil(endDistance / minor));
+        constexpr long long maxTicks = 2000;
+        painter->setPen(tickPen);
+        long long drawn = 0;
+        for (long long tick = firstTick; tick <= lastTick && drawn < maxTicks; ++tick, ++drawn) {
+            const auto distance = static_cast<qreal>(tick) * minor;
+            if (distance < -1.0e-9 || distance > length + 1.0e-9)
+                continue;
+            const auto point = line_.p1() + direction * distance;
+            const bool isMajor = tick % 5 == 0;
+            const auto tickLength = isMajor ? majorTick : minorTick;
+            painter->drawLine(point, point + normal * tickLength);
+            if (isMajor && distance > minor * 0.5 && distance < length - minor * 0.5)
+                drawLabel(painter, point + normal * (majorTick + 5.0 / scale), formatLayoutLength(distance), scale,
+                          false);
+        }
+
+        painter->setPen(linePen);
+        painter->drawLine(line_.p1() - normal * majorTick, line_.p1() + normal * majorTick);
+        painter->drawLine(line_.p2() - normal * majorTick, line_.p2() + normal * majorTick);
+        drawLabel(painter, (line_.p1() + line_.p2()) * 0.5 - normal * (18.0 / scale),
+                  QStringLiteral("%1 nm").arg(length, 0, 'f', 1), scale, true);
+    }
+
+  private:
+    static void drawLabel(QPainter *painter, const QPointF &scenePos, const QString &text, qreal scale,
+                          bool emphasized) {
+        painter->save();
+        painter->translate(scenePos);
+        painter->scale(1.0 / scale, 1.0 / scale);
+        QFont font = painter->font();
+        font.setPointSizeF(emphasized ? 9.0 : 8.0);
+        font.setBold(emphasized);
+        painter->setFont(font);
+        const auto metrics = painter->fontMetrics();
+        const auto width = metrics.horizontalAdvance(text);
+        const auto height = metrics.height();
+        painter->setPen(openvlsi::uiColor(openvlsi::UiColor::Accent1));
+        painter->drawText(QRectF(-width * 0.5 - 2.0, -height * 0.5, width + 4.0, height), Qt::AlignCenter, text);
+        painter->restore();
+    }
+
+    qreal viewScale() const {
+        if (scene() && !scene()->views().empty())
+            return std::max<qreal>(1.0e-6, scene()->views().front()->transform().m11());
+        return 1.0;
+    }
+
+    QLineF line_;
+};
+
+qreal pathCross(const QPointF &a, const QPointF &b) { return a.x() * b.y() - a.y() * b.x(); }
+
+QPointF pathUnit(const QPointF &vector) {
+    const auto length = std::hypot(vector.x(), vector.y());
+    if (length <= 1.0e-12)
+        return {};
+    return vector / length;
+}
+
+void appendPathJoin(std::vector<QPointF> &side, const QPointF &previous, const QPointF &corner, const QPointF &next,
+                    qreal incomingHalfWidth, qreal outgoingHalfWidth, qreal sideSign) {
+    const auto incoming = pathUnit(corner - previous);
+    const auto outgoing = pathUnit(next - corner);
+    if (incoming.isNull() || outgoing.isNull()) {
+        side.push_back(corner);
+        return;
+    }
+    const QPointF incomingNormal(-incoming.y() * incomingHalfWidth * sideSign,
+                                 incoming.x() * incomingHalfWidth * sideSign);
+    const QPointF outgoingNormal(-outgoing.y() * outgoingHalfWidth * sideSign,
+                                 outgoing.x() * outgoingHalfWidth * sideSign);
+    const auto determinant = pathCross(incoming, outgoing);
+    if (std::abs(determinant) <= 1.0e-12) {
+        if (QPointF::dotProduct(incoming, outgoing) > 0.0) {
+            side.push_back(corner + incomingNormal);
+            // A width change on a straight run is a step, not a taper.
+            if (std::abs(incomingHalfWidth - outgoingHalfWidth) > 1.0e-12)
+                side.push_back(corner + outgoingNormal);
+        } else {
+            // A 180-degree reversal has no single-side intersection.
+            side.push_back(corner + incomingNormal);
+            side.push_back(corner + outgoingNormal);
+        }
+        return;
+    }
+
+    // Intersect the two offset lines. KLayout limits the miter to half the
+    // path width on either side; sharper corners become a two-point cut-off,
+    // which avoids long elbows on acute angles.
+    const auto shift = outgoingNormal - incomingNormal;
+    const auto l1 = pathCross(shift, outgoing) / determinant;
+    const auto l2 = pathCross(incomingNormal - outgoingNormal, incoming) / determinant;
+    const auto halfWidth = std::max(incomingHalfWidth, outgoingHalfWidth);
+    const auto l1min = -QLineF(previous, corner).length() - halfWidth;
+    const auto l2min = -QLineF(corner, next).length() - halfWidth;
+    constexpr qreal epsilon = 1.0e-9;
+    if (l1 < l1min - epsilon || l2 < l2min - epsilon) {
+        // The segments are too short to intersect cleanly. Keep the outline
+        // confined by walking through the corner point.
+        side.push_back(corner + incomingNormal);
+        side.push_back(corner);
+        side.push_back(corner + outgoingNormal);
+    } else if (l1 <= incomingHalfWidth + epsilon && l2 <= outgoingHalfWidth + epsilon) {
+        side.push_back(corner + incomingNormal + incoming * l1);
+    } else {
+        side.push_back(corner + incomingNormal + incoming * std::min(incomingHalfWidth, l1));
+        side.push_back(corner + outgoingNormal - outgoing * std::min(outgoingHalfWidth, l2));
+    }
+}
+} // namespace
+
+QPolygonF layoutPathOutline(const std::vector<QPointF> &input, const std::vector<qreal> &inputWidths) {
+    struct Segment {
+        QPointF start;
+        QPointF end;
+        qreal width = 0.0;
+    };
+    std::vector<Segment> segments;
+    segments.reserve(input.size() > 0 ? input.size() - 1 : 0);
+    for (std::size_t index = 0; index + 1 < input.size(); ++index) {
+        const auto width =
+            index < inputWidths.size() ? inputWidths[index] : (inputWidths.empty() ? 0.0 : inputWidths.back());
+        if (width <= 0.0)
+            return {};
+        if (QLineF(input[index], input[index + 1]).length() <= 1.0e-9)
+            continue;
+        segments.push_back({input[index], input[index + 1], width});
+    }
+    if (segments.empty())
+        return {};
+
+    std::vector<QPointF> left;
+    std::vector<QPointF> right;
+    left.reserve(segments.size() + 2);
+    right.reserve(segments.size() + 2);
+
+    const auto firstHalfWidth = segments.front().width * 0.5;
+    const auto firstDirection = pathUnit(segments.front().end - segments.front().start);
+    const QPointF firstNormal(-firstDirection.y() * firstHalfWidth, firstDirection.x() * firstHalfWidth);
+    left.push_back(segments.front().start + firstNormal);
+    right.push_back(segments.front().start - firstNormal);
+    for (std::size_t index = 1; index < segments.size(); ++index) {
+        const auto &previous = segments[index - 1];
+        const auto &current = segments[index];
+        appendPathJoin(left, previous.start, current.start, current.end, previous.width * 0.5, current.width * 0.5,
+                       1.0);
+        appendPathJoin(right, previous.start, current.start, current.end, previous.width * 0.5, current.width * 0.5,
+                       -1.0);
+    }
+    const auto lastHalfWidth = segments.back().width * 0.5;
+    const auto lastDirection = pathUnit(segments.back().end - segments.back().start);
+    const QPointF lastNormal(-lastDirection.y() * lastHalfWidth, lastDirection.x() * lastHalfWidth);
+    left.push_back(segments.back().end + lastNormal);
+    right.push_back(segments.back().end - lastNormal);
+
+    QPolygonF outline;
+    outline.reserve(static_cast<int>(left.size() + right.size()));
+    for (const auto &point : left)
+        outline << point;
+    for (auto it = right.rbegin(); it != right.rend(); ++it)
+        outline << *it;
+    return outline;
+}
+
+QPolygonF layoutPathOutline(const std::vector<QPointF> &input, qreal width) {
+    std::vector<qreal> widths;
+    if (input.size() > 1)
+        widths.assign(input.size() - 1, width);
+    return layoutPathOutline(input, widths);
+}
+
+QPointF layoutResizeHandlePosition(const QRectF &rect, int handle) {
+    switch (handle) {
+    case 0:
+        return rect.topLeft();
+    case 1:
+        return rect.topRight();
+    case 2:
+        return rect.bottomLeft();
+    case 3:
+        return rect.bottomRight();
+    case 4:
+        return QPointF(rect.left(), rect.center().y());
+    case 5:
+        return QPointF(rect.right(), rect.center().y());
+    case 6:
+        return QPointF(rect.center().x(), rect.top());
+    default:
+        return QPointF(rect.center().x(), rect.bottom());
+    }
+}
+
+QGraphicsItem *createLayoutResizeHandleItem(openvlsi::ObjectId shapeId, int handle) {
+    return new LayoutResizeHandleItem(shapeId, handle);
+}
+
+QGraphicsItem *createLayoutPolygonHandleItem(openvlsi::ObjectId shapeId, int index) {
+    return new LayoutResizeHandleItem(shapeId, index, true);
+}
+
+namespace {
+
+class LayoutCanvasImpl : public LayoutCanvas {
+  public:
+    explicit LayoutCanvasImpl(QWidget *parent = nullptr) : LayoutCanvas(parent) {
+        setScene(new QGraphicsScene(this));
+        connect(scene(), &QGraphicsScene::selectionChanged, this, [this] { updateResizeHandleVisibility(nullptr); });
+        setSceneRect(-1.0e9, -1.0e9, 2.0e9, 2.0e9);
+        setRenderHint(QPainter::Antialiasing);
+        setDragMode(QGraphicsView::RubberBandDrag);
+        setTransformationAnchor(QGraphicsView::AnchorUnderMouse);
+        setViewportUpdateMode(QGraphicsView::FullViewportUpdate);
+        setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        setBackgroundBrush(openvlsi::uiColor(openvlsi::UiColor::Background2));
+        setAlignment(Qt::AlignLeft | Qt::AlignTop);
+        applyNavigationTransform();
+        // Typing a size while drawing commits once the user stops typing, so
+        // "281,2875" produces the rectangle without an explicit Enter.
+        rectangleCommitTimer_ = new QTimer(this);
+        rectangleCommitTimer_->setSingleShot(true);
+        rectangleCommitTimer_->setInterval(900);
+        connect(rectangleCommitTimer_, &QTimer::timeout, this, [this] { commitTypedRectangle(); });
+    }
+
+    void setTool(Tool tool) override {
+        clearLayoutNetHighlight();
+        // A mode switch starts a fresh click cycle.
+        hasLastFigureClick_ = false;
+        cyclingFigureId_ = 0;
+        if (readOnly_ && tool != Tool::select)
+            tool = Tool::select;
+        cancelManualPathDrag();
+        cancelPolygonDrag();
+        resizingItem_ = nullptr;
+        draggingInstance_ = nullptr;
+        movingItem_ = nullptr;
+        if (tool != Tool::path)
+            finishPath();
+        if (tool != Tool::polygon)
+            finishPolygon();
+        if (tool != Tool::ruler)
+            clearRuler();
+        if (tool != Tool::rectangle)
+            cancelRectangleDrawing();
+        tool_ = tool;
+        if (tool_ == Tool::select)
+            unsetCursor();
+        else if (tool_ == Tool::move)
+            setCursor(Qt::SizeAllCursor);
+        else
+            setCursor(Qt::CrossCursor);
+        applyInteractionState();
+        syncRectangleSizeEditor();
+        viewport()->update();
+    }
+
+    void refreshInteractionState() override { applyInteractionState(); }
+
+    void applyInteractionState() {
+        if (!scene())
+            return;
+        const bool moveMode = tool_ == Tool::move && !readOnly_;
+        const bool selectMode = tool_ == Tool::select && !readOnly_;
+        for (auto *item : scene()->items()) {
+            if (auto *path = dynamic_cast<LayoutPathItem *>(item))
+                path->setPointEditingEnabled(selectMode);
+            if (!item->data(0).isValid() || item->data(0).toULongLong() == 0)
+                continue;
+            if (!(item->flags() & QGraphicsItem::ItemIsSelectable))
+                continue;
+            const bool movable = moveMode && item->data(2).toString() != QStringLiteral("planned-connection");
+            item->setFlag(QGraphicsItem::ItemIsMovable, movable);
+        }
+        updateResizeHandleVisibility(nullptr);
+    }
+
+    void setReadOnly(bool readOnly) override {
+        if (readOnly_ != readOnly) {
+            cancelManualPathDrag();
+            cancelPolygonDrag();
+        }
+        readOnly_ = readOnly;
+        if (readOnly_) {
+            polygonActive_ = false;
+            polygonPoints_.clear();
+            polygonCursor_ = {};
+            selectedLayoutInstance_ = 0;
+            applyLayoutInstanceSelection();
+            setTool(Tool::select);
+        }
+    }
+
+    bool isReadOnly() const override { return readOnly_; }
+    Tool currentTool() const override { return tool_; }
+
+    void setGridVisible(bool visible) override {
+        gridVisible_ = visible;
+        viewport()->update();
+    }
+
+    void setSnapToGrid(bool enabled) override { snapToGrid_ = enabled; }
+
+    void setGridSpacing(qreal spacing) override {
+        if (spacing > 0.0)
+            gridSpacing_ = spacing;
+    }
+
+    void setDevicePreview(const openvlsi::LayoutDeviceCell *cell) override {
+        devicePreview_ = cell;
+        devicePreviewModel_ = cell ? openvlsi::buildLayoutDevicePreviewModel(*cell) : openvlsi::LayoutPreviewModel{};
+        viewport()->update();
+    }
+
+    void setDevicePreviewModel(const openvlsi::LayoutPreviewModel &model) override {
+        devicePreview_ = nullptr;
+        devicePreviewModel_ = model;
+        viewport()->update();
+    }
+
+    void setDeviceLayerStyles(const std::map<std::pair<int, int>, LayerStyle> &styles) override {
+        deviceLayerStyles_ = styles;
+        viewport()->update();
+    }
+
+    void restoreLayoutInstanceSelection() override { applyLayoutInstanceSelection(); }
+
+    LayoutSelectionState selectionState() const override {
+        LayoutSelectionState state;
+        state.instance = selectedLayoutInstance_;
+        state.center = centerScene_;
+        state.zoom = zoom_;
+        if (!scene())
+            return state;
+        for (auto *item : scene()->items()) {
+            if (!item->isSelected())
+                continue;
+            const auto kind = item->data(3).toString();
+            if (kind == QStringLiteral("resize-handle") || kind == QStringLiteral("polygon-handle") ||
+                item->data(1).toString() == QStringLiteral("layout-instance"))
+                continue;
+            if (auto *path = dynamic_cast<LayoutPathItem *>(item); path && path->hasSelectedHandles()) {
+                state.pathShape = path->pathId();
+                state.pathPoints.assign(path->selectedHandles().begin(), path->selectedHandles().end());
+            }
+            if (!item->data(0).isValid())
+                continue;
+            const auto id = static_cast<openvlsi::ObjectId>(item->data(0).toULongLong());
+            if (id != 0 && std::find(state.figureIds.begin(), state.figureIds.end(), id) == state.figureIds.end())
+                state.figureIds.push_back(id);
+        }
+        return state;
+    }
+
+    void restoreSelectionState(const LayoutSelectionState &state, bool restoreView) override {
+        if (!scene())
+            return;
+        {
+            QSignalBlocker blocker(scene());
+            scene()->clearSelection();
+            const std::set<openvlsi::ObjectId> figures(state.figureIds.begin(), state.figureIds.end());
+            for (auto *item : scene()->items()) {
+                if (!item->data(0).isValid() || !(item->flags() & QGraphicsItem::ItemIsSelectable))
+                    continue;
+                const auto kind = item->data(3).toString();
+                if (kind == QStringLiteral("resize-handle") || kind == QStringLiteral("polygon-handle") ||
+                    item->data(1).toString() == QStringLiteral("layout-instance"))
+                    continue;
+                const auto id = static_cast<openvlsi::ObjectId>(item->data(0).toULongLong());
+                if (figures.contains(id))
+                    item->setSelected(true);
+            }
+            selectedLayoutInstance_ = state.instance;
+            applyLayoutInstanceSelection();
+            if (state.pathShape != 0) {
+                if (auto *path = findPathItem(state.pathShape)) {
+                    path->setSelected(true);
+                    path->setSelectedHandles(state.pathPoints);
+                }
+            }
+        }
+        if (restoreView && state.zoom > 0.0) {
+            zoom_ = std::clamp(state.zoom, qreal(1.0e-6), qreal(1.0e6));
+            centerScene_ = state.center;
+            applyNavigationTransform();
+        }
+        viewport()->update();
+    }
+
+    // Mirrors a hierarchy selection onto the canvas. Instance ids are unique
+    // across the project, so the scene only needs the id to find its group.
+    void selectLayoutInstance(openvlsi::ObjectId instanceId) override {
+        if (readOnly_ || !scene())
+            return;
+        scene()->clearSelection();
+        selectedLayoutInstance_ = instanceId;
+        applyLayoutInstanceSelection();
+        viewport()->update();
+    }
+
+    void setDevicePlacementCallback(std::function<void(QPointF)> callback) override {
+        devicePlacementRequested_ = std::move(callback);
+    }
+
+    void setInstanceActivatedCallback(std::function<void(openvlsi::ObjectId)> callback) override {
+        instanceActivated_ = std::move(callback);
+    }
+
+    void setInstanceSelectionCallback(std::function<void(openvlsi::ObjectId)> callback) override {
+        instanceSelectionChanged_ = std::move(callback);
+    }
+
+    openvlsi::ObjectId selectedLayoutInstance() const override { return selectedLayoutInstance_; }
+
+    void setShapeActivatedCallback(std::function<void(openvlsi::ObjectId)> callback) override {
+        shapeActivated_ = std::move(callback);
+    }
+
+    void setFigureContextActionCallback(std::function<void(openvlsi::ObjectId, FigureContextAction)> callback) override {
+        figureContextAction_ = std::move(callback);
+    }
+
+    void setEmptyContextMenuCallback(std::function<void(const QPoint &globalPos)> callback) override {
+        emptyContextMenu_ = std::move(callback);
+    }
+
+    QPointF cursorScenePosition() const override { return cursorScenePosition_; }
+
+    void clearLayoutNetHighlight() override {
+        if (!scene())
+            return;
+        std::vector<QGraphicsItem *> overlays;
+        for (auto *item : scene()->items()) {
+            if (item->data(0).toString() == QStringLiteral("net-highlight"))
+                overlays.push_back(item);
+        }
+        for (auto *item : overlays) {
+            scene()->removeItem(item);
+            delete item;
+        }
+    }
+
+    void highlightLayoutNet(const std::vector<openvlsi::ObjectId> &shapeIds, const std::vector<openvlsi::ObjectId> &connectionIds,
+                            const std::vector<openvlsi::ObjectId> &plannedDeviceIds) override {
+        clearLayoutNetHighlight();
+        if (!scene())
+            return;
+
+        const QColor highlightColor(Qt::white);
+        QPen shapePen(highlightColor);
+        shapePen.setCosmetic(true);
+        shapePen.setWidthF(2.0);
+        QPen devicePen(highlightColor);
+        devicePen.setCosmetic(true);
+        devicePen.setWidthF(1.5);
+        devicePen.setStyle(Qt::DashLine);
+        QColor deviceFill = highlightColor;
+        deviceFill.setAlpha(24);
+        const QBrush deviceBrush(deviceFill);
+        QPen connectionPen(highlightColor);
+        connectionPen.setCosmetic(true);
+        connectionPen.setWidthF(3.0);
+
+        const std::set<openvlsi::ObjectId> shapeSet(shapeIds.begin(), shapeIds.end());
+        const std::set<openvlsi::ObjectId> connectionSet(connectionIds.begin(), connectionIds.end());
+        const std::set<openvlsi::ObjectId> deviceSet(plannedDeviceIds.begin(), plannedDeviceIds.end());
+        const auto addOverlay = [&](QGraphicsItem *item, qreal z) {
+            item->setData(0, QStringLiteral("net-highlight"));
+            item->setZValue(z);
+            item->setAcceptedMouseButtons(Qt::NoButton);
+            scene()->addItem(item);
+        };
+
+        QPainterPath netPath;
+        for (auto *item : scene()->items()) {
+            if (!item->data(0).isValid())
+                continue;
+            const auto kind = item->data(3).toString();
+            if (kind == QStringLiteral("resize-handle") || kind == QStringLiteral("polygon-handle"))
+                continue;
+            const auto id = static_cast<openvlsi::ObjectId>(item->data(0).toULongLong());
+            const auto tag = item->data(2).toString();
+            if (tag == QStringLiteral("planned-connection")) {
+                if (!connectionSet.contains(id))
+                    continue;
+                if (auto *lineItem = dynamic_cast<QGraphicsLineItem *>(item)) {
+                    auto *overlay = new QGraphicsLineItem(lineItem->line());
+                    overlay->setPen(connectionPen);
+                    addOverlay(overlay, 16.0);
+                }
+                continue;
+            }
+            if (tag == QStringLiteral("planned-device")) {
+                if (!deviceSet.contains(id))
+                    continue;
+                auto *overlay = new QGraphicsRectItem(item->sceneBoundingRect());
+                overlay->setPen(devicePen);
+                overlay->setBrush(deviceBrush);
+                addOverlay(overlay, 15.0);
+                continue;
+            }
+            if (!shapeSet.contains(id) || item->data(1).toString() == QStringLiteral("layout-instance"))
+                continue;
+            QPainterPath path;
+            if (auto *rectItem = dynamic_cast<QGraphicsRectItem *>(item)) {
+                path.addRect(item->mapRectToScene(rectItem->rect()));
+            } else if (auto *polygonItem = dynamic_cast<QGraphicsPolygonItem *>(item)) {
+                QPolygonF polygon;
+                for (const auto &point : polygonItem->polygon())
+                    polygon << item->mapToScene(point);
+                path.addPolygon(polygon);
+                path.closeSubpath();
+            } else if (auto *pathItem = dynamic_cast<LayoutPathItem *>(item)) {
+                path = pathItem->sceneTransform().map(pathItem->highlightPath());
+            }
+            if (!path.isEmpty())
+                netPath = netPath.isEmpty() ? path : netPath.united(path);
+        }
+
+        if (!netPath.isEmpty()) {
+            auto *outline = new QGraphicsPathItem(netPath);
+            outline->setPen(shapePen);
+            outline->setBrush(Qt::NoBrush);
+            addOverlay(outline, 15.0);
+        }
+    }
+
+    void setToolEscapeCallback(std::function<void()> callback) override { toolEscapeRequested_ = std::move(callback); }
+
+    void clearScene() override {
+        cancelManualPathDrag();
+        cancelPolygonDrag();
+        cancelRectangleDrawing();
+        clearRuler();
+        clearLayoutNetHighlight();
+        if (portDrawPreview_) {
+            scene()->removeItem(portDrawPreview_);
+            delete portDrawPreview_;
+            portDrawPreview_ = nullptr;
+        }
+        portDrawing_ = false;
+        polygonActive_ = false;
+        polygonPoints_.clear();
+        polygonCursor_ = {};
+        drawPreview_ = nullptr;
+        movingItem_ = nullptr;
+        resizingItem_ = nullptr;
+        draggingInstance_ = nullptr;
+        polygonDragItem_ = nullptr;
+        rulerItem_ = nullptr;
+        selectedLayoutInstance_ = 0;
+        cyclingFigureId_ = 0;
+        hasLastFigureClick_ = false;
+        suppressFigureContextMenu_ = false;
+        if (scene())
+            scene()->clear();
+    }
+
+    void deleteSelectedShapes() override {
+        if (readOnly_)
+            return;
+        // A selected path point is deleted before the owning figures, matching
+        // the handle selection shown by the path item.
+        bool pointSelected = false;
+        for (auto *item : scene()->selectedItems()) {
+            auto *path = dynamic_cast<LayoutPathItem *>(item);
+            if (!path || !path->hasSelectedHandles())
+                continue;
+            pointSelected = true;
+            if (path->deleteSelectedHandles())
+                return;
+        }
+        if (pointSelected) {
+            // A path cannot have fewer than two points. Keep the selection so
+            // the user can click the path body to clear it and delete the path.
+            QApplication::beep();
+            return;
+        }
+        std::vector<openvlsi::ObjectId> ids;
+        for (auto *item : scene()->selectedItems())
+            if (item->data(0).isValid())
+                ids.push_back(item->data(0).toULongLong());
+        if (!ids.empty() && deleted_)
+            deleted_(ids);
+    }
+
+    void setCallbacks(std::function<void(QPointF, QPointF)> rectangleCreated,
+                      std::function<void(openvlsi::ObjectId, QPointF)> shapeMoved,
+                      std::function<void(openvlsi::ObjectId, QRectF)> shapeResized,
+                      std::function<void(std::vector<openvlsi::ObjectId>)> deleted, std::function<void()> changed) override {
+        rectangleCreated_ = std::move(rectangleCreated);
+        shapeMoved_ = std::move(shapeMoved);
+        shapeResized_ = std::move(shapeResized);
+        deleted_ = std::move(deleted);
+        changed_ = std::move(changed);
+    }
+
+    void drawGrid(QPainter &painter, const QRectF &exposed, qreal scale) {
+        if (scale <= 0.0)
+            return;
+        const qreal targetPixels = 24.0;
+        const qreal rawGrid = targetPixels / scale;
+        const qreal magnitude = std::pow(10.0, std::floor(std::log10(rawGrid)));
+        const qreal normalized = rawGrid / magnitude;
+        const qreal factor = normalized <= 1.0 ? 1.0 : normalized <= 2.0 ? 2.0 : normalized <= 5.0 ? 5.0 : 10.0;
+        const qreal major = magnitude * factor;
+        const int left = static_cast<int>(std::floor(exposed.left() / major));
+        const int right = static_cast<int>(std::ceil(exposed.right() / major));
+        const int top = static_cast<int>(std::floor(exposed.top() / major));
+        const int bottom = static_cast<int>(std::ceil(exposed.bottom() / major));
+        if (right - left > 500 || bottom - top > 500)
+            return;
+        // Minor subdivisions like the schematic grid (5x per major step).
+        // Cosmetic 1px pens so lines stay visible at any zoom; scene-unit
+        // widths would shrink to sub-pixel sizes when zoomed out.
+        const qreal minor = major / 5.0;
+        const bool drawMinor = (right - left) * 5 + (bottom - top) * 5 <= 5000;
+        if (drawMinor) {
+            QPen minorPen(openvlsi::uiColor(openvlsi::UiColor::Grid1));
+            minorPen.setCosmetic(true);
+            minorPen.setWidth(1);
+            painter.setPen(minorPen);
+            const int minorLeft = static_cast<int>(std::floor(exposed.left() / minor));
+            const int minorRight = static_cast<int>(std::ceil(exposed.right() / minor));
+            const int minorTop = static_cast<int>(std::floor(exposed.top() / minor));
+            const int minorBottom = static_cast<int>(std::ceil(exposed.bottom() / minor));
+            for (int x = minorLeft; x <= minorRight; ++x)
+                painter.drawLine(QPointF(x * minor, exposed.top()), QPointF(x * minor, exposed.bottom()));
+            for (int y = minorTop; y <= minorBottom; ++y)
+                painter.drawLine(QPointF(exposed.left(), y * minor), QPointF(exposed.right(), y * minor));
+        }
+        QPen majorPen(openvlsi::uiColor(openvlsi::UiColor::Grid2));
+        majorPen.setCosmetic(true);
+        majorPen.setWidth(1);
+        painter.setPen(majorPen);
+        for (int x = left; x <= right; ++x)
+            painter.drawLine(QPointF(x * major, exposed.top()), QPointF(x * major, exposed.bottom()));
+        for (int y = top; y <= bottom; ++y)
+            painter.drawLine(QPointF(exposed.left(), y * major), QPointF(exposed.right(), y * major));
+    }
+
+    void setLayerStyles(const std::map<openvlsi::ObjectId, LayerStyle> &styles) override { layerStyles_ = styles; }
+
+    void setRectangleStyle(const LayerStyle &style) override { rectangleStyle_ = style; }
+
+    void setPathConfig(const LayoutPathConfig &config) override {
+        const bool cellChanged = pathCell_ != config.cell;
+        if (cellChanged) {
+            // Layout switching must never carry a partial route into another
+            // cell. Reset even when pathCell_ was not initialized yet.
+            if (pathActive_)
+                finishPath();
+            pathAnchor_ = {};
+            pathEnd_ = {};
+            pathPoints_.clear();
+            pathSegmentWidths_.clear();
+            pathSegmentLayerIndices_.clear();
+            pathLayerIndex_ = 0;
+            pathStartLayerIndex_ = 0;
+        }
+        pathConfig_ = config;
+        pathCell_ = config.cell;
+        if (pathConfig_.layers.empty())
+            pathLayerIndex_ = 0;
+        else
+            pathLayerIndex_ = std::clamp(pathLayerIndex_, 0, static_cast<int>(pathConfig_.layers.size()) - 1);
+        const auto minimum = currentPathMinimumWidth();
+        if (config.width > 0)
+            pathWidth_ = std::max(config.width, minimum);
+        else if (minimum > 0)
+            pathWidth_ = minimum;
+        else
+            pathWidth_ = std::max(1, pathWidth_);
+        viewport()->update();
+    }
+
+    void setPathWidth(int width) override {
+        pathWidth_ = std::max({1, width, currentPathMinimumWidth()});
+        viewport()->update();
+    }
+
+    int pathWidth() const override { return pathWidth_; }
+    bool pathAvailable() const override { return !pathConfig_.layers.empty(); }
+
+    int currentPathMinimumWidth() const {
+        if (pathLayerIndex_ < 0 || pathLayerIndex_ >= static_cast<int>(pathConfig_.layers.size()))
+            return 0;
+        return std::max(0, pathConfig_.layers[pathLayerIndex_].minimumWidth);
+    }
+
+    int pathLayerIndexFor(openvlsi::ObjectId layerId) const {
+        if (layerId == 0)
+            return -1;
+        for (std::size_t index = 0; index < pathConfig_.layers.size(); ++index)
+            if (pathConfig_.layers[index].layer == layerId)
+                return static_cast<int>(index);
+        return -1;
+    }
+
+    void activatePathLayer(int index) {
+        if (index < 0 || index >= static_cast<int>(pathConfig_.layers.size()) || pathLayerIndex_ == index)
+            return;
+        pathLayerIndex_ = index;
+        // Keep the pending segment at the destination layer's minimum width.
+        if (const auto minimum = currentPathMinimumWidth(); minimum > 0)
+            pathWidth_ = minimum;
+        if (pathLayerChanged_)
+            pathLayerChanged_(pathConfig_.layers[index].layer, pathConfig_.layers[index].name);
+    }
+
+    std::string pathLayerName() const override {
+        if (pathLayerIndex_ < 0 || pathLayerIndex_ >= static_cast<int>(pathConfig_.layers.size()))
+            return {};
+        return pathConfig_.layers[pathLayerIndex_].name;
+    }
+
+    void setPathCreatedCallback(LayoutPathCreatedCallback callback) override { pathCreated_ = std::move(callback); }
+
+    void setPathLayerChangedCallback(LayoutPathLayerChangedCallback callback) override {
+        pathLayerChanged_ = std::move(callback);
+    }
+
+    void setPathPointSelectionChangedCallback(LayoutPathPointSelectionChangedCallback callback) override {
+        pathPointSelectionChanged_ = std::move(callback);
+    }
+
+    void setTextPlacedCallback(LayoutTextPlacedCallback callback) override { textPlaced_ = std::move(callback); }
+    void setTextPolygonPlacedCallback(LayoutTextPolygonPlacedCallback callback) override {
+        textPolygonPlaced_ = std::move(callback);
+    }
+    void setPortPlacedCallback(LayoutPortPlacedCallback callback) override { portPlaced_ = std::move(callback); }
+    void setInstancePortActivatedCallback(LayoutInstancePortActivatedCallback callback) override {
+        instancePortActivated_ = std::move(callback);
+    }
+
+    void setPlannedDeviceActivatedCallback(LayoutPlannedDeviceActivatedCallback callback) override {
+        plannedDeviceActivated_ = std::move(callback);
+    }
+
+    void setPlannedConnectionActivatedCallback(LayoutPlannedConnectionActivatedCallback callback) override {
+        plannedConnectionActivated_ = std::move(callback);
+    }
+
+    void setPolygonCreatedCallback(LayoutPolygonCreatedCallback callback) override {
+        polygonCreated_ = std::move(callback);
+    }
+
+    void setPolygonPointMovedCallback(LayoutPolygonPointMovedCallback callback) override {
+        polygonPointMoved_ = std::move(callback);
+    }
+
+    void setInitialView(const QRectF &bounds) {
+        if (!bounds.isValid() || bounds.isNull())
+            return;
+        const auto available = viewport()->size();
+        const qreal width = std::max<qreal>(1.0, bounds.width());
+        const qreal height = std::max<qreal>(1.0, bounds.height());
+        zoom_ = std::clamp(std::min(available.width() / width, available.height() / height) * 0.85, qreal(1.0e-6),
+                           qreal(1.0e6));
+        centerScene_ = bounds.center();
+        applyNavigationTransform();
+    }
+
+    void fitToContent() override {
+        const auto bounds = scene()->itemsBoundingRect();
+        if (!bounds.isValid() || bounds.isNull()) {
+            zoom_ = 1.0;
+            centerScene_ = QPointF(0.0, 0.0);
+            applyNavigationTransform();
+            return;
+        }
+        setInitialView(bounds.adjusted(-20, -20, 20, 20));
+    }
+
+    void focusOnLayoutRect(const openvlsi::Rect &rect) override {
+        if (!scene())
+            return;
+        for (auto *item : scene()->items()) {
+            if (item->data(0).toString() != QStringLiteral("drc-highlight"))
+                continue;
+            scene()->removeItem(item);
+            delete item;
+        }
+
+        const qreal rawWidth = std::max<qreal>(0.0, static_cast<qreal>(rect.width));
+        const qreal rawHeight = std::max<qreal>(0.0, static_cast<qreal>(rect.height));
+        const QRectF rawRect(static_cast<qreal>(rect.x), -static_cast<qreal>(rect.y) - rawHeight, rawWidth, rawHeight);
+        const QPointF center = rawRect.center();
+        const qreal markerWidth = std::max<qreal>(rawWidth, 1000.0);
+        const qreal markerHeight = std::max<qreal>(rawHeight, 1000.0);
+        const QRectF marker(center.x() - markerWidth * 0.5, center.y() - markerHeight * 0.5, markerWidth, markerHeight);
+
+        QPen pen(openvlsi::uiColor(openvlsi::UiColor::Accent6), 2.0, Qt::DashLine);
+        pen.setCosmetic(true);
+        QColor fill = pen.color();
+        fill.setAlpha(35);
+        auto *highlight = scene()->addRect(marker, pen, QBrush(fill));
+        highlight->setData(0, QStringLiteral("drc-highlight"));
+        highlight->setZValue(1000.0);
+
+        const qreal viewSize = std::max<qreal>(5000.0, std::max(markerWidth, markerHeight) * 3.0);
+        setInitialView(QRectF(center.x() - viewSize * 0.5, center.y() - viewSize * 0.5, viewSize, viewSize));
+    }
+
+  protected:
+    void drawBackground(QPainter *painter, const QRectF &rect) override {
+        painter->fillRect(rect, openvlsi::uiColor(openvlsi::UiColor::Background2));
+        if (gridVisible_)
+            drawGrid(*painter, rect, transform().m11());
+        drawCanvasAxes(*painter, rect);
+    }
+
+    void drawForeground(QPainter *painter, const QRectF &rect) override {
+        if (tool_ == Tool::placeDevice && !devicePreviewModel_.empty() && viewport()->underMouse()) {
+            painter->save();
+            painter->setClipRect(rect);
+            openvlsi::LayoutRenderer::PaintOptions options;
+            options.shapeAlpha = 55;
+            options.portAlpha = 30;
+            options.showPatterns = true;
+            options.showLabels = false;
+            openvlsi::LayoutRenderer::paintAt(*painter, devicePreviewModel_, layerStyles_, deviceLayerStyles_,
+                                         cursorScenePosition_, options);
+            painter->restore();
+        }
+        if (tool_ == Tool::path && pathActive_)
+            drawPathPreview(*painter, rect);
+        if (tool_ == Tool::path && !readOnly_)
+            drawPathPortMarkers(*painter, rect);
+        if (tool_ == Tool::polygon && polygonActive_)
+            drawPolygonPreview(*painter, rect);
+    }
+
+    void drawPathPreview(QPainter &painter, const QRectF &rect) {
+        // Preview the whole in-progress path, not just the pending segment.
+        // Each segment is filled with its own layer color, while one outline
+        // covers the complete path so joins and end caps match the final shape.
+        std::vector<QPointF> points = pathPoints_;
+        std::vector<qreal> widths;
+        widths.reserve(pathSegmentWidths_.size() + 1);
+        for (const auto width : pathSegmentWidths_)
+            widths.push_back(static_cast<qreal>(width));
+        std::vector<int> layerIndices = pathSegmentLayerIndices_;
+        if (!points.empty() && QLineF(points.back(), pathEnd_).length() > 1.0e-9) {
+            points.push_back(pathEnd_);
+            widths.push_back(static_cast<qreal>(pathWidth_));
+            layerIndices.push_back(pathLayerIndex_);
+        }
+        if (points.size() < 2 || widths.size() != points.size() - 1 || layerIndices.size() != widths.size())
+            return;
+        const auto polygon = layoutPathOutline(points, widths);
+        if (polygon.isEmpty())
+            return;
+
+        painter.save();
+        painter.setClipRect(rect);
+        painter.setRenderHint(QPainter::Antialiasing);
+
+        const auto layerColor = [&](int index) {
+            if (index >= 0 && index < static_cast<int>(pathConfig_.layers.size())) {
+                const auto style = layerStyles_.find(pathConfig_.layers[static_cast<std::size_t>(index)].layer);
+                if (style != layerStyles_.end())
+                    return style->second.color;
+            }
+            return openvlsi::uiColor(openvlsi::UiColor::Accent4);
+        };
+
+        const auto segmentPolygon = [&](std::size_t index) {
+            const auto &start = points[index];
+            const auto &end = points[index + 1];
+            QPointF startLeft;
+            QPointF startRight;
+            QPointF endLeft;
+            QPointF endRight;
+            if (index == 0) {
+                const auto direction = pathUnit(end - start);
+                const auto half = widths[index] * 0.5;
+                const QPointF normal(-direction.y() * half, direction.x() * half);
+                startLeft = start + normal;
+                startRight = start - normal;
+            } else {
+                std::vector<QPointF> left;
+                std::vector<QPointF> right;
+                appendPathJoin(left, points[index - 1], start, end, widths[index - 1] * 0.5, widths[index] * 0.5, 1.0);
+                appendPathJoin(right, points[index - 1], start, end, widths[index - 1] * 0.5, widths[index] * 0.5,
+                               -1.0);
+                startLeft = left.back();
+                startRight = right.back();
+            }
+            if (index + 1 == points.size() - 1) {
+                const auto direction = pathUnit(end - start);
+                const auto half = widths[index] * 0.5;
+                const QPointF normal(-direction.y() * half, direction.x() * half);
+                endLeft = end + normal;
+                endRight = end - normal;
+            } else {
+                std::vector<QPointF> left;
+                std::vector<QPointF> right;
+                appendPathJoin(left, start, end, points[index + 2], widths[index] * 0.5, widths[index + 1] * 0.5, 1.0);
+                appendPathJoin(right, start, end, points[index + 2], widths[index] * 0.5, widths[index + 1] * 0.5,
+                               -1.0);
+                endLeft = left.back();
+                endRight = right.back();
+            }
+            QPolygonF segment;
+            segment << startLeft << endLeft << endRight << startRight;
+            return segment;
+        };
+
+        painter.setPen(Qt::NoPen);
+        for (std::size_t index = 0; index + 1 < points.size(); ++index) {
+            QColor fill = layerColor(layerIndices[index]);
+            fill.setAlpha(60);
+            painter.setBrush(fill);
+            painter.drawPolygon(segmentPolygon(index));
+        }
+
+        QColor outlineColor = openvlsi::uiColor(openvlsi::UiColor::Accent4);
+        QPen outline(outlineColor);
+        outline.setCosmetic(true);
+        outline.setWidthF(1.4);
+        outline.setStyle(Qt::DashLine);
+        painter.setPen(outline);
+        painter.setBrush(Qt::NoBrush);
+        painter.drawPolygon(polygon);
+
+        QPen centerline(outlineColor);
+        centerline.setCosmetic(true);
+        centerline.setWidthF(1.0);
+        centerline.setStyle(Qt::DotLine);
+        painter.setPen(centerline);
+        painter.setBrush(Qt::NoBrush);
+        QPolygonF centerPolyline;
+        for (const auto &point : points)
+            centerPolyline << point;
+        painter.drawPolyline(centerPolyline);
+
+        const qreal viaHalf = pathWidth_ * 0.5;
+        const auto drawViaAt = [&](const QPointF &center, const std::vector<openvlsi::ObjectId> &viaLayers,
+                                   openvlsi::ObjectId fallbackLayer) {
+            const QRectF viaRect(center.x() - viaHalf, center.y() - viaHalf, pathWidth_, pathWidth_);
+            const auto drawVia = [&](openvlsi::ObjectId layerId) {
+                QColor viaColor = openvlsi::uiColor(openvlsi::UiColor::Accent3);
+                const auto style = layerStyles_.find(layerId);
+                if (style != layerStyles_.end())
+                    viaColor = style->second.color;
+                QColor viaFill = viaColor;
+                viaFill.setAlpha(110);
+                painter.setPen(QPen(viaColor, 1.0));
+                painter.setBrush(viaFill);
+                painter.drawRect(viaRect);
+            };
+            if (viaLayers.empty())
+                drawVia(fallbackLayer);
+            else
+                for (const auto layerId : viaLayers)
+                    drawVia(layerId);
+        };
+
+        if (!layerIndices.empty() && pathStartLayerIndex_ != layerIndices.front() && pathStartLayerIndex_ >= 0 &&
+            pathStartLayerIndex_ < static_cast<int>(pathConfig_.layers.size()))
+            drawViaAt(points.front(), pathViasBetween(pathStartLayerIndex_, layerIndices.front()),
+                      pathConfig_.layers[layerIndices.front()].layer);
+        for (std::size_t index = 1; index < layerIndices.size(); ++index) {
+            if (layerIndices[index - 1] == layerIndices[index])
+                continue;
+            drawViaAt(points[index], pathViasBetween(layerIndices[index - 1], layerIndices[index]),
+                      pathConfig_.layers[layerIndices[index]].layer);
+        }
+        // A layer switch after the latest click has no pending segment yet.
+        // Show its via immediately so the pending layer transition is visible.
+        if (!pathPoints_.empty() && QLineF(pathPoints_.back(), pathEnd_).length() <= 1.0e-9) {
+            const auto previous =
+                pathSegmentLayerIndices_.empty() ? pathStartLayerIndex_ : pathSegmentLayerIndices_.back();
+            if (previous != pathLayerIndex_ && pathLayerIndex_ >= 0 &&
+                pathLayerIndex_ < static_cast<int>(pathConfig_.layers.size()))
+                drawViaAt(pathPoints_.back(), pathViasBetween(previous, pathLayerIndex_),
+                          pathConfig_.layers[pathLayerIndex_].layer);
+        }
+        painter.restore();
+    }
+
+    // While the path tool is active, mark every visible port center. The dot
+    // doubles as the snap target used when a path starts or ends on a port.
+    void drawPathPortMarkers(QPainter &painter, const QRectF &rect) {
+        if (!scene())
+            return;
+        const qreal scale = std::max<qreal>(1.0e-6, transform().m11());
+        const qreal radius = 4.0 / scale;
+        QPen outline(openvlsi::uiColor(openvlsi::UiColor::Text1));
+        outline.setCosmetic(true);
+        outline.setWidthF(1.2);
+        painter.save();
+        painter.setClipRect(rect);
+        painter.setRenderHint(QPainter::Antialiasing);
+        painter.setPen(outline);
+        for (auto *item : scene()->items()) {
+            const bool layoutPort = item->data(2).toString() == QStringLiteral("layout-port");
+            const bool instancePort = item->data(3).toString() == QStringLiteral("instance-port");
+            if ((!layoutPort && !instancePort) || !item->isVisible())
+                continue;
+            QColor color = openvlsi::uiColor(openvlsi::UiColor::Accent4);
+            if (auto *portRect = dynamic_cast<QGraphicsRectItem *>(item))
+                color = portRect->pen().color();
+            painter.setBrush(color);
+            painter.drawEllipse(item->sceneBoundingRect().center(), radius, radius);
+        }
+        painter.restore();
+    }
+
+    void drawPolygonPreview(QPainter &painter, const QRectF &rect) {
+        if (polygonPoints_.empty())
+            return;
+        painter.save();
+        painter.setClipRect(rect);
+        painter.setRenderHint(QPainter::Antialiasing);
+        const auto color = rectangleStyle_.color;
+        QPolygonF preview;
+        for (const auto &point : polygonPoints_)
+            preview << point;
+        preview << polygonCursor_;
+        QPen outline(color);
+        outline.setCosmetic(true);
+        outline.setWidthF(1.4);
+        outline.setStyle(Qt::DashLine);
+        QColor fill = color;
+        fill.setAlpha(60);
+        painter.setPen(outline);
+        painter.setBrush(preview.size() >= 3 ? QBrush(fill) : QBrush(Qt::NoBrush));
+        painter.drawPolygon(preview);
+        QPen markerPen(color);
+        markerPen.setCosmetic(true);
+        markerPen.setWidthF(1.0);
+        painter.setPen(markerPen);
+        painter.setBrush(openvlsi::uiColor(openvlsi::UiColor::Background1));
+        const auto size = 6.0 / std::max(zoom_, qreal(1.0e-6));
+        for (const auto &point : polygonPoints_)
+            painter.drawRect(QRectF(point.x() - size * 0.5, point.y() - size * 0.5, size, size));
+        painter.restore();
+    }
+
+    void drawScaleIndicator(QPainter &painter) {
+        if (zoom_ <= 0.0)
+            return;
+
+        const qreal targetPixels = 100.0;
+        const qreal rawLength = targetPixels / zoom_;
+        const qreal magnitude = std::pow(10.0, std::floor(std::log10(rawLength)));
+        const qreal normalized = rawLength / magnitude;
+        const qreal factor = normalized <= 1.0 ? 1.0 : normalized <= 2.0 ? 2.0 : normalized <= 5.0 ? 5.0 : 10.0;
+        const qreal length = magnitude * factor;
+        const qreal pixels = length * zoom_;
+
+        const qreal left = 14.0;
+        const qreal bottom = viewport()->height() - 16.0;
+        const auto color = openvlsi::uiColor(openvlsi::UiColor::Axis1);
+        QPen pen(color);
+        pen.setWidthF(2.0);
+        painter.setPen(pen);
+        painter.drawLine(QPointF(left, bottom), QPointF(left + pixels, bottom));
+        painter.drawLine(QPointF(left, bottom - 5.0), QPointF(left, bottom + 1.0));
+        painter.drawLine(QPointF(left + pixels, bottom - 5.0), QPointF(left + pixels, bottom + 1.0));
+        painter.setPen(color);
+        painter.drawText(QPointF(left, bottom - 8.0), formatScaleLength(length));
+    }
+
+    void paintEvent(QPaintEvent *event) override {
+        QGraphicsView::paintEvent(event);
+        QPainter painter(viewport());
+        painter.setRenderHint(QPainter::Antialiasing);
+        drawScaleIndicator(painter);
+        drawRectangleMeasurement(painter);
+    }
+
+    // Shows the live width x height of the rectangle being drawn inside the
+    // preview, so the size is readable without looking away from the cursor.
+    void drawRectangleMeasurement(QPainter &painter) {
+        if (!drawing_ || !drawPreview_)
+            return;
+        const auto sceneRect = drawPreview_->rect();
+        if (!sceneRect.isValid() || sceneRect.isNull())
+            return;
+        const auto label = QStringLiteral("%1 x %2")
+                               .arg(static_cast<qint64>(std::llround(sceneRect.width())))
+                               .arg(static_cast<qint64>(std::llround(sceneRect.height())));
+        painter.save();
+        painter.setRenderHint(QPainter::Antialiasing);
+        QFont font = painter.font();
+        font.setPixelSize(12);
+        font.setBold(true);
+        painter.setFont(font);
+        const QFontMetricsF metrics(font);
+        const auto textSize = metrics.size(Qt::TextSingleLine, label);
+        const QRectF screenRect =
+            QRectF(QPointF(mapFromScene(sceneRect.topLeft())), QPointF(mapFromScene(sceneRect.bottomRight())))
+                .normalized();
+        auto center = screenRect.center();
+        if (screenRect.width() < textSize.width() + 16.0 || screenRect.height() < textSize.height() + 10.0)
+            center = QPointF(mapFromScene(drawEnd_)) + QPointF(0.0, -26.0);
+        const QRectF box(center.x() - textSize.width() * 0.5 - 6.0, center.y() - textSize.height() * 0.5 - 3.0,
+                         textSize.width() + 12.0, textSize.height() + 6.0);
+        QColor background = openvlsi::uiColor(openvlsi::UiColor::Background1);
+        background.setAlpha(225);
+        painter.setPen(QPen(openvlsi::uiColor(openvlsi::UiColor::Border1), 1.0));
+        painter.setBrush(background);
+        painter.drawRoundedRect(box, 3.0, 3.0);
+        painter.setPen(openvlsi::uiColor(openvlsi::UiColor::Text1));
+        painter.drawText(box, Qt::AlignCenter, label);
+        painter.restore();
+    }
+
+    LayoutPathItem *findPathItem(openvlsi::ObjectId id) const {
+        if (id == 0)
+            return nullptr;
+        for (auto *item : scene()->items())
+            if (auto *path = dynamic_cast<LayoutPathItem *>(item); path && path->pathId() == id)
+                return path;
+        return nullptr;
+    }
+
+    void notifyPathPointSelectionChanged() {
+        if (pathPointSelectionChanged_)
+            pathPointSelectionChanged_();
+    }
+
+    bool clearPathHandleSelections(LayoutPathItem *except = nullptr) {
+        if (!scene())
+            return false;
+        bool changed = false;
+        for (auto *item : scene()->items()) {
+            auto *path = dynamic_cast<LayoutPathItem *>(item);
+            if (path && path != except && path->hasSelectedHandles()) {
+                path->clearHandleSelection();
+                changed = true;
+            }
+        }
+        if (changed)
+            notifyPathPointSelectionChanged();
+        return changed;
+    }
+
+    void cancelManualPathDrag() {
+        if (manualPathDragHandle_ >= 0) {
+            if (auto *path = findPathItem(manualPathDragId_))
+                path->cancelHandleDrag();
+        }
+        manualPathDragId_ = 0;
+        manualPathDragHandle_ = -1;
+    }
+
+    void cancelPolygonDrag() {
+        if (polygonDragItem_ && polygonDragIndex_ >= 0 && polygonDragIndex_ < polygonDragItem_->polygon().size()) {
+            auto polygon = polygonDragItem_->polygon();
+            polygon[polygonDragIndex_] = polygonDragStartLocalPoint_;
+            polygonDragItem_->setPolygon(polygon);
+            updatePolygonHandles(polygonDragShapeId_, scenePolygon(polygonDragItem_));
+        }
+        polygonDragItem_ = nullptr;
+        polygonDragShapeId_ = 0;
+        polygonDragIndex_ = -1;
+    }
+
+    void mousePressEvent(QMouseEvent *event) override {
+        clearLayoutNetHighlight();
+        if (event->button() == Qt::LeftButton && isScaleIndicatorPosition(event->pos())) {
+            beginScaleEdit();
+            event->accept();
+            return;
+        }
+        cursorScenePosition_ = mapToScene(event->pos());
+        if (event->button() == Qt::RightButton && !readOnly_ && (tool_ == Tool::select || tool_ == Tool::move)) {
+            // Consume the press on a figure so Qt never treats it as a click on
+            // empty space (which cleared the selection and hid the menu).
+            auto *hit = itemAt(event->pos());
+            if (pathHandleAt(event->pos())) {
+                // Let the path item handle it and keep the figure menu closed.
+                suppressFigureContextMenu_ = true;
+            } else {
+                clearPathHandleSelections();
+                if (hit && hit->data(2).toString().isEmpty()) {
+                    if (auto *figure = layoutFigureOwner(hit)) {
+                        if (!figure->isSelected())
+                            selectLayoutFigure(figure);
+                        cyclingFigureId_ = static_cast<openvlsi::ObjectId>(figure->data(0).toULongLong());
+                        hasLastFigureClick_ = true;
+                        event->accept();
+                        return;
+                    }
+                }
+            }
+        }
+        if (event->button() == Qt::MiddleButton) {
+            panning_ = true;
+            panStartPosition_ = event->pos();
+            panStartCenterScene_ = centerScene_;
+            setCursor(Qt::ClosedHandCursor);
+            event->accept();
+            return;
+        }
+        if (tool_ == Tool::select && event->button() == Qt::LeftButton && !readOnly_) {
+            auto *clicked = itemAt(event->pos());
+            const auto clickedKind = clicked ? clicked->data(3).toString() : QString();
+            const bool onResizeHandle =
+                clickedKind == QStringLiteral("resize-handle") || clickedKind == QStringLiteral("polygon-handle");
+            if (!onResizeHandle) {
+                const auto scenePos = mapToScene(event->pos());
+                LayoutPathItem *bestPath = nullptr;
+                int bestHandle = -1;
+                qreal bestDistance = std::numeric_limits<qreal>::max();
+                for (auto *item : scene()->items()) {
+                    auto *path = dynamic_cast<LayoutPathItem *>(item);
+                    if (!path || !path->isVisible())
+                        continue;
+                    const int handle = path->handleAtScenePosition(scenePos);
+                    if (handle < 0)
+                        continue;
+                    const auto distance = QLineF(scenePos, path->handleScenePosition(handle)).length();
+                    if (distance < bestDistance) {
+                        bestDistance = distance;
+                        bestPath = path;
+                        bestHandle = handle;
+                    }
+                }
+                if (bestPath) {
+                    if (selectedLayoutInstance_ != 0) {
+                        selectedLayoutInstance_ = 0;
+                        applyLayoutInstanceSelection();
+                    }
+                    draggingInstance_ = nullptr;
+                    movingItem_ = nullptr;
+                    clearPathHandleSelections(bestPath);
+                    const bool additive = event->modifiers().testFlag(Qt::ControlModifier);
+                    if (!bestPath->isSelected()) {
+                        if (!additive)
+                            scene()->clearSelection();
+                        bestPath->setSelected(true);
+                    }
+                    bestPath->selectHandle(bestHandle, additive);
+                    notifyPathPointSelectionChanged();
+                    if (additive) {
+                        event->accept();
+                        return;
+                    }
+                    bestPath->beginHandleDrag(bestHandle);
+                    manualPathDragId_ = bestPath->pathId();
+                    manualPathDragHandle_ = bestHandle;
+                    event->accept();
+                    return;
+                }
+            }
+        }
+        if (tool_ == Tool::placeDevice && event->button() == Qt::LeftButton) {
+            if (readOnly_) {
+                QApplication::beep();
+                event->accept();
+                return;
+            }
+            if (devicePlacementRequested_)
+                devicePlacementRequested_(snapPosition(mapToScene(event->pos())));
+            event->accept();
+            return;
+        }
+        if (tool_ == Tool::ruler && event->button() == Qt::LeftButton) {
+            const auto point = rulerSnapPoint(mapToScene(event->pos()));
+            if (!rulerHasStart_) {
+                rulerStart_ = point;
+                rulerHasStart_ = true;
+            } else {
+                rulerEnd_ = point;
+                rulerHasStart_ = false;
+            }
+            updateRuler(point);
+            event->accept();
+            return;
+        }
+        if (tool_ == Tool::text && event->button() == Qt::LeftButton) {
+            if (readOnly_) {
+                QApplication::beep();
+                event->accept();
+                return;
+            }
+            if (textPlaced_)
+                textPlaced_(snapPosition(mapToScene(event->pos())));
+            event->accept();
+            return;
+        }
+        if (tool_ == Tool::textPolygon && event->button() == Qt::LeftButton) {
+            if (readOnly_) {
+                QApplication::beep();
+                event->accept();
+                return;
+            }
+            if (textPolygonPlaced_)
+                textPolygonPlaced_(snapPosition(mapToScene(event->pos())));
+            event->accept();
+            return;
+        }
+        if (tool_ == Tool::port && event->button() == Qt::LeftButton) {
+            if (readOnly_) {
+                QApplication::beep();
+                event->accept();
+                return;
+            }
+            portDrawing_ = true;
+            portDrawStart_ = snapPosition(mapToScene(event->pos()));
+            const auto previewColor = rectangleStyle_.color;
+            QBrush previewBrush(QColor(previewColor.red(), previewColor.green(), previewColor.blue(), 45),
+                                rectangleStyle_.pattern);
+            if (rectangleStyle_.pattern == Qt::NoBrush)
+                previewBrush = QBrush(Qt::NoBrush);
+            QPen previewPen(previewColor, 1.0, Qt::DashLine);
+            previewPen.setCosmetic(true);
+            portDrawPreview_ = scene()->addRect(QRectF(portDrawStart_, portDrawStart_), previewPen, previewBrush);
+            event->accept();
+            return;
+        }
+        if (tool_ == Tool::polygon && event->button() == Qt::LeftButton) {
+            if (readOnly_) {
+                QApplication::beep();
+                event->accept();
+                return;
+            }
+            auto point = snapPosition(mapToScene(event->pos()));
+            if (polygonActive_ && event->modifiers().testFlag(Qt::ShiftModifier))
+                point = constrainedPathPoint(polygonPoints_.back(), point, true);
+            if (!polygonActive_) {
+                polygonActive_ = true;
+                polygonPoints_.clear();
+                polygonPoints_.push_back(point);
+            } else if (QLineF(polygonPoints_.back(), point).length() >= 0.5) {
+                polygonPoints_.push_back(point);
+            }
+            polygonCursor_ = point;
+            viewport()->update();
+            event->accept();
+            return;
+        }
+        if (tool_ == Tool::rectangle && event->button() == Qt::LeftButton) {
+            if (readOnly_) {
+                QApplication::beep();
+                event->accept();
+                return;
+            }
+            // Click once to anchor the rectangle, then click again to finish.
+            const auto point = snapPosition(mapToScene(event->pos()));
+            if (drawing_)
+                finishRectangleDrawing(rectangleSizeValid_ ? typedRectangleEnd() : point);
+            else
+                beginRectangleDrawing(point);
+            event->accept();
+            return;
+        }
+        if (tool_ == Tool::path && !readOnly_) {
+            if (event->button() == Qt::LeftButton) {
+                if (!pathAvailable()) {
+                    QApplication::beep();
+                    event->accept();
+                    return;
+                }
+                auto point = snapPosition(mapToScene(event->pos()));
+                if (!pathActive_) {
+                    // Starting on a port uses that port's layer and center so
+                    // paths connect to the port interface without extra setup.
+                    if (auto *port = pathPortItemAt(event->pos())) {
+                        activatePathLayer(pathLayerIndexFor(static_cast<openvlsi::ObjectId>(port->data(6).toULongLong())));
+                        point = port->sceneBoundingRect().center();
+                    }
+                    const auto minimum = currentPathMinimumWidth();
+                    pathWidth_ = minimum > 0 ? minimum : 200;
+                    pathActive_ = true;
+                    pathAnchor_ = point;
+                    pathEnd_ = point;
+                    pathPoints_.clear();
+                    pathPoints_.push_back(point);
+                    pathSegmentWidths_.clear();
+                    pathSegmentLayerIndices_.clear();
+                    pathStartLayerIndex_ = pathLayerIndex_;
+                } else {
+                    pathEnd_ = pathPreviewEndPoint(event->pos(), event->modifiers().testFlag(Qt::ShiftModifier));
+                }
+                pathDragging_ = true;
+                viewport()->update();
+                event->accept();
+                return;
+            }
+        }
+        if ((tool_ == Tool::select || tool_ == Tool::move) && event->button() == Qt::LeftButton) {
+            // A press that did not land on a path point clears the point
+            // selection, so Delete applies to the whole figure again.
+            clearPathHandleSelections();
+            auto *clicked = itemAt(event->pos());
+            if (auto *owner = textPolygonOwner(clicked))
+                clicked = owner;
+            if (tool_ == Tool::select && clicked && clicked->data(3).toString() == QStringLiteral("polygon-handle") &&
+                !readOnly_) {
+                QGraphicsPolygonItem *polygonItem = nullptr;
+                for (auto *candidate : scene()->items()) {
+                    if (candidate->data(0).toULongLong() != clicked->data(4).toULongLong())
+                        continue;
+                    if (auto *poly = dynamic_cast<QGraphicsPolygonItem *>(candidate)) {
+                        polygonItem = poly;
+                        break;
+                    }
+                }
+                if (polygonItem) {
+                    if (selectedLayoutInstance_ != 0) {
+                        selectedLayoutInstance_ = 0;
+                        applyLayoutInstanceSelection();
+                    }
+                    draggingInstance_ = nullptr;
+                    movingItem_ = nullptr;
+                    if (!polygonItem->isSelected()) {
+                        if (!(event->modifiers() & Qt::ControlModifier))
+                            scene()->clearSelection();
+                        polygonItem->setSelected(true);
+                    }
+                    polygonDragItem_ = polygonItem;
+                    polygonDragShapeId_ = clicked->data(4).toULongLong();
+                    polygonDragIndex_ = clicked->data(5).toInt();
+                    const auto polygon = polygonItem->polygon();
+                    if (polygonDragIndex_ >= 0 && polygonDragIndex_ < polygon.size())
+                        polygonDragStartLocalPoint_ = polygon[polygonDragIndex_];
+                    event->accept();
+                    return;
+                }
+            }
+            if (tool_ == Tool::select && clicked && clicked->data(3).toString() == QStringLiteral("resize-handle") &&
+                !readOnly_) {
+                QGraphicsItem *shapeItem = nullptr;
+                for (auto *candidate : scene()->items()) {
+                    if (candidate->data(0).toULongLong() == clicked->data(4).toULongLong() &&
+                        candidate->data(3).toString() != QStringLiteral("resize-handle")) {
+                        shapeItem = candidate;
+                        break;
+                    }
+                }
+                if (dynamic_cast<QGraphicsRectItem *>(shapeItem)) {
+                    if (selectedLayoutInstance_ != 0) {
+                        selectedLayoutInstance_ = 0;
+                        applyLayoutInstanceSelection();
+                    }
+                    if (!shapeItem->isSelected()) {
+                        if (!(event->modifiers() & Qt::ControlModifier))
+                            scene()->clearSelection();
+                        shapeItem->setSelected(true);
+                    }
+                    resizingItem_ = shapeItem;
+                    resizeShapeId_ = clicked->data(4).toULongLong();
+                    resizeCorner_ = clicked->data(5).toInt();
+                    resizeStartRect_ = dynamic_cast<QGraphicsRectItem *>(shapeItem)->rect();
+                    event->accept();
+                    return;
+                }
+            }
+            auto *instance = layoutInstanceOwner(clicked);
+            if (instance && !readOnly_) {
+                const auto id = instance->data(0).toULongLong();
+                if (event->modifiers().testFlag(Qt::ControlModifier) && selectedLayoutInstance_ == id) {
+                    scene()->clearSelection();
+                    selectedLayoutInstance_ = 0;
+                    applyLayoutInstanceSelection();
+                    event->accept();
+                    return;
+                }
+                scene()->clearSelection();
+                selectedLayoutInstance_ = id;
+                applyLayoutInstanceSelection();
+                movingItem_ = nullptr;
+                if (tool_ == Tool::move) {
+                    draggingInstance_ = instance;
+                    dragStartScene_ = mapToScene(event->pos());
+                    dragStartPosition_ = instance->pos();
+                }
+                event->accept();
+                return;
+            }
+            if (selectedLayoutInstance_ != 0) {
+                selectedLayoutInstance_ = 0;
+                applyLayoutInstanceSelection();
+            }
+            // Get the figure at the click position (topmost selectable)
+            auto *clickedFigure = layoutFigureOwner(clicked);
+            const bool plainClick =
+                !event->modifiers().testFlag(Qt::ControlModifier) && !event->modifiers().testFlag(Qt::ShiftModifier);
+            if (tool_ == Tool::select && plainClick) {
+                // Figures under the cursor, topmost first. Repeated clicks walk
+                // this list so covered figures stay reachable.
+                const auto figures = layoutFiguresAt(event->pos());
+                if (!figures.empty()) {
+                    const auto scenePos = mapToScene(event->pos());
+                    // Find the figure that was selected by the previous click.
+                    std::size_t current = figures.size();
+                    if (hasLastFigureClick_ && cyclingFigureId_ != 0) {
+                        for (std::size_t index = 0; index < figures.size(); ++index) {
+                            if (static_cast<openvlsi::ObjectId>(figures[index]->data(0).toULongLong()) == cyclingFigureId_) {
+                                current = index;
+                                break;
+                            }
+                        }
+                    }
+                    const bool repeatedClick =
+                        current < figures.size() && figures[current]->sceneBoundingRect().contains(scenePos);
+                    // Repeated clicks walk down the stack one level, wrapping
+                    // from the bottom figure back to the topmost so the user
+                    // keeps cycling as long as they click.
+                    const std::size_t next = repeatedClick ? (current + 1) % figures.size() : std::size_t(0);
+                    selectLayoutFigure(figures[next]);
+                    cyclingFigureId_ = static_cast<openvlsi::ObjectId>(figures[next]->data(0).toULongLong());
+                    lastFigureClickPosition_ = event->pos();
+                    hasLastFigureClick_ = true;
+                    event->accept();
+                    return;
+                }
+                hasLastFigureClick_ = false;
+                cyclingFigureId_ = 0;
+            }
+            if (tool_ == Tool::move &&
+                (!clickedFigure || !(clickedFigure->flags() & QGraphicsItem::ItemIsSelectable))) {
+                scene()->clearSelection();
+                event->accept();
+                return;
+            }
+            // Move the owning figure even when the press lands on a child item
+            // such as a port caption, which itself is not movable.
+            movingItem_ = clickedFigure ? clickedFigure : clicked;
+            if (movingItem_)
+                movingStartPosition_ = movingItem_->pos();
+        }
+        QGraphicsView::mousePressEvent(event);
+    }
+
+    void mouseMoveEvent(QMouseEvent *event) override {
+        cursorScenePosition_ = mapToScene(event->pos());
+        if (manualPathDragHandle_ >= 0) {
+            if (auto *path = findPathItem(manualPathDragId_)) {
+                path->dragHandleToScenePosition(snapPosition(cursorScenePosition_));
+            } else {
+                manualPathDragId_ = 0;
+                manualPathDragHandle_ = -1;
+            }
+            event->accept();
+            return;
+        }
+        if (panning_) {
+            const auto delta = event->pos() - panStartPosition_;
+            centerScene_ = panStartCenterScene_ - QPointF(delta.x() / zoom_, delta.y() / zoom_);
+            applyNavigationTransform();
+            event->accept();
+            return;
+        }
+        if (tool_ == Tool::ruler) {
+            updateRuler(rulerSnapPoint(cursorScenePosition_));
+            event->accept();
+            return;
+        }
+        if (tool_ == Tool::polygon && polygonActive_) {
+            auto point = snapPosition(cursorScenePosition_);
+            if (event->modifiers().testFlag(Qt::ShiftModifier))
+                point = constrainedPathPoint(polygonPoints_.back(), point, true);
+            polygonCursor_ = point;
+            viewport()->update();
+            event->accept();
+            return;
+        }
+        if (tool_ == Tool::select) {
+            auto *hovered = itemAt(event->pos());
+            const auto hoveredKind = hovered ? hovered->data(3).toString() : QString();
+            if (pathHandleAt(event->pos())) {
+                setCursor(Qt::SizeAllCursor);
+            } else if (hoveredKind == QStringLiteral("polygon-handle")) {
+                setCursor(Qt::SizeAllCursor);
+            } else if (hoveredKind == QStringLiteral("resize-handle")) {
+                switch (hovered->data(5).toInt()) {
+                case 0:
+                case 3:
+                    setCursor(Qt::SizeFDiagCursor);
+                    break;
+                case 1:
+                case 2:
+                    setCursor(Qt::SizeBDiagCursor);
+                    break;
+                case 4:
+                case 5:
+                    setCursor(Qt::SizeHorCursor);
+                    break;
+                case 6:
+                case 7:
+                    setCursor(Qt::SizeVerCursor);
+                    break;
+                default:
+                    unsetCursor();
+                    break;
+                }
+            } else {
+                unsetCursor();
+            }
+        }
+        if (polygonDragItem_) {
+            auto polygon = polygonDragItem_->polygon();
+            if (polygonDragIndex_ >= 0 && polygonDragIndex_ < polygon.size()) {
+                polygon[polygonDragIndex_] = polygonDragItem_->mapFromScene(snapPosition(cursorScenePosition_));
+                polygonDragItem_->setPolygon(polygon);
+                updatePolygonHandles(polygonDragShapeId_, scenePolygon(polygonDragItem_));
+            }
+            event->accept();
+            return;
+        }
+        if (resizingItem_) {
+            const QPointF point = snapPosition(cursorScenePosition_);
+            QRectF rect = resizeStartRect_;
+            switch (resizeCorner_) {
+            case 0:
+                rect.setTopLeft(point);
+                break;
+            case 1:
+                rect.setTopRight(point);
+                break;
+            case 2:
+                rect.setBottomLeft(point);
+                break;
+            case 3:
+                rect.setBottomRight(point);
+                break;
+            case 4:
+                rect.setLeft(point.x());
+                break;
+            case 5:
+                rect.setRight(point.x());
+                break;
+            case 6:
+                rect.setTop(point.y());
+                break;
+            case 7:
+                rect.setBottom(point.y());
+                break;
+            default:
+                break;
+            }
+            rect = rect.normalized();
+            if (rect.width() < 1.0)
+                rect.setWidth(1.0);
+            if (rect.height() < 1.0)
+                rect.setHeight(1.0);
+            dynamic_cast<QGraphicsRectItem *>(resizingItem_)->setRect(rect);
+            updateResizeHandles(resizeShapeId_, rect);
+            event->accept();
+            return;
+        }
+        updateResizeHandleVisibility(itemAt(event->pos()));
+        if (tool_ == Tool::placeDevice)
+            viewport()->update();
+        if (draggingInstance_) {
+            const auto delta = mapToScene(event->pos()) - dragStartScene_;
+            draggingInstance_->setPos(snapPosition(dragStartPosition_ + delta));
+            event->accept();
+            return;
+        }
+        if (tool_ == Tool::path && pathActive_) {
+            pathEnd_ = pathPreviewEndPoint(event->pos(), event->modifiers().testFlag(Qt::ShiftModifier));
+            viewport()->update();
+            event->accept();
+            return;
+        }
+        if (drawing_ && drawPreview_) {
+            if (!rectangleSizeValid_) {
+                drawEnd_ = snapPosition(mapToScene(event->pos()));
+                drawPreview_->setRect(QRectF(drawStart_, drawEnd_).normalized());
+                viewport()->update();
+            }
+            event->accept();
+            return;
+        }
+        if (portDrawing_ && portDrawPreview_) {
+            portDrawPreview_->setRect(QRectF(portDrawStart_, snapPosition(mapToScene(event->pos()))).normalized());
+            event->accept();
+            return;
+        }
+        QGraphicsView::mouseMoveEvent(event);
+        if (movingItem_) {
+            if (auto *rectItem = dynamic_cast<QGraphicsRectItem *>(movingItem_)) {
+                const auto id = movingItem_->data(0).toULongLong();
+                if (id != 0)
+                    updateResizeHandles(id, movingItem_->mapRectToScene(rectItem->rect()));
+            }
+            if (auto *polygonItem = dynamic_cast<QGraphicsPolygonItem *>(movingItem_)) {
+                const auto id = movingItem_->data(0).toULongLong();
+                if (id != 0)
+                    updatePolygonHandles(id, scenePolygon(polygonItem));
+            }
+        }
+    }
+
+    void wheelEvent(QWheelEvent *event) override {
+        if (event->angleDelta().y() == 0) {
+            event->ignore();
+            return;
+        }
+        // Ctrl+wheel always zooms, including while a path is active. Plain
+        // wheel input changes the active path layer only while drawing.
+        if (event->modifiers().testFlag(Qt::ControlModifier)) {
+            const auto scenePosition = mapToScene(event->position().toPoint());
+            const qreal factor = event->angleDelta().y() > 0 ? 1.2 : 1.0 / 1.2;
+            zoom_ = std::clamp(zoom_ * factor, qreal(1.0e-6), qreal(1.0e6));
+            const auto viewportCenter = QPointF(viewport()->width() * 0.5, viewport()->height() * 0.5);
+            const auto cursor = event->position();
+            centerScene_ = scenePosition - QPointF((cursor.x() - viewportCenter.x()) / zoom_,
+                                                   (cursor.y() - viewportCenter.y()) / zoom_);
+            applyNavigationTransform();
+            event->accept();
+            return;
+        }
+        if (tool_ == Tool::path && pathActive_) {
+            const int next = pathLayerIndex_ + (event->angleDelta().y() > 0 ? 1 : -1);
+            if (next >= 0 && next < static_cast<int>(pathConfig_.layers.size())) {
+                pathLayerIndex_ = next;
+                // Each segment keeps the minimum width of its own layer.
+                if (const auto minimum = currentPathMinimumWidth(); minimum > 0)
+                    pathWidth_ = minimum;
+                pathEnd_ = pathPreviewEndPoint(event->position().toPoint(),
+                                               QApplication::keyboardModifiers().testFlag(Qt::ShiftModifier));
+                if (pathLayerChanged_)
+                    pathLayerChanged_(pathConfig_.layers[pathLayerIndex_].layer,
+                                      pathConfig_.layers[pathLayerIndex_].name);
+                viewport()->update();
+            }
+            event->accept();
+            return;
+        }
+        // No active path and no Ctrl modifier: the Layout wheel zooms.
+        const auto scenePosition = mapToScene(event->position().toPoint());
+        const qreal factor = event->angleDelta().y() > 0 ? 1.2 : 1.0 / 1.2;
+        zoom_ = std::clamp(zoom_ * factor, qreal(1.0e-6), qreal(1.0e6));
+        const auto viewportCenter = QPointF(viewport()->width() * 0.5, viewport()->height() * 0.5);
+        const auto cursor = event->position();
+        centerScene_ = scenePosition -
+                       QPointF((cursor.x() - viewportCenter.x()) / zoom_, (cursor.y() - viewportCenter.y()) / zoom_);
+        applyNavigationTransform();
+        event->accept();
+    }
+
+    void mouseReleaseEvent(QMouseEvent *event) override {
+        if (manualPathDragHandle_ >= 0 && event->button() == Qt::LeftButton) {
+            if (auto *path = findPathItem(manualPathDragId_))
+                path->endHandleDrag();
+            manualPathDragId_ = 0;
+            manualPathDragHandle_ = -1;
+            event->accept();
+            return;
+        }
+        if (event->button() == Qt::MiddleButton) {
+            panning_ = false;
+            setTool(tool_);
+            event->accept();
+            return;
+        }
+        if (tool_ == Tool::polygon && event->button() == Qt::LeftButton) {
+            event->accept();
+            return;
+        }
+        if (drawing_ && event->button() == Qt::LeftButton) {
+            // The rectangle is finished by the next click (handled in the press
+            // event), not by releasing the mouse.
+            event->accept();
+            return;
+        }
+        if (portDrawing_ && event->button() == Qt::LeftButton) {
+            const auto end = snapPosition(mapToScene(event->pos()));
+            const auto rectangle = QRectF(portDrawStart_, end).normalized();
+            if (portDrawPreview_) {
+                scene()->removeItem(portDrawPreview_);
+                delete portDrawPreview_;
+                portDrawPreview_ = nullptr;
+            }
+            portDrawing_ = false;
+            if (rectangle.width() >= 1.0 && rectangle.height() >= 1.0 && portPlaced_)
+                portPlaced_(portDrawStart_, end);
+            event->accept();
+            return;
+        }
+        if (polygonDragItem_ && event->button() == Qt::LeftButton) {
+            auto *item = polygonDragItem_;
+            const int index = polygonDragIndex_;
+            const auto shapeId = polygonDragShapeId_;
+            const auto startLocal = polygonDragStartLocalPoint_;
+            polygonDragItem_ = nullptr;
+            polygonDragShapeId_ = 0;
+            polygonDragIndex_ = -1;
+            const auto polygon = item->polygon();
+            if (index >= 0 && index < polygon.size()) {
+                const auto currentLocal = polygon[index];
+                if (currentLocal != startLocal && polygonPointMoved_)
+                    polygonPointMoved_(shapeId, index, item->mapToScene(currentLocal));
+            }
+            event->accept();
+            return;
+        }
+        if (resizingItem_ && event->button() == Qt::LeftButton) {
+            auto *item = resizingItem_;
+            resizingItem_ = nullptr;
+            const auto rect = dynamic_cast<QGraphicsRectItem *>(item)->rect();
+            if (rect != resizeStartRect_ && shapeResized_)
+                shapeResized_(resizeShapeId_, rect);
+            resizeShapeId_ = 0;
+            event->accept();
+            return;
+        }
+        if (tool_ == Tool::path && event->button() == Qt::LeftButton && pathDragging_) {
+            pathDragging_ = false;
+            if (auto *port = pathPortItemAt(event->pos())) {
+                activatePathLayer(pathLayerIndexFor(static_cast<openvlsi::ObjectId>(port->data(6).toULongLong())));
+                pathEnd_ = port->sceneBoundingRect().center();
+            } else {
+                pathEnd_ = constrainedPathPoint(pathAnchor_, snapPosition(mapToScene(event->pos())),
+                                                event->modifiers().testFlag(Qt::ShiftModifier));
+            }
+            if (QLineF(pathAnchor_, pathEnd_).length() >= 0.5 && !pathConfig_.layers.empty()) {
+                pathPoints_.push_back(pathEnd_);
+                pathSegmentWidths_.push_back(pathWidth_);
+                pathSegmentLayerIndices_.push_back(pathLayerIndex_);
+                pathAnchor_ = pathEnd_;
+            }
+            viewport()->update();
+            event->accept();
+            return;
+        }
+        if (draggingInstance_ && event->button() == Qt::LeftButton) {
+            auto *instance = draggingInstance_;
+            draggingInstance_ = nullptr;
+            const auto delta = instance->pos() - dragStartPosition_;
+            if ((delta.x() != 0.0 || delta.y() != 0.0) && shapeMoved_)
+                shapeMoved_(instance->data(0).toULongLong(), delta);
+            event->accept();
+            return;
+        }
+        QGraphicsView::mouseReleaseEvent(event);
+        if (event->button() == Qt::LeftButton && movingItem_) {
+            if (tool_ == Tool::move) {
+                movingItem_->setPos(snapPosition(movingItem_->pos()));
+                const auto delta = movingItem_->pos() - movingStartPosition_;
+                if ((delta.x() != 0.0 || delta.y() != 0.0) && shapeMoved_)
+                    shapeMoved_(movingItem_->data(0).toULongLong(), delta);
+            }
+            movingItem_ = nullptr;
+        }
+    }
+
+    void mouseDoubleClickEvent(QMouseEvent *event) override {
+        if (tool_ == Tool::polygon && event->button() == Qt::LeftButton) {
+            setTool(Tool::select);
+            if (toolEscapeRequested_)
+                toolEscapeRequested_();
+            event->accept();
+            return;
+        }
+        if (tool_ == Tool::rectangle && event->button() == Qt::LeftButton && drawing_) {
+            // A fast second click can arrive as a double-click event.
+            finishRectangleDrawing(rectangleSizeValid_ ? typedRectangleEnd() : snapPosition(mapToScene(event->pos())));
+            event->accept();
+            return;
+        }
+        if (tool_ == Tool::text && event->button() == Qt::LeftButton) {
+            event->accept();
+            return;
+        }
+        if (tool_ == Tool::textPolygon && event->button() == Qt::LeftButton) {
+            event->accept();
+            return;
+        }
+        if (tool_ == Tool::path && event->button() == Qt::LeftButton && !readOnly_) {
+            // Clicking repeatedly adds points; finish the path with Escape or
+            // Space instead of treating the second click as a finish gesture.
+            event->accept();
+            return;
+        }
+        if (tool_ == Tool::select && event->button() == Qt::LeftButton) {
+            auto *planned = itemAt(event->pos());
+            while (planned && planned->data(2).toString().isEmpty())
+                planned = planned->parentItem();
+            if (planned) {
+                const auto tag = planned->data(2).toString();
+                const auto id = static_cast<openvlsi::ObjectId>(planned->data(0).toULongLong());
+                if (tag == QStringLiteral("planned-device") && plannedDeviceActivated_) {
+                    plannedDeviceActivated_(id);
+                    event->accept();
+                    return;
+                }
+                if ((tag == QStringLiteral("planned-connection") || tag == QStringLiteral("planned-connection-hit")) &&
+                    plannedConnectionActivated_) {
+                    plannedConnectionActivated_(id);
+                    event->accept();
+                    return;
+                }
+            }
+            auto *hit = itemAt(event->pos());
+            while (hit && !hit->data(3).isValid())
+                hit = hit->parentItem();
+            if (hit && hit->data(3).toString() == QStringLiteral("instance-port")) {
+                if (instancePortActivated_)
+                    instancePortActivated_(hit->data(4).toULongLong(), hit->data(5).toULongLong());
+                event->accept();
+                return;
+            }
+            if (auto *instance = layoutInstanceOwner(itemAt(event->pos()))) {
+                draggingInstance_ = nullptr;
+                movingItem_ = nullptr;
+                if (instanceActivated_)
+                    instanceActivated_(instance->data(0).toULongLong());
+                event->accept();
+                return;
+            }
+        }
+        QGraphicsView::mouseDoubleClickEvent(event);
+    }
+
+    void contextMenuEvent(QContextMenuEvent *event) override {
+        const bool suppressed = suppressFigureContextMenu_;
+        suppressFigureContextMenu_ = false;
+        if (!suppressed && !readOnly_ && emptyContextMenu_) {
+            // Empty canvas space: the host builds the tool/clipboard menu.
+            auto *hit = itemAt(event->pos());
+            const bool onTagged = hit && !hit->data(2).toString().isEmpty();
+            auto *figure = layoutContextFigure(hit);
+            if (!hit || (!figure && !onTagged)) {
+                emptyContextMenu_(event->globalPos());
+                event->accept();
+                return;
+            }
+        }
+        if (!suppressed && !readOnly_ && (tool_ == Tool::select || tool_ == Tool::move)) {
+            // Right-clicking a figure opens its menu. The press handler already
+            // selected it; select here too so the menu never silently vanishes.
+            auto *hit = itemAt(event->pos());
+            auto *figure = hit ? layoutContextFigure(hit) : nullptr;
+            // Planned devices keep their device-specific menu in the host so
+            // Draw Manually / Place Device remain available next to the link
+            // actions.
+            if (figure && figure->data(2).toString() == QStringLiteral("planned-device"))
+                figure = nullptr;
+            if (figure) {
+                const auto id = static_cast<openvlsi::ObjectId>(figure->data(0).toULongLong());
+                if (id != 0) {
+                    if (!figure->isSelected())
+                        selectLayoutFigure(figure);
+                    if (figure->data(1).toString() == QStringLiteral("layout-instance")) {
+                        if (figureContextAction_) {
+                            QMenu menu(this);
+                            auto *locateAction = menu.addAction(QStringLiteral("Locate Schematic Counterpart"));
+                            auto *bindAction = menu.addAction(QStringLiteral("Bind to Schematic Device…"));
+                            auto *clearAction = menu.addAction(QStringLiteral("Clear Schematic Binding"));
+                            auto *chosen = menu.exec(event->globalPos());
+                            if (chosen == locateAction)
+                                figureContextAction_(id, FigureContextAction::locateSchematicCounterpart);
+                            else if (chosen == bindAction)
+                                figureContextAction_(id, FigureContextAction::bindToSchematicDevice);
+                            else if (chosen == clearAction)
+                                figureContextAction_(id, FigureContextAction::clearSchematicBinding);
+                            event->accept();
+                            return;
+                        }
+                    }
+                    QMenu menu(this);
+                    menu.addAction(QStringLiteral("Traced net"));
+                    auto *rotateAction = menu.addAction(QStringLiteral("Rotate"));
+                    auto *flipAction = menu.addAction(QStringLiteral("Flip"));
+                    QAction *flattenAction = nullptr;
+                    if (dynamic_cast<LayoutPathItem *>(figure))
+                        flattenAction = menu.addAction(QStringLiteral("Flatten to Polygon"));
+                    QAction *locateSchematicAction = nullptr;
+                    QAction *bindSchematicAction = nullptr;
+                    QAction *clearSchematicAction = nullptr;
+                    if (figure->data(1).toString() == QStringLiteral("layout-instance") ||
+                        figure->data(2).toString() == QStringLiteral("planned-device")) {
+                        menu.addSeparator();
+                        locateSchematicAction = menu.addAction(QStringLiteral("Locate Schematic Counterpart"));
+                        bindSchematicAction = menu.addAction(QStringLiteral("Bind to Schematic Device…"));
+                        clearSchematicAction = menu.addAction(QStringLiteral("Clear Schematic Binding"));
+                    }
+                    menu.addSeparator();
+                    auto *duplicateAction = menu.addAction(QStringLiteral("Duplicate"));
+                    auto *arrayAction = menu.addAction(QStringLiteral("Create Array..."));
+                    auto *arrangeMenu = menu.addMenu(QStringLiteral("Arrange"));
+                    auto *alignLeftAction = arrangeMenu->addAction(QStringLiteral("Align Left"));
+                    auto *alignRightAction = arrangeMenu->addAction(QStringLiteral("Align Right"));
+                    auto *alignTopAction = arrangeMenu->addAction(QStringLiteral("Align Top"));
+                    auto *alignBottomAction = arrangeMenu->addAction(QStringLiteral("Align Bottom"));
+                    auto *alignCenterXAction = arrangeMenu->addAction(QStringLiteral("Center Horizontally"));
+                    auto *alignCenterYAction = arrangeMenu->addAction(QStringLiteral("Center Vertically"));
+                    arrangeMenu->addSeparator();
+                    auto *distributeXAction = arrangeMenu->addAction(QStringLiteral("Distribute Horizontally"));
+                    auto *distributeYAction = arrangeMenu->addAction(QStringLiteral("Distribute Vertically"));
+                    const auto figureCount = selectedFigureCount();
+                    arrangeMenu->setEnabled(figureCount >= 2);
+                    alignLeftAction->setEnabled(figureCount >= 2);
+                    alignRightAction->setEnabled(figureCount >= 2);
+                    alignTopAction->setEnabled(figureCount >= 2);
+                    alignBottomAction->setEnabled(figureCount >= 2);
+                    alignCenterXAction->setEnabled(figureCount >= 2);
+                    alignCenterYAction->setEnabled(figureCount >= 2);
+                    distributeXAction->setEnabled(figureCount >= 3);
+                    distributeYAction->setEnabled(figureCount >= 3);
+                    menu.addSeparator();
+                    auto *copyAction = menu.addAction(QStringLiteral("Copy"));
+                    auto *cutAction = menu.addAction(QStringLiteral("Cut"));
+                    auto *pasteAction = menu.addAction(QStringLiteral("Paste"));
+                    menu.addSeparator();
+                    auto *deleteAction = menu.addAction(QStringLiteral("Delete"));
+                    auto *chosen = menu.exec(event->globalPos());
+                    if (!chosen) {
+                        event->accept();
+                        return;
+                    }
+                    auto action = FigureContextAction::traceNet;
+                    if (chosen == rotateAction)
+                        action = FigureContextAction::rotate;
+                    else if (chosen == flipAction)
+                        action = FigureContextAction::flip;
+                    else if (flattenAction && chosen == flattenAction)
+                        action = FigureContextAction::flattenPath;
+                    else if (locateSchematicAction && chosen == locateSchematicAction)
+                        action = FigureContextAction::locateSchematicCounterpart;
+                    else if (bindSchematicAction && chosen == bindSchematicAction)
+                        action = FigureContextAction::bindToSchematicDevice;
+                    else if (clearSchematicAction && chosen == clearSchematicAction)
+                        action = FigureContextAction::clearSchematicBinding;
+                    else if (chosen == duplicateAction)
+                        action = FigureContextAction::duplicate;
+                    else if (chosen == arrayAction)
+                        action = FigureContextAction::createArray;
+                    else if (chosen == alignLeftAction)
+                        action = FigureContextAction::alignLeft;
+                    else if (chosen == alignRightAction)
+                        action = FigureContextAction::alignRight;
+                    else if (chosen == alignTopAction)
+                        action = FigureContextAction::alignTop;
+                    else if (chosen == alignBottomAction)
+                        action = FigureContextAction::alignBottom;
+                    else if (chosen == alignCenterXAction)
+                        action = FigureContextAction::alignCenterX;
+                    else if (chosen == alignCenterYAction)
+                        action = FigureContextAction::alignCenterY;
+                    else if (chosen == distributeXAction)
+                        action = FigureContextAction::distributeX;
+                    else if (chosen == distributeYAction)
+                        action = FigureContextAction::distributeY;
+                    else if (chosen == copyAction)
+                        action = FigureContextAction::copy;
+                    else if (chosen == cutAction)
+                        action = FigureContextAction::cut;
+                    else if (chosen == pasteAction)
+                        action = FigureContextAction::paste;
+                    else if (chosen == deleteAction)
+                        action = FigureContextAction::deleteShape;
+                    if (figureContextAction_) {
+                        figureContextAction_(id, action);
+                    } else if (action == FigureContextAction::traceNet && shapeActivated_) {
+                        shapeActivated_(id);
+                    } else if (action == FigureContextAction::deleteShape && deleted_) {
+                        deleted_({id});
+                    }
+                    event->accept();
+                    return;
+                }
+            }
+        }
+        if (!readOnly_) {
+            auto *planned = itemAt(event->pos());
+            while (planned && planned->data(2).toString().isEmpty())
+                planned = planned->parentItem();
+            if (planned) {
+                const auto tag = planned->data(2).toString();
+                const auto id = static_cast<openvlsi::ObjectId>(planned->data(0).toULongLong());
+                const auto activate = [&](const std::function<void(openvlsi::ObjectId)> &callback) {
+                    if (!callback)
+                        return false;
+                    if (scene()) {
+                        scene()->clearSelection();
+                        planned->setSelected(true);
+                    }
+                    callback(id);
+                    event->accept();
+                    return true;
+                };
+                if (tag == QStringLiteral("planned-device")) {
+                    if (activate(plannedDeviceActivated_))
+                        return;
+                }
+                if (tag == QStringLiteral("planned-connection") || tag == QStringLiteral("planned-connection-hit")) {
+                    if (activate(plannedConnectionActivated_))
+                        return;
+                }
+            }
+        }
+        QGraphicsView::contextMenuEvent(event);
+    }
+
+    void keyPressEvent(QKeyEvent *event) override {
+        if (tool_ == Tool::path && pathActive_) {
+            if (event->key() == Qt::Key_Return || event->key() == Qt::Key_Enter) {
+                commitPath();
+                event->accept();
+                return;
+            }
+            if (event->key() == Qt::Key_Backspace && pathPoints_.size() > 1) {
+                pathPoints_.pop_back();
+                if (!pathSegmentWidths_.empty())
+                    pathSegmentWidths_.pop_back();
+                if (!pathSegmentLayerIndices_.empty())
+                    pathSegmentLayerIndices_.pop_back();
+                pathAnchor_ = pathPoints_.back();
+                pathEnd_ = pathAnchor_;
+                viewport()->update();
+                event->accept();
+                return;
+            }
+        }
+        if (event->key() == Qt::Key_Escape &&
+            (tool_ == Tool::move || tool_ == Tool::path || tool_ == Tool::placeDevice || tool_ == Tool::rectangle ||
+             tool_ == Tool::polygon || tool_ == Tool::port || tool_ == Tool::ruler || tool_ == Tool::text ||
+             tool_ == Tool::textPolygon)) {
+            if (tool_ == Tool::rectangle) {
+                // Escape aborts the rectangle being drawn but leaves the tool
+                // active; a second Escape (nothing being drawn) returns to
+                // Select. Other tools keep their documented Escape behaviour
+                // (polygon/path finish, then back to Select).
+                const bool wasDrawing = drawing_ || drawPreview_ != nullptr;
+                abortActiveDrawing();
+                if (!wasDrawing) {
+                    setTool(Tool::select);
+                    if (toolEscapeRequested_)
+                        toolEscapeRequested_();
+                }
+                event->accept();
+                return;
+            }
+            cancelRectangleDrawing();
+            setTool(Tool::select);
+            if (toolEscapeRequested_)
+                toolEscapeRequested_();
+            event->accept();
+            return;
+        }
+        QGraphicsView::keyPressEvent(event);
+    }
+
+    // Cancels whatever drawing is in progress without changing the tool.
+    void abortActiveDrawing() {
+        cancelRectangleDrawing();
+        cancelManualPathDrag();
+        if (portDrawPreview_) {
+            scene()->removeItem(portDrawPreview_);
+            delete portDrawPreview_;
+            portDrawPreview_ = nullptr;
+        }
+        portDrawing_ = false;
+        polygonActive_ = false;
+        polygonPoints_.clear();
+        polygonCursor_ = {};
+        clearRuler();
+        viewport()->update();
+    }
+
+    bool eventFilter(QObject *watched, QEvent *event) override {
+        if (rectangleSizeEditor_ && watched == rectangleSizeEditor_ && event->type() == QEvent::KeyPress) {
+            auto *key = static_cast<QKeyEvent *>(event);
+            if (key->key() == Qt::Key_Escape) {
+                // Abort the rectangle being drawn and keep the tool active.
+                const bool wasDrawing = drawing_;
+                abortActiveDrawing();
+                if (!wasDrawing) {
+                    setTool(Tool::select);
+                    if (toolEscapeRequested_)
+                        toolEscapeRequested_();
+                } else {
+                    setFocus(Qt::OtherFocusReason);
+                }
+                return true;
+            }
+            if (key->key() == Qt::Key_Return || key->key() == Qt::Key_Enter) {
+                if (drawing_)
+                    finishRectangleDrawing(rectangleSizeValid_ ? typedRectangleEnd() : drawEnd_);
+                return true;
+            }
+        }
+        return LayoutCanvas::eventFilter(watched, event);
+    }
+
+    void resizeEvent(QResizeEvent *event) override {
+        LayoutCanvas::resizeEvent(event);
+        updateRectangleSizeEditorGeometry();
+    }
+
+    void updateResizeHandles(openvlsi::ObjectId shapeId, const QRectF &rect) {
+        for (auto *item : scene()->items()) {
+            if (item->data(3).toString() != QStringLiteral("resize-handle") || item->data(4).toULongLong() != shapeId)
+                continue;
+            item->setPos(layoutResizeHandlePosition(rect, item->data(5).toInt()));
+        }
+    }
+
+    static QPolygonF scenePolygon(const QGraphicsPolygonItem *item) {
+        QPolygonF polygon;
+        for (const auto &point : item->polygon())
+            polygon << item->mapToScene(point);
+        return polygon;
+    }
+
+    void updatePolygonHandles(openvlsi::ObjectId shapeId, const QPolygonF &polygon) {
+        for (auto *item : scene()->items()) {
+            if (item->data(3).toString() != QStringLiteral("polygon-handle") || item->data(4).toULongLong() != shapeId)
+                continue;
+            const int index = item->data(5).toInt();
+            if (index >= 0 && index < polygon.size())
+                item->setPos(polygon[index]);
+        }
+    }
+
+    void updateResizeHandleVisibility(QGraphicsItem *hovered) {
+        std::set<openvlsi::ObjectId> shapeIds;
+        if (tool_ == Tool::select) {
+            for (auto *item = hovered; item; item = item->parentItem()) {
+                const auto kind = item->data(3).toString();
+                if (kind == QStringLiteral("resize-handle") || kind == QStringLiteral("polygon-handle")) {
+                    shapeIds.insert(item->data(4).toULongLong());
+                    break;
+                }
+                if (item->data(0).isValid()) {
+                    shapeIds.insert(item->data(0).toULongLong());
+                    break;
+                }
+            }
+            for (auto *item : scene()->selectedItems()) {
+                const auto kind = item->data(3).toString();
+                if (kind == QStringLiteral("resize-handle") || kind == QStringLiteral("polygon-handle") ||
+                    !item->data(0).isValid())
+                    continue;
+                if (dynamic_cast<QGraphicsRectItem *>(item) || dynamic_cast<QGraphicsPolygonItem *>(item))
+                    shapeIds.insert(item->data(0).toULongLong());
+            }
+        }
+        for (auto *item : scene()->items()) {
+            const auto kind = item->data(3).toString();
+            if (kind == QStringLiteral("resize-handle") || kind == QStringLiteral("polygon-handle"))
+                item->setVisible(!readOnly_ && shapeIds.contains(item->data(4).toULongLong()));
+        }
+    }
+
+    QPointF rulerSnapPoint(QPointF point) const {
+        auto best = snapToGrid_ ? snapPosition(point) : point;
+        qreal bestDistance = 12.0 / std::max(zoom_, qreal(1.0e-6));
+        const auto consider = [&](QPointF candidate) {
+            const auto distance = QLineF(point, candidate).length();
+            if (distance < bestDistance) {
+                best = candidate;
+                bestDistance = distance;
+            }
+        };
+        for (auto *item : scene()->items()) {
+            if (item->data(3).toString() == QStringLiteral("resize-handle") || !item->isVisible())
+                continue;
+            const auto rectItem = dynamic_cast<QGraphicsRectItem *>(item);
+            if (rectItem) {
+                const auto rect = rectItem->sceneBoundingRect();
+                const QPointF candidates[] = {rect.topLeft(),
+                                              rect.topRight(),
+                                              rect.bottomLeft(),
+                                              rect.bottomRight(),
+                                              QPointF(point.x(), rect.top()),
+                                              QPointF(point.x(), rect.bottom()),
+                                              QPointF(rect.left(), point.y()),
+                                              QPointF(rect.right(), point.y())};
+                for (const auto candidate : candidates)
+                    consider(candidate);
+                continue;
+            }
+            const auto polygonItem = dynamic_cast<QGraphicsPolygonItem *>(item);
+            if (!polygonItem || polygonItem->polygon().isEmpty())
+                continue;
+            const auto polygon = polygonItem->polygon();
+            for (int index = 0; index < polygon.size(); ++index) {
+                const auto first = item->sceneTransform().map(polygon[index]);
+                const auto second = item->sceneTransform().map(polygon[(index + 1) % polygon.size()]);
+                consider(first);
+                const auto delta = second - first;
+                const auto lengthSquared = QPointF::dotProduct(delta, delta);
+                if (lengthSquared > 0.0) {
+                    const auto fraction =
+                        std::clamp(QPointF::dotProduct(point - first, delta) / lengthSquared, qreal(0.0), qreal(1.0));
+                    consider(first + delta * fraction);
+                }
+            }
+        }
+        return best;
+    }
+
+    void updateRuler(QPointF current) {
+        if (!rulerHasStart_ && rulerItem_ == nullptr)
+            return;
+        if (!rulerItem_) {
+            rulerItem_ = new LayoutRulerItem();
+            scene()->addItem(rulerItem_);
+        }
+        const auto end = rulerHasStart_ ? current : rulerEnd_;
+        rulerItem_->setLine(QLineF(rulerStart_, end));
+    }
+
+    void clearRuler() {
+        rulerHasStart_ = false;
+        rulerStart_ = {};
+        rulerEnd_ = {};
+        if (rulerItem_) {
+            scene()->removeItem(rulerItem_);
+            delete rulerItem_;
+            rulerItem_ = nullptr;
+        }
+    }
+
+  private:
+    bool isScaleIndicatorPosition(const QPoint &position) const {
+        return position.x() < 180 && position.y() >= viewport()->height() - 44;
+    }
+
+    void beginScaleEdit() {
+        if (scaleEditor_)
+            return;
+        scaleEditor_ = new QLineEdit(viewport());
+        scaleEditor_->setText(formatScaleLength(scaleIndicatorLength()));
+        scaleEditor_->setAlignment(Qt::AlignCenter);
+        scaleEditor_->setMaximumWidth(120);
+        scaleEditor_->setValidator(new QRegularExpressionValidator(
+            QRegularExpression(QStringLiteral("^\\s*[0-9]{1,9}(?:\\s*(?:mm|um|nm|pm))?\\s*$"),
+                               QRegularExpression::CaseInsensitiveOption),
+            scaleEditor_));
+        scaleEditor_->setGeometry(4, viewport()->height() - 42, 120, 24);
+        scaleEditor_->show();
+        scaleEditor_->selectAll();
+        scaleEditor_->setFocus();
+        connect(scaleEditor_, &QLineEdit::returnPressed, this, [this] { commitScaleEdit(); });
+        connect(scaleEditor_, &QLineEdit::editingFinished, this, [this] { commitScaleEdit(); });
+    }
+
+    void commitScaleEdit() {
+        if (!scaleEditor_)
+            return;
+        const auto text = scaleEditor_->text().trimmed();
+        const auto match =
+            QRegularExpression(QStringLiteral("^([0-9]+)\\s*(mm|um|nm|pm)$"), QRegularExpression::CaseInsensitiveOption)
+                .match(text);
+        if (match.hasMatch()) {
+            const auto number = match.captured(1).toLongLong();
+            const auto unit = match.captured(2).toLower();
+            qreal lengthNm = static_cast<qreal>(number);
+            if (unit == QStringLiteral("mm"))
+                lengthNm *= 1.0e6;
+            else if (unit == QStringLiteral("um"))
+                lengthNm *= 1.0e3;
+            else if (unit == QStringLiteral("pm"))
+                lengthNm *= 1.0e-3;
+            if (lengthNm > 0.0) {
+                zoom_ = std::clamp<qreal>(100.0 / lengthNm, qreal(1.0e-6), qreal(1.0e6));
+                applyNavigationTransform();
+            }
+        }
+        scaleEditor_->deleteLater();
+        scaleEditor_ = nullptr;
+    }
+
+    QPointF snapPosition(const QPointF &position) const {
+        if (!snapToGrid_ || gridSpacing_ <= 0.0)
+            return position;
+        return QPointF(std::round(position.x() / gridSpacing_) * gridSpacing_,
+                       std::round(position.y() / gridSpacing_) * gridSpacing_);
+    }
+
+    qreal scaleIndicatorLength() const {
+        const qreal targetPixels = 100.0;
+        const qreal rawLength = targetPixels / zoom_;
+        const qreal magnitude = std::pow(10.0, std::floor(std::log10(rawLength)));
+        const qreal normalized = rawLength / magnitude;
+        const qreal factor = normalized <= 1.0 ? 1.0 : normalized <= 2.0 ? 2.0 : normalized <= 5.0 ? 5.0 : 10.0;
+        return magnitude * factor;
+    }
+
+    QGraphicsItemGroup *layoutInstanceOwner(QGraphicsItem *item) const {
+        for (auto *cursor = item; cursor; cursor = cursor->parentItem()) {
+            if (cursor->data(1).toString() == QStringLiteral("layout-instance"))
+                return dynamic_cast<QGraphicsItemGroup *>(cursor);
+        }
+        return nullptr;
+    }
+
+    QGraphicsItem *textPolygonOwner(QGraphicsItem *item) const {
+        for (auto *cursor = item; cursor; cursor = cursor->parentItem()) {
+            if (cursor->data(3).toString() == QStringLiteral("text-polygon"))
+                return cursor;
+        }
+        return nullptr;
+    }
+
+    // Figures are the top-level selectable layout objects (shapes, ports,
+    // paths, planned devices). Children such as port captions and handles must
+    // resolve to the figure that owns them.
+    // Path point handles own the right-click menu (delete point), so the
+    // figure menu must not steal right-clicks that land on one.
+    LayoutPathItem *pathHandleAt(const QPoint &position) const {
+        if (!scene())
+            return nullptr;
+        const auto scenePos = mapToScene(position);
+        LayoutPathItem *best = nullptr;
+        qreal bestDistance = std::numeric_limits<qreal>::max();
+        for (auto *item : scene()->items()) {
+            auto *path = dynamic_cast<LayoutPathItem *>(item);
+            if (!path || !path->isVisible())
+                continue;
+            const int handle = path->handleAtScenePosition(scenePos);
+            if (handle < 0)
+                continue;
+            const auto distance = QLineF(scenePos, path->handleScenePosition(handle)).length();
+            if (distance < bestDistance) {
+                bestDistance = distance;
+                best = path;
+            }
+        }
+        return best;
+    }
+
+    QGraphicsItem *pathPortItemAt(const QPoint &position) const {
+        auto *hit = itemAt(position);
+        while (hit && hit->data(2).toString() != QStringLiteral("layout-port") &&
+               hit->data(3).toString() != QStringLiteral("instance-port"))
+            hit = hit->parentItem();
+        return hit;
+    }
+
+    int selectedFigureCount() const {
+        if (!scene())
+            return 0;
+        std::set<openvlsi::ObjectId> ids;
+        for (auto *item : scene()->selectedItems()) {
+            const auto kind = item->data(3).toString();
+            if (kind == QStringLiteral("resize-handle") || kind == QStringLiteral("polygon-handle") ||
+                item->data(1).toString() == QStringLiteral("layout-instance") || !item->data(2).toString().isEmpty())
+                continue;
+            if (item->data(0).isValid()) {
+                const auto id = static_cast<openvlsi::ObjectId>(item->data(0).toULongLong());
+                if (id != 0)
+                    ids.insert(id);
+            }
+        }
+        return static_cast<int>(ids.size());
+    }
+
+    QPointF pathPreviewEndPoint(const QPoint &position, bool orthogonal) const {
+        if (auto *port = pathPortItemAt(position))
+            return port->sceneBoundingRect().center();
+        return constrainedPathPoint(pathAnchor_, snapPosition(mapToScene(position)), orthogonal);
+    }
+
+    QGraphicsItem *layoutFigureOwner(QGraphicsItem *item) const {
+        QGraphicsItem *owner = nullptr;
+        for (auto *cursor = item; cursor; cursor = cursor->parentItem()) {
+            const auto kind = cursor->data(3).toString();
+            if (kind == QStringLiteral("resize-handle") || kind == QStringLiteral("polygon-handle") ||
+                kind == QStringLiteral("instance-port"))
+                return nullptr;
+            if (cursor->data(1).toString() == QStringLiteral("layout-instance"))
+                return nullptr;
+            if (!cursor->parentItem() && cursor->data(0).isValid() &&
+                (cursor->flags() & QGraphicsItem::ItemIsSelectable))
+                owner = cursor;
+        }
+        return owner;
+    }
+
+    QGraphicsItem *layoutContextFigure(QGraphicsItem *item) const {
+        for (auto *cursor = item; cursor; cursor = cursor->parentItem()) {
+            if (cursor->data(1).toString() == QStringLiteral("layout-instance") ||
+                cursor->data(2).toString() == QStringLiteral("planned-device"))
+                return cursor;
+            if (!cursor->data(2).toString().isEmpty())
+                return nullptr;
+        }
+        return layoutFigureOwner(item);
+    }
+
+    // Figures stacked under one cursor position, topmost first. Repeated
+    // clicks walk this list so covered figures stay reachable.
+    std::vector<QGraphicsItem *> layoutFiguresAt(const QPoint &position) const {
+        std::vector<QGraphicsItem *> figures;
+        std::vector<openvlsi::ObjectId> ids;
+        for (auto *candidate : scene()->items(mapToScene(position))) {
+            auto *figure = layoutFigureOwner(candidate);
+            if (!figure)
+                continue;
+            const auto id = figure->data(0).toULongLong();
+            if (id == 0 || std::find(ids.begin(), ids.end(), id) != ids.end())
+                continue;
+            ids.push_back(id);
+            figures.push_back(figure);
+        }
+        return figures;
+    }
+
+    void selectLayoutFigure(QGraphicsItem *figure) {
+        if (!figure)
+            return;
+        if (selectedLayoutInstance_ != 0) {
+            selectedLayoutInstance_ = 0;
+            applyLayoutInstanceSelection();
+        }
+        draggingInstance_ = nullptr;
+        movingItem_ = nullptr;
+        scene()->clearSelection();
+        figure->setSelected(true);
+    }
+
+    void applyLayoutInstanceSelection() {
+        if (readOnly_)
+            selectedLayoutInstance_ = 0;
+        bool found = false;
+        for (auto *item : scene()->items()) {
+            if (item->data(1).toString() != QStringLiteral("layout-instance"))
+                continue;
+            auto *group = dynamic_cast<QGraphicsItemGroup *>(item);
+            if (!group)
+                continue;
+            const bool selected =
+                selectedLayoutInstance_ != 0 && group->data(0).toULongLong() == selectedLayoutInstance_;
+            group->setSelected(selected);
+            for (auto *child : group->childItems())
+                if (child->data(0).toString() == QStringLiteral("layout-instance-highlight"))
+                    child->setVisible(selected);
+            found |= selected;
+        }
+        if (!found)
+            selectedLayoutInstance_ = 0;
+        if (notifiedLayoutInstance_ != selectedLayoutInstance_) {
+            notifiedLayoutInstance_ = selectedLayoutInstance_;
+            if (instanceSelectionChanged_)
+                instanceSelectionChanged_(selectedLayoutInstance_);
+        }
+    }
+
+    std::vector<openvlsi::ObjectId> pathViasBetween(int from, int to) const {
+        std::vector<openvlsi::ObjectId> vias;
+        if (from == to || from < 0 || to < 0 || from >= static_cast<int>(pathConfig_.layers.size()) ||
+            to >= static_cast<int>(pathConfig_.layers.size()))
+            return vias;
+        const int low = std::min(from, to);
+        const int high = std::max(from, to);
+        for (int index = low; index < high; ++index) {
+            const auto via = pathConfig_.layers[index].viaToNext;
+            if (via != 0)
+                vias.push_back(via);
+        }
+        return vias;
+    }
+
+    void commitPath() {
+        if (!pathActive_ || pathConfig_.layers.empty())
+            return;
+
+        auto points = pathPoints_;
+        auto widths = pathSegmentWidths_;
+        auto layers = pathSegmentLayerIndices_;
+        if (!points.empty() && QLineF(points.back(), pathEnd_).length() >= 0.5) {
+            points.push_back(pathEnd_);
+            widths.push_back(pathWidth_);
+            layers.push_back(pathLayerIndex_);
+        }
+        if (points.size() < 2 || widths.size() != points.size() - 1 || layers.size() != widths.size()) {
+            finishPath();
+            return;
+        }
+
+        LayoutPathData data;
+        data.points = std::move(points);
+        data.widths = std::move(widths);
+        data.segmentLayers.reserve(layers.size());
+        for (const auto layerIndex : layers) {
+            if (layerIndex < 0 || layerIndex >= static_cast<int>(pathConfig_.layers.size()))
+                return;
+            data.segmentLayers.push_back(pathConfig_.layers[static_cast<std::size_t>(layerIndex)].layer);
+        }
+        data.pointVias.resize(data.points.size());
+        if (!layers.empty() && pathStartLayerIndex_ != layers.front() && pathStartLayerIndex_ >= 0 &&
+            pathStartLayerIndex_ < static_cast<int>(pathConfig_.layers.size()))
+            data.pointVias.front() = pathViasBetween(pathStartLayerIndex_, layers.front());
+        for (std::size_t index = 1; index < layers.size(); ++index) {
+            if (layers[index - 1] != layers[index])
+                data.pointVias[index] = pathViasBetween(layers[index - 1], layers[index]);
+        }
+
+        const auto path = std::move(data);
+        finishPath();
+        if (pathCreated_)
+            pathCreated_(path);
+    }
+
+    void finishPath() {
+        pathActive_ = false;
+        pathDragging_ = false;
+        pathPoints_.clear();
+        pathSegmentWidths_.clear();
+        pathSegmentLayerIndices_.clear();
+        pathStartLayerIndex_ = 0;
+        pathEnd_ = pathAnchor_;
+        viewport()->update();
+    }
+
+    void finishPolygon() {
+        auto points = polygonPoints_;
+        if (points.size() >= 3 && QLineF(points.front(), points.back()).length() < 0.5)
+            points.pop_back();
+        const bool hasPolygon = points.size() >= 3;
+        polygonActive_ = false;
+        polygonPoints_.clear();
+        polygonCursor_ = {};
+        viewport()->update();
+        if (hasPolygon && polygonCreated_)
+            polygonCreated_(points);
+    }
+
+    void ensureRectangleSizeEditor() {
+        if (rectangleSizeEditor_)
+            return;
+        rectangleSizeEditor_ = new QLineEdit(viewport());
+        rectangleSizeEditor_->setObjectName(QStringLiteral("layoutRectangleSize"));
+        rectangleSizeEditor_->setAlignment(Qt::AlignCenter);
+        rectangleSizeEditor_->setPlaceholderText(QStringLiteral("W, H"));
+        rectangleSizeEditor_->setToolTip(
+            QStringLiteral("Rectangle size in database units\n"
+                           "Type width,height (for example 281,2875); Enter finishes now"));
+        rectangleSizeEditor_->setValidator(new QRegularExpressionValidator(
+            QRegularExpression(QStringLiteral("^\\s*[0-9]{1,9}(?:(?:\\s*[,xX*]\\s*|\\s+)[0-9]{1,9})?\\s*$")),
+            rectangleSizeEditor_));
+        rectangleSizeEditor_->installEventFilter(this);
+        connect(rectangleSizeEditor_, &QLineEdit::textEdited, this,
+                [this](const QString &text) { applyRectangleSizeText(text); });
+        connect(rectangleSizeEditor_, &QLineEdit::returnPressed, this, [this] {
+            if (drawing_)
+                finishRectangleDrawing(rectangleSizeValid_ ? typedRectangleEnd() : drawEnd_);
+        });
+        rectangleSizeEditor_->hide();
+        updateRectangleSizeEditorGeometry();
+    }
+
+    void updateRectangleSizeEditorGeometry() {
+        if (!rectangleSizeEditor_)
+            return;
+        constexpr int width = 168;
+        constexpr int height = 26;
+        constexpr int margin = 12;
+        rectangleSizeEditor_->setGeometry(std::max(0, viewport()->width() - width - margin),
+                                          std::max(0, viewport()->height() - height - margin), width, height);
+    }
+
+    void syncRectangleSizeEditor() {
+        if (tool_ != Tool::rectangle && !rectangleSizeEditor_)
+            return;
+        ensureRectangleSizeEditor();
+        rectangleSizeEditor_->setVisible(tool_ == Tool::rectangle && !readOnly_);
+        updateRectangleSizeEditorGeometry();
+    }
+
+    // The rectangle tool is click-move-click: the first click anchors the
+    // corner and focuses the size field, so the user can either click again
+    // or type an exact width and height.
+    void beginRectangleDrawing(QPointF start) {
+        ensureRectangleSizeEditor();
+        if (drawPreview_) {
+            scene()->removeItem(drawPreview_);
+            delete drawPreview_;
+            drawPreview_ = nullptr;
+        }
+        drawing_ = true;
+        drawStart_ = start;
+        drawEnd_ = start;
+        rectangleSizeValid_ = false;
+        typedRectangleSize_ = {};
+        const auto previewColor = rectangleStyle_.color;
+        QBrush previewBrush(QColor(previewColor.red(), previewColor.green(), previewColor.blue(), 70),
+                            rectangleStyle_.pattern);
+        if (rectangleStyle_.pattern == Qt::NoBrush)
+            previewBrush = QBrush(Qt::NoBrush);
+        QPen previewPen(previewColor, 1.0, Qt::DashLine);
+        previewPen.setCosmetic(true);
+        drawPreview_ = scene()->addRect(QRectF(drawStart_, drawStart_), previewPen, previewBrush);
+        drawPreview_->setZValue(20.0);
+        if (rectangleSizeEditor_) {
+            QSignalBlocker blocker(rectangleSizeEditor_);
+            rectangleSizeEditor_->clear();
+            rectangleSizeEditor_->show();
+            rectangleSizeEditor_->setFocus();
+        }
+        viewport()->update();
+    }
+
+    QPointF typedRectangleEnd() const { return drawStart_ + typedRectangleSize_; }
+
+    void applyRectangleSizeText(const QString &text) {
+        if (!drawing_) {
+            rectangleSizeValid_ = false;
+            return;
+        }
+        QPointF size;
+        bool hasHeight = false;
+        if (!parseRectangleSize(text, &size, &hasHeight)) {
+            rectangleSizeValid_ = false;
+            viewport()->update();
+            return;
+        }
+        rectangleSizeValid_ = true;
+        typedRectangleSize_ = size;
+        drawEnd_ = typedRectangleEnd();
+        if (drawPreview_)
+            drawPreview_->setRect(QRectF(drawStart_, drawEnd_).normalized());
+        // Only a width,height pair commits on its own; a lone number stays a
+        // preview so a pause while typing does not create the wrong rectangle.
+        if (hasHeight && rectangleCommitTimer_)
+            rectangleCommitTimer_->start();
+        viewport()->update();
+    }
+
+    // Accepts "281,2875" as width,height. The dimensions follow the layout
+    // spacing (grid) setting when snapping is on.
+    bool parseRectangleSize(const QString &text, QPointF *size, bool *hasHeight) const {
+        static const QRegularExpression pattern(
+            QStringLiteral("^\\s*([0-9]{1,9})(?:(?:\\s*[,xX*]\\s*|\\s+)([0-9]{1,9}))?\\s*$"));
+        const auto match = pattern.match(text);
+        if (!match.hasMatch())
+            return false;
+        const auto length = [this](const QString &value) {
+            auto number = std::round(value.toDouble());
+            if (snapToGrid_ && gridSpacing_ > 1.0)
+                number = std::round(number / gridSpacing_) * gridSpacing_;
+            return std::max<qreal>(1.0, number);
+        };
+        size->setX(length(match.captured(1)));
+        *hasHeight = !match.captured(2).isEmpty();
+        size->setY(*hasHeight ? length(match.captured(2)) : size->x());
+        return true;
+    }
+
+    void commitTypedRectangle() {
+        if (!drawing_ || !rectangleSizeValid_)
+            return;
+        finishRectangleDrawing(typedRectangleEnd());
+    }
+
+    void finishRectangleDrawing(QPointF end) {
+        if (!drawing_)
+            return;
+        const auto start = drawStart_;
+        const auto rectangle = QRectF(start, end).normalized();
+        if (rectangleCommitTimer_)
+            rectangleCommitTimer_->stop();
+        if (drawPreview_) {
+            scene()->removeItem(drawPreview_);
+            delete drawPreview_;
+            drawPreview_ = nullptr;
+        }
+        drawing_ = false;
+        rectangleSizeValid_ = false;
+        typedRectangleSize_ = {};
+        drawEnd_ = end;
+        if (rectangleSizeEditor_) {
+            QSignalBlocker blocker(rectangleSizeEditor_);
+            rectangleSizeEditor_->clear();
+            rectangleSizeEditor_->clearFocus();
+        }
+        setFocus(Qt::OtherFocusReason);
+        viewport()->update();
+        if (rectangle.width() >= 1.0 && rectangle.height() >= 1.0 && rectangleCreated_)
+            rectangleCreated_(start, end);
+    }
+
+    void cancelRectangleDrawing() {
+        if (!drawing_ && !drawPreview_)
+            return;
+        if (rectangleCommitTimer_)
+            rectangleCommitTimer_->stop();
+        if (drawPreview_) {
+            scene()->removeItem(drawPreview_);
+            delete drawPreview_;
+            drawPreview_ = nullptr;
+        }
+        drawing_ = false;
+        rectangleSizeValid_ = false;
+        typedRectangleSize_ = {};
+        if (rectangleSizeEditor_) {
+            QSignalBlocker blocker(rectangleSizeEditor_);
+            rectangleSizeEditor_->clear();
+        }
+        viewport()->update();
+    }
+
+    void applyNavigationTransform() {
+        if (rulerItem_)
+            rulerItem_->prepareForScaleChange();
+        setTransform(QTransform(zoom_, 0.0, 0.0, zoom_, 0.0, 0.0), false);
+        centerOn(centerScene_);
+        viewport()->update();
+    }
+
+    QString formatScaleLength(qreal length) const { return formatLayoutLength(length); }
+
+    Tool tool_ = Tool::select;
+    LayoutPathConfig pathConfig_;
+    openvlsi::ObjectId pathCell_ = 0;
+    int pathWidth_ = 200;
+    int pathLayerIndex_ = 0;
+    int pathStartLayerIndex_ = 0;
+    bool pathActive_ = false;
+    bool pathDragging_ = false;
+    QPointF pathAnchor_;
+    QPointF pathEnd_;
+    std::vector<QPointF> pathPoints_;
+    std::vector<int> pathSegmentWidths_;
+    std::vector<int> pathSegmentLayerIndices_;
+    LayoutPathCreatedCallback pathCreated_;
+    LayoutPathLayerChangedCallback pathLayerChanged_;
+    LayoutPathPointSelectionChangedCallback pathPointSelectionChanged_;
+    LayoutTextPlacedCallback textPlaced_;
+    LayoutTextPolygonPlacedCallback textPolygonPlaced_;
+    LayoutPortPlacedCallback portPlaced_;
+    LayoutInstancePortActivatedCallback instancePortActivated_;
+    LayoutPolygonCreatedCallback polygonCreated_;
+    LayoutPolygonPointMovedCallback polygonPointMoved_;
+    bool polygonActive_ = false;
+    std::vector<QPointF> polygonPoints_;
+    QPointF polygonCursor_;
+    bool panning_ = false;
+    bool drawing_ = false;
+    bool portDrawing_ = false;
+    QPoint panStartPosition_;
+    QPointF panStartCenterScene_;
+    QPointF drawStart_;
+    QPointF drawEnd_;
+    QPointF typedRectangleSize_;
+    QLineEdit *rectangleSizeEditor_ = nullptr;
+    QTimer *rectangleCommitTimer_ = nullptr;
+    bool rectangleSizeValid_ = false;
+    QPointF portDrawStart_;
+    QGraphicsRectItem *drawPreview_ = nullptr;
+    QGraphicsRectItem *portDrawPreview_ = nullptr;
+    QGraphicsItem *movingItem_ = nullptr;
+    // Remembers the last plain figure click so repeated clicks at the same
+    // spot cycle through stacked figures instead of reselecting the top one.
+    QPoint lastFigureClickPosition_;
+    bool hasLastFigureClick_ = false;
+    // Id (not pointer) of the figure the next click should step beneath.
+    // Scene items are rebuilt on refresh, so a raw pointer could dangle.
+    openvlsi::ObjectId cyclingFigureId_ = 0;
+    bool suppressFigureContextMenu_ = false;
+    openvlsi::ObjectId manualPathDragId_ = 0;
+    int manualPathDragHandle_ = -1;
+    QGraphicsPolygonItem *polygonDragItem_ = nullptr;
+    openvlsi::ObjectId polygonDragShapeId_ = 0;
+    int polygonDragIndex_ = -1;
+    QPointF polygonDragStartLocalPoint_;
+    QGraphicsItem *resizingItem_ = nullptr;
+    QGraphicsItemGroup *draggingInstance_ = nullptr;
+    QPointF dragStartScene_;
+    QPointF dragStartPosition_;
+    QPointF movingStartPosition_;
+    QRectF resizeStartRect_;
+    openvlsi::ObjectId resizeShapeId_ = 0;
+    int resizeCorner_ = 0;
+    openvlsi::ObjectId selectedLayoutInstance_ = 0;
+    std::function<void(QPointF, QPointF)> rectangleCreated_;
+    std::function<void(openvlsi::ObjectId, QPointF)> shapeMoved_;
+    std::function<void(openvlsi::ObjectId, QRectF)> shapeResized_;
+    std::function<void(std::vector<openvlsi::ObjectId>)> deleted_;
+    std::function<void()> changed_;
+    std::function<void(QPointF)> devicePlacementRequested_;
+    std::function<void(openvlsi::ObjectId)> instanceActivated_;
+    std::function<void(openvlsi::ObjectId)> plannedDeviceActivated_;
+    std::function<void(openvlsi::ObjectId)> plannedConnectionActivated_;
+    std::function<void(openvlsi::ObjectId)> instanceSelectionChanged_;
+    std::function<void()> toolEscapeRequested_;
+    std::function<void(openvlsi::ObjectId)> shapeActivated_;
+    std::function<void(openvlsi::ObjectId, FigureContextAction)> figureContextAction_;
+    std::function<void(const QPoint &)> emptyContextMenu_;
+    openvlsi::ObjectId notifiedLayoutInstance_ = 0;
+    const openvlsi::LayoutDeviceCell *devicePreview_ = nullptr;
+    openvlsi::LayoutPreviewModel devicePreviewModel_;
+    std::map<std::pair<int, int>, LayerStyle> deviceLayerStyles_;
+    QPointF cursorScenePosition_;
+    QLineEdit *scaleEditor_ = nullptr;
+    std::map<openvlsi::ObjectId, LayerStyle> layerStyles_;
+    LayerStyle rectangleStyle_{openvlsi::uiColor(openvlsi::UiColor::Accent3), Qt::SolidPattern};
+    LayoutRulerItem *rulerItem_ = nullptr;
+    QPointF rulerStart_;
+    QPointF rulerEnd_;
+    bool rulerHasStart_ = false;
+    bool gridVisible_ = true;
+    bool snapToGrid_ = true;
+    qreal gridSpacing_ = 1.0;
+    bool readOnly_ = false;
+    qreal zoom_ = 1.0;
+    QPointF centerScene_;
+};
+
+} // namespace
+
+// Item data roles used to identify schematic canvas items.
+//
+// role 0: item kind ("symbol", "symbol-artwork", "symbol-label",
+//        "symbol-highlight", "pin", "wire", "net-label")
+// role 1: the stable domain id of the object the item projects
+QGraphicsItem *createLayoutPlannedDeviceItem(openvlsi::ObjectId id, const QString &name, const QRectF &rect, bool readOnly) {
+    auto *item = new PlannedDeviceItem(name, rect.size());
+    item->setPos(rect.topLeft());
+    item->setData(0, QVariant::fromValue<qulonglong>(id));
+    item->setData(2, QStringLiteral("planned-device"));
+    item->setZValue(10.0);
+    item->setToolTip(name.isEmpty() ? QStringLiteral("Planned device") : name);
+    if (!readOnly) {
+        item->setFlag(QGraphicsItem::ItemIsSelectable);
+        item->setFlag(QGraphicsItem::ItemIsMovable);
+    }
+    return item;
+}
+
+QGraphicsItem *createLayoutPlannedConnectionItem(openvlsi::ObjectId id, const QLineF &line, const QColor &color) {
+    return new PlannedConnectionItem(id, line, color);
+}
+
+QGraphicsItem *createLayoutPathItem(openvlsi::ObjectId id, const std::vector<QPointF> &points, qreal width,
+                                    const std::vector<qreal> &segmentWidths, const std::vector<bool> &segmentVisible,
+                                    const std::vector<QColor> &segmentColors,
+                                    const std::vector<std::vector<QColor>> &pointViaColors, bool readOnly,
+                                    bool pointEditable, bool endpointHandlesOnly,
+                                    LayoutPathPointsMovedCallback pointsMoved,
+                                    LayoutPathPointInsertedCallback pointInserted,
+                                    LayoutPathPointsDeletedCallback pointsDeleted) {
+    return new LayoutPathItem(id, points, width, segmentWidths, segmentVisible, segmentColors, pointViaColors, readOnly,
+                              pointEditable, endpointHandlesOnly, std::move(pointsMoved), std::move(pointInserted),
+                              std::move(pointsDeleted));
+}
+
+LayoutCanvas *createLayoutCanvas(QWidget *parent) { return new LayoutCanvasImpl(parent); }

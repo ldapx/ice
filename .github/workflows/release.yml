@@ -30,19 +30,19 @@ jobs:
             libssl-dev zlib1g-dev libcurl4-openssl-dev
       - name: Build
         env:
-          ICE_ENABLE_OPENROAD: "0"
-          ICE_BUILD_PYTHON: "0"
+          OPENVLSI_ENABLE_OPENROAD: "0"
+          OPENVLSI_BUILD_PYTHON: "0"
         run: |
           xmake f -y -m release
-          xmake build -y ice ice-cli ice-pkg ice-mcp
+          xmake build -y openvlsi openvlsi-cli openvlsi-pkg openvlsi-mcp
       - name: Package
         env:
-          ICE_ENABLE_OPENROAD: "0"
-          ICE_BUILD_PYTHON: "0"
+          OPENVLSI_ENABLE_OPENROAD: "0"
+          OPENVLSI_BUILD_PYTHON: "0"
         run: xmake pack -f targz,zip --autobuild=n -o dist
       - uses: actions/upload-artifact@v4
         with:
-          name: ice-linux-x86_64
+          name: openvlsi-linux-x86_64
           path: dist/*
 
   macos:
@@ -54,10 +54,10 @@ jobs:
         include:
           - runner: macos-26
             arch: arm64
-            artifact: ice-macos-arm64
+            artifact: openvlsi-macos-arm64
           - runner: macos-26-intel
             arch: x86_64
-            artifact: ice-macos-x86_64
+            artifact: openvlsi-macos-x86_64
     runs-on: ${{ matrix.runner }}
     env:
       HOMEBREW_NO_AUTO_UPDATE: "1"
@@ -79,8 +79,8 @@ jobs:
           pkg_config_path="$pkg_config_path:$(brew --prefix curl)/lib/pkgconfig"
           pkg_config_path="$pkg_config_path:$(brew --prefix zlib)/lib/pkgconfig"
           echo "PKG_CONFIG_PATH=$pkg_config_path" >>"$GITHUB_ENV"
-          echo "ICE_QT_PREFIX=$qt_prefix" >>"$GITHUB_ENV"
-          echo "ICE_QT_BIN=$qt_prefix/bin" >>"$GITHUB_ENV"
+          echo "OPENVLSI_QT_PREFIX=$qt_prefix" >>"$GITHUB_ENV"
+          echo "OPENVLSI_QT_BIN=$qt_prefix/bin" >>"$GITHUB_ENV"
       - name: Install xmake
         run: |
           if [ "$(uname -m)" = "arm64" ]; then
@@ -96,15 +96,15 @@ jobs:
           "$RUNNER_TEMP/xmake-bin/xmake" --version
       - name: Build
         env:
-          ICE_ENABLE_OPENROAD: "0"
-          ICE_BUILD_PYTHON: "0"
+          OPENVLSI_ENABLE_OPENROAD: "0"
+          OPENVLSI_BUILD_PYTHON: "0"
         run: |
           xmake f -y -m release
-          xmake build -y ice ice-cli ice-pkg ice-mcp
+          xmake build -y openvlsi openvlsi-cli openvlsi-pkg openvlsi-mcp
       - name: Package
         env:
-          ICE_ENABLE_OPENROAD: "0"
-          ICE_BUILD_PYTHON: "0"
+          OPENVLSI_ENABLE_OPENROAD: "0"
+          OPENVLSI_BUILD_PYTHON: "0"
         run: xmake pack -f zip --autobuild=n -o dist
       - uses: actions/upload-artifact@v4
         with:
@@ -162,17 +162,17 @@ jobs:
         run: |
           nsis_dir="$(cygpath -u "$RUNNER_TEMP")/nsis/nsis-3.09"
           export PATH="$nsis_dir/Bin:$nsis_dir:$PATH"
-          export ICE_ENABLE_OPENROAD=0
-          export ICE_BUILD_PYTHON=0
-          export ICE_MINGW_SYSROOT="$(cygpath -w "$MINGW_PREFIX")"
-          export ICE_PKG_CONFIG_DIR="$(cygpath -w "$MINGW_PREFIX/lib/pkgconfig")"
-          export ICE_BASH="$(cygpath -w /usr/bin/bash.exe)"
+          export OPENVLSI_ENABLE_OPENROAD=0
+          export OPENVLSI_BUILD_PYTHON=0
+          export OPENVLSI_MINGW_SYSROOT="$(cygpath -w "$MINGW_PREFIX")"
+          export OPENVLSI_PKG_CONFIG_DIR="$(cygpath -w "$MINGW_PREFIX/lib/pkgconfig")"
+          export OPENVLSI_BASH="$(cygpath -w /usr/bin/bash.exe)"
           xmake f -p mingw -a x86_64 --toolchain=mingw --mingw="$(cygpath -w "$MINGW_PREFIX")" -y -m release
-          xmake build -y ice ice-cli ice-pkg ice-mcp
+          xmake build -y openvlsi openvlsi-cli openvlsi-pkg openvlsi-mcp
           xmake pack -f nsis,zip --autobuild=n -o dist
       - uses: actions/upload-artifact@v4
         with:
-          name: ice-windows-x86_64
+          name: openvlsi-windows-x86_64
           path: dist/*
 
   publish:

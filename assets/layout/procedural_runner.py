@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Run an ICE procedural layout script and emit generated geometry as JSON.
+"""Run an OpenVLSI procedural layout script and emit generated geometry as JSON.
 
 The user script is executed with a single injected object named ``layout``.
-It builds an in-memory description of the generated static layout. ICE parses
+It builds an in-memory description of the generated static layout. OpenVLSI parses
 the resulting JSON, validates it, and applies it to the project's layout
 database.
 
@@ -863,7 +863,7 @@ class LayoutInstancePlacement:
     The instance is already part of the builder. This handle exposes the
     referenced cell's real bounds and ports, and can be moved, mirrored, added
     to rows/columns/grids, or used as a routing endpoint. Cell bounds and port
-    metadata come from the project cell catalog supplied by ICE; when the
+    metadata come from the project cell catalog supplied by OpenVLSI; when the
     catalog is unavailable, composition falls back to a one-unit bounding box.
 
     :ivar cell: Referenced layout cell name.
@@ -2281,7 +2281,7 @@ class Layer:
 class Layout:
     """Builder exposed to procedural layout scripts as ``layout``.
 
-    A script writes geometry by calling methods on this object. ICE executes
+    A script writes geometry by calling methods on this object. OpenVLSI executes
     the script in a temporary directory, reads the builder's output, validates
     it, and replaces the read-only generated child of the procedural layout.
     Coordinates are integer database units by default; use :meth:`nm`,
@@ -2295,7 +2295,7 @@ class Layout:
     :ivar params: Current parameter values keyed by parameter name.
     :ivar parameter_specs: Declared parameter metadata keyed by name.
     :ivar cells: Project layout-cell catalog keyed by cell name. Entries carry
-        ``bounds`` and ``ports`` when ICE supplied the catalog.
+        ``bounds`` and ``ports`` when OpenVLSI supplied the catalog.
     :ivar layers: Registered layer specs keyed by layer name.
     :ivar shapes: Emitted shape records in creation order.
     :ivar ports: Emitted port records in creation order.
@@ -2396,7 +2396,7 @@ class Layout:
     def layer(self, name, number=None, datatype=None):
         """Register or resolve a layer and return a reusable handle.
 
-        When ``number``/``datatype`` are omitted, ICE resolves the layer from
+        When ``number``/``datatype`` are omitted, OpenVLSI resolves the layer from
         the active PDK package or the project's existing layers. Explicit
         values win when no matching PDK/project layer exists. A purpose suffix
         such as ``Metal1.pin`` is preserved, so pin layers can carry their own
@@ -2607,7 +2607,7 @@ class Layout:
     def path(self, layer, points, width, name=None, net=None):
         """Draw a stroked polyline as a path shape.
 
-        The path stores its centerline and width. ICE expands it to polygons
+        The path stores its centerline and width. OpenVLSI expands it to polygons
         for display and for :meth:`iter_polygons`.
 
         :param layer: Layer name or :class:`Layer` handle.
@@ -2856,7 +2856,7 @@ class Layout:
         mirrored, composed with :meth:`add`/row/column helpers, or used as a
         routing endpoint.
 
-        Cell names are validated against the project cell catalog when ICE
+        Cell names are validated against the project cell catalog when OpenVLSI
         supplies one. Matching is case-insensitive and the canonical project
         name is stored in the instance.
 
@@ -2913,7 +2913,7 @@ class Layout:
         Parameter values are always strings. Use :meth:`um`, :meth:`nm`,
         :meth:`length`, or :meth:`int`/``float`` conversions in the script.
         Declared parameters appear in the GUI parameter form and can be
-        changed with the CLI, ``icepy``, or MCP before regeneration.
+        changed with the CLI, ``openvlsipy``, or MCP before regeneration.
 
         :param name: Non-empty parameter name.
         :param default: Value used when the project has no stored value.
@@ -2976,7 +2976,7 @@ class Layout:
         """Pin a device layer to its real stream so the parser cannot infer one.
 
         Package manifests do not list every purpose layer. Without an explicit
-        number/datatype, ICE would assign the next free layer number and can
+        number/datatype, OpenVLSI would assign the next free layer number and can
         collide with another PDK layer (for example Substrate -> PEmWind).
         """
         self.layers[str(name)] = {
@@ -3023,12 +3023,12 @@ class Layout:
         generator_path = Path(self.pdk_root) / "layout" / "devices" / "generator.py"
         if not generator_path.is_file():
             raise RuntimeError(f"Device generator is missing: {generator_path}")
-        if os.environ.get("ICE_ALLOW_PACKAGE_CODE", "1") == "0":
+        if os.environ.get("OPENVLSI_ALLOW_PACKAGE_CODE", "1") == "0":
             raise RuntimeError(
                 "Package device generators require explicit permission. "
-                "Mark the package trusted or set ICE_ALLOW_PACKAGE_CODE=1."
+                "Mark the package trusted or set OPENVLSI_ALLOW_PACKAGE_CODE=1."
             )
-        with tempfile.TemporaryDirectory(prefix="ice-device-") as directory:
+        with tempfile.TemporaryDirectory(prefix="openvlsi-device-") as directory:
             params_path = Path(directory) / "params.json"
             output_path = Path(directory) / "geometry.json"
             params_path.write_text(json.dumps(parameters))
@@ -5577,7 +5577,7 @@ class Layout:
         if not path.is_file():
             self._builtin_generators = {}
             return self._builtin_generators
-        module_name = "ice_builtin_procedural_generators"
+        module_name = "openvlsi_builtin_procedural_generators"
         module = sys.modules.get(module_name)
         if module is None:
             spec = importlib.util.spec_from_file_location(module_name, path)
@@ -5621,7 +5621,7 @@ class Layout:
                 )
             module_path = index_path.parent / module_name
             spec = importlib.util.spec_from_file_location(
-                f"ice_package_generator_{name}", module_path
+                f"openvlsi_package_generator_{name}", module_path
             )
             if spec is None or spec.loader is None:
                 raise RuntimeError(
@@ -5662,7 +5662,7 @@ class Layout:
     ):
         """Queue a PDK-provided dummy metal fill pass.
 
-        ICE runs the implementation shipped by the active PDK package after the
+        OpenVLSI runs the implementation shipped by the active PDK package after the
         script finishes, so the fill sees the complete layout. ``layers`` may be
         a layer name or a list of layer names. ``density`` and ``deviation`` are
         percentages and may be scalars or per-layer mappings. ``area`` optionally
@@ -5804,12 +5804,12 @@ class Layout:
     def to_dict(self):
         """Return the builder output as a JSON-compatible dictionary.
 
-        This is the document ICE validates and applies after the script
+        This is the document OpenVLSI validates and applies after the script
         finishes; scripts normally do not need to call it directly.
         """
         quality, plan, review = self._finalize_layout_metadata()
         return {
-            "format": "ice-procedural-layout",
+            "format": "openvlsi-procedural-layout",
             "schema_version": SCHEMA_VERSION,
             "builder_version": BUILDER_VERSION,
             "layout_api_version": LAYOUT_API_VERSION,
@@ -6446,7 +6446,7 @@ def _load_dummy_fill_extension(layout):
             f"PDK '{pdk}' does not provide {extension_path}. "
             "Install a PDK package with a layout/dummy_fill.py implementation."
         )
-    spec = importlib.util.spec_from_file_location("ice_pdk_dummy_fill", extension_path)
+    spec = importlib.util.spec_from_file_location("openvlsi_pdk_dummy_fill", extension_path)
     if spec is None or spec.loader is None:
         raise RuntimeError(
             f"Unable to load the dummy fill implementation at {extension_path}"

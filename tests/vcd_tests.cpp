@@ -1,5 +1,5 @@
-#include "icelib/simulation.hpp"
-#include "icelib/vcd.hpp"
+#include "openvlsilib/simulation.hpp"
+#include "openvlsilib/vcd.hpp"
 
 #include <doctest/doctest.h>
 
@@ -11,7 +11,7 @@
 #include <vector>
 
 namespace {
-const ice::SimulationTrace *findTrace(const ice::SimulationResult &result, const std::string &name) {
+const openvlsi::SimulationTrace *findTrace(const openvlsi::SimulationResult &result, const std::string &name) {
     for (const auto &trace : result.traces) {
         if (trace.name == name || trace.name.ends_with("." + name))
             return &trace;
@@ -19,7 +19,7 @@ const ice::SimulationTrace *findTrace(const ice::SimulationResult &result, const
     return nullptr;
 }
 
-const ice::SimulationTrace *findTrace(const ice::VcdData &data, const std::string &name) {
+const openvlsi::SimulationTrace *findTrace(const openvlsi::VcdData &data, const std::string &name) {
     for (const auto &trace : data.traces) {
         if (trace.name == name)
             return &trace;
@@ -48,7 +48,7 @@ b1010 "
 #15
 1!)";
 
-    const auto data = ice::parseVcdText(text, "test.vcd");
+    const auto data = openvlsi::parseVcdText(text, "test.vcd");
     CHECK(data.time.size() == 4);
     CHECK(std::abs(data.time[1] - 5.0e-9) < 1.0e-18);
     CHECK(std::abs(data.time[2] - 10.0e-9) < 1.0e-18);
@@ -64,18 +64,18 @@ b1010 "
 }
 
 TEST_CASE("VCD traces populate empty simulation signals and graphs") {
-    ice::SimulationItem simulation;
-    ice::SimulationGraph graph;
+    openvlsi::SimulationItem simulation;
+    openvlsi::SimulationGraph graph;
     graph.id = 1;
     graph.name = "Graph 1";
     simulation.graphs.push_back(graph);
-    const std::vector<ice::SimulationTrace> traces = {{"top.clk", {0, 1, 0}}, {"top.q", {0, 1, 1}}};
+    const std::vector<openvlsi::SimulationTrace> traces = {{"top.clk", {0, 1, 0}}, {"top.q", {0, 1, 1}}};
 
-    CHECK(ice::populateSimulationSignalsFromTraces(simulation, traces));
+    CHECK(openvlsi::populateSimulationSignalsFromTraces(simulation, traces));
     CHECK(simulation.captureSignals == "top.clk,top.q");
     CHECK((simulation.graphs.front().ySignals == std::vector<std::string>{"top.clk", "top.q"}));
     CHECK(simulation.graphs.front().xAxis == "time");
-    CHECK(!ice::populateSimulationSignalsFromTraces(simulation, traces));
+    CHECK(!openvlsi::populateSimulationSignalsFromTraces(simulation, traces));
 }
 
 TEST_CASE("Icarus Verilog picks the testbench that owns the dump commands") {
@@ -98,7 +98,7 @@ module tb_first_dut(input logic clk, output logic q);
 endmodule
 )";
 
-    ice::SimulationRequest request;
+    openvlsi::SimulationRequest request;
     request.simulator = "iverilog";
     request.analysis = "digital";
     std::istringstream stream(source);
@@ -106,9 +106,9 @@ endmodule
     while (std::getline(stream, line))
         request.netlist.push_back(line);
     request.probeSignals = {"clk", "q"};
-    ice::CancellationToken token;
-    const auto result = ice::IcarusVerilogSimulator().run(request, token, {});
-    CHECK(result.state == ice::JobState::succeeded);
+    openvlsi::CancellationToken token;
+    const auto result = openvlsi::IcarusVerilogSimulator().run(request, token, {});
+    CHECK(result.state == openvlsi::JobState::succeeded);
     const auto *clock = findTrace(result, "clk");
     const auto *output = findTrace(result, "q");
     CHECK(clock != nullptr);
@@ -130,7 +130,7 @@ module tb;
 endmodule
 )";
 
-    ice::SimulationRequest request;
+    openvlsi::SimulationRequest request;
     request.simulator = "iverilog";
     request.analysis = "digital";
     std::istringstream stream(source);
@@ -138,20 +138,20 @@ endmodule
     while (std::getline(stream, line))
         request.netlist.push_back(line);
     request.probeSignals = {"clk", "q"};
-    ice::CancellationToken token;
-    ice::SimulationResult result;
+    openvlsi::CancellationToken token;
+    openvlsi::SimulationResult result;
     try {
-        result = ice::IcarusVerilogSimulator().run(request, token, {});
+        result = openvlsi::IcarusVerilogSimulator().run(request, token, {});
     } catch (const std::exception &) {
         CHECK(false);
         return;
     }
-    if (result.state != ice::JobState::succeeded) {
+    if (result.state != openvlsi::JobState::succeeded) {
         std::cerr << "ICARUS DEBUG: " << result.error << "\n";
         for (const auto &warning : result.warnings)
             std::cerr << "ICARUS WARNING: " << warning << "\n";
     }
-    CHECK(result.state == ice::JobState::succeeded);
+    CHECK(result.state == openvlsi::JobState::succeeded);
     CHECK(!result.time.empty());
     CHECK(result.traces.size() == 2);
     const auto *clock = findTrace(result, "clk");

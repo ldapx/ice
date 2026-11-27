@@ -8,7 +8,7 @@ Specification and performance report produced by `training_agent.py` on 2026-11-
 | --- | --- |
 | Model | nvidia/nemotron-3-ultra-550b-a55b:free |
 | Project | project |
-| Run directory | /home/gan/repos/ice/Training-data/runs/20261104-192128_common-source-amplifier |
+| Run directory | /home/gan/repos/openvlsi/Training-data/runs/20261104-192128_common-source-amplifier |
 | Schematic | `design_a2` (text SPICE) |
 | Simulation | `sim_a2` (transient) |
 | State | succeeded |
@@ -45,7 +45,7 @@ Missed specifications: Output peak-to-peak swing, DC drain voltage.
 
 **Topology:** Single-stage NMOS common-source amplifier with PMOS current-mirror active load. NMOS biased via voltage divider (R1=33k, R2=100k) and source resistor RS=1k bypassed by 10uF. PMOS mirror reference set by Rref=2k from bias node to ground. Output AC-coupled through 1uF to 1Meg load. Generic NMOS (Kp=1mA/V², Vth=0.5V) and PMOS (Kp=0.5mA/V², Vth=-0.5V) models. Bias current ~208uA, giving gm=0.65mS and output impedance ~120k for ~38dB gain.
 
-**Notes:** Active load enables high gain (>30dB) and large swing (~1.5Vpp) within 1.8V supply. DC operating point: Vgate~1.35V, Vsource~0.2V, Vdrain~0.9V, Vbias~0.4V. Input amplitude 10mV at 1kHz. Coupling capacitors sized for <10Hz low-frequency poles. No .tran/.ac cards; ICE runs transient.
+**Notes:** Active load enables high gain (>30dB) and large swing (~1.5Vpp) within 1.8V supply. DC operating point: Vgate~1.35V, Vsource~0.2V, Vdrain~0.9V, Vbias~0.4V. Input amplitude 10mV at 1kHz. Coupling capacitors sized for <10Hz low-frequency poles. No .tran/.ac cards; OpenVLSI runs transient.
 
 ## Attempts
 
@@ -95,6 +95,6 @@ RL out 0 1Meg
 - `thoughts.md` — full agent reasoning and tool log
 - `specs.md`, `specs.csv` — this table
 - `netlist.sp` — the simulated netlist
-- `simulation.json` — the raw stored ICE run
+- `simulation.json` — the raw stored OpenVLSI run
 - `proposal.json` — the model's final structured answer
-- `project/` — the ICE project (open `project.icepro` in the ICE GUI)
+- `project/` — the OpenVLSI project (open `project.ovpro` in the OpenVLSI GUI)

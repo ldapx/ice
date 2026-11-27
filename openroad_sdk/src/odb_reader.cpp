@@ -1,4 +1,4 @@
-#include "ice_openroad/odb_reader.hpp"
+#include "openvlsi_openroad/odb_reader.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -10,7 +10,7 @@
 #include "odb/dbShape.h"
 #include "odb/geom.h"
 
-namespace ice::openroad {
+namespace openvlsi::openroad {
 namespace {
 
 constexpr std::size_t kMaxPreviewShapes = 250000;
@@ -537,4 +537,4 @@ std::optional<HeatMapData> OdbReader::routingCongestion(int bins_x, int bins_y) 
     return map;
 }
 
-} // namespace ice::openroad
+} // namespace openvlsi::openroad

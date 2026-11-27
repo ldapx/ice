@@ -1,5 +1,5 @@
-#include "ice_openroad/engine.hpp"
-#include "ice_openroad/odb_reader.hpp"
+#include "openvlsi_openroad/engine.hpp"
+#include "openvlsi_openroad/odb_reader.hpp"
 
 #include <array>
 #include <clocale>
@@ -52,12 +52,12 @@ std::filesystem::path resolve(const std::filesystem::path &run_dir, const std::s
     return path.lexically_normal();
 }
 
-void printRect(std::ostream &output, const ice::openroad::Rect &rect) {
+void printRect(std::ostream &output, const openvlsi::openroad::Rect &rect) {
     output << "{\"x\":" << rect.x << ",\"y\":" << rect.y << ",\"width\":" << rect.width << ",\"height\":" << rect.height
            << "}";
 }
 
-void printSummary(std::ostream &output, const ice::openroad::OdbSummary &summary) {
+void printSummary(std::ostream &output, const openvlsi::openroad::OdbSummary &summary) {
     output << "{\"design_name\":\"" << jsonEscape(summary.design_name) << "\"";
     output << ",\"top_cell\":\"" << jsonEscape(summary.top_cell) << "\"";
     output << ",\"dbu_per_micron\":" << summary.dbu_per_micron;
@@ -73,7 +73,7 @@ void printSummary(std::ostream &output, const ice::openroad::OdbSummary &summary
     output << "}";
 }
 
-void printHeatMap(std::ostream &output, const ice::openroad::HeatMapData &map) {
+void printHeatMap(std::ostream &output, const openvlsi::openroad::HeatMapData &map) {
     output << "{\"columns\":" << map.columns << ",\"rows\":" << map.rows << ",\"bounds\":";
     printRect(output, map.bounds);
     output << ",\"minimum\":" << map.minimum << ",\"maximum\":" << map.maximum;
@@ -86,7 +86,7 @@ void printHeatMap(std::ostream &output, const ice::openroad::HeatMapData &map) {
     output << "]}";
 }
 
-void printPreview(std::ostream &output, const ice::openroad::OdbPreview &preview) {
+void printPreview(std::ostream &output, const openvlsi::openroad::OdbPreview &preview) {
     output << "{\"summary\":";
     printSummary(output, preview.summary);
     output << ",\"bounds\":";
@@ -218,19 +218,19 @@ void printPreview(std::ostream &output, const ice::openroad::OdbPreview &preview
     output << "}";
 }
 
-bool parseHeatMapKind(const std::string &value, ice::openroad::HeatMapKind &kind) {
+bool parseHeatMapKind(const std::string &value, openvlsi::openroad::HeatMapKind &kind) {
     if (value == "placement" || value == "placement-density")
-        kind = ice::openroad::HeatMapKind::placement_density;
+        kind = openvlsi::openroad::HeatMapKind::placement_density;
     else if (value == "routing" || value == "routing-congestion")
-        kind = ice::openroad::HeatMapKind::routing_congestion;
+        kind = openvlsi::openroad::HeatMapKind::routing_congestion;
     else if (value == "power" || value == "power-density")
-        kind = ice::openroad::HeatMapKind::power_density;
+        kind = openvlsi::openroad::HeatMapKind::power_density;
     else if (value == "pin" || value == "pin-density")
-        kind = ice::openroad::HeatMapKind::pin_density;
+        kind = openvlsi::openroad::HeatMapKind::pin_density;
     else if (value == "rudy")
-        kind = ice::openroad::HeatMapKind::rudy;
+        kind = openvlsi::openroad::HeatMapKind::rudy;
     else if (value == "irdrop" || value == "ir-drop")
-        kind = ice::openroad::HeatMapKind::ir_drop;
+        kind = openvlsi::openroad::HeatMapKind::ir_drop;
     else
         return false;
     return true;
@@ -250,7 +250,7 @@ std::vector<std::string> splitLayers(const std::string &value) {
     return result;
 }
 
-void printJson(const ice::openroad::StageResult &result) {
+void printJson(const openvlsi::openroad::StageResult &result) {
     std::cout << "{";
     std::cout << "\"success\":" << (result.success ? "true" : "false");
     std::cout << ",\"cancelled\":" << (result.cancelled ? "true" : "false");
@@ -280,17 +280,17 @@ void printJson(const ice::openroad::StageResult &result) {
     std::cout << "}}\n";
 }
 
-bool parseStage(const std::string &value, ice::openroad::Stage &stage) {
+bool parseStage(const std::string &value, openvlsi::openroad::Stage &stage) {
     if (value == "floorplan")
-        stage = ice::openroad::Stage::floorplan;
+        stage = openvlsi::openroad::Stage::floorplan;
     else if (value == "placement")
-        stage = ice::openroad::Stage::placement;
+        stage = openvlsi::openroad::Stage::placement;
     else if (value == "cts")
-        stage = ice::openroad::Stage::cts;
+        stage = openvlsi::openroad::Stage::cts;
     else if (value == "routing")
-        stage = ice::openroad::Stage::routing;
+        stage = openvlsi::openroad::Stage::routing;
     else if (value == "final")
-        stage = ice::openroad::Stage::final;
+        stage = openvlsi::openroad::Stage::final;
     else
         return false;
     return true;
@@ -308,19 +308,19 @@ int main(int argc, char **argv) {
     Tcl_FindExecutable(argv[0]);
 
     if (argc < 2) {
-        std::cerr << "Usage: ice-openroad <floorplan|placement|cts|routing|final|odb-info|odb-preview|heatmap> "
+        std::cerr << "Usage: openvlsi-openroad <floorplan|placement|cts|routing|final|odb-info|odb-preview|heatmap> "
                      "[options]\n";
         return 2;
     }
 
     const std::string command = argv[1];
     if (command == "--version" || command == "-version" || command == "version") {
-        std::cout << "ice-openroad " << ice::openroad::Engine::version() << "\n";
+        std::cout << "openvlsi-openroad " << openvlsi::openroad::Engine::version() << "\n";
         return 0;
     }
     if (command == "odb-info" || command == "odb-preview") {
         if (argc < 3) {
-            std::cerr << "Usage: ice-openroad " << command << " <odb> [options]\n";
+            std::cerr << "Usage: openvlsi-openroad " << command << " <odb> [options]\n";
             return 2;
         }
         int heatmap_bins = 32;
@@ -333,7 +333,7 @@ int main(int argc, char **argv) {
             std::cerr << "Unknown option: " << option << "\n";
             return 2;
         }
-        ice::openroad::OdbReader reader;
+        openvlsi::openroad::OdbReader reader;
         std::string error;
         if (!reader.open(argv[2], error)) {
             std::cerr << error << "\n";
@@ -349,7 +349,7 @@ int main(int argc, char **argv) {
     }
 
     if (command == "heatmap") {
-        ice::openroad::HeatMapJob heatmap;
+        openvlsi::openroad::HeatMapJob heatmap;
         for (int index = 2; index < argc; ++index) {
             const std::string option = argv[index];
             const auto value = [&]() -> std::string {
@@ -394,7 +394,7 @@ int main(int argc, char **argv) {
             heatmap.sdc = std::filesystem::absolute(heatmap.sdc).lexically_normal();
         const auto log_path =
             heatmap.log_file.empty() ? std::filesystem::path("/dev/null") : std::filesystem::absolute(heatmap.log_file);
-        ice::openroad::Engine engine;
+        openvlsi::openroad::Engine engine;
         std::string error;
         if (!engine.initialize({log_path, {}, heatmap.threads}, error)) {
             std::cout << "{\"success\":false,\"error\":\"" << jsonEscape(error) << "\"}\n";
@@ -406,7 +406,7 @@ int main(int argc, char **argv) {
         return result.success ? 0 : 1;
     }
 
-    ice::openroad::StageJob job;
+    openvlsi::openroad::StageJob job;
     if (!parseStage(argv[1], job.stage)) {
         std::cerr << "Unknown stage: " << argv[1] << "\n";
         return 2;
@@ -474,13 +474,13 @@ int main(int argc, char **argv) {
             const double y1 = std::stod(value());
             const double x2 = std::stod(value());
             const double y2 = std::stod(value());
-            job.options.die_area = ice::openroad::Rect{x1, y1, x2 - x1, y2 - y1};
+            job.options.die_area = openvlsi::openroad::Rect{x1, y1, x2 - x1, y2 - y1};
         } else if (option == "--core-area") {
             const double x1 = std::stod(value());
             const double y1 = std::stod(value());
             const double x2 = std::stod(value());
             const double y2 = std::stod(value());
-            job.options.core_area = ice::openroad::Rect{x1, y1, x2 - x1, y2 - y1};
+            job.options.core_area = openvlsi::openroad::Rect{x1, y1, x2 - x1, y2 - y1};
         } else if (option == "--site")
             job.options.site = value();
         else if (option == "--io-horizontal")
@@ -540,7 +540,7 @@ int main(int argc, char **argv) {
     for (auto &liberty : job.liberty)
         liberty = resolve(job.run_dir, liberty.string());
 
-    ice::openroad::Engine engine;
+    openvlsi::openroad::Engine engine;
     std::string error;
     if (!engine.initialize({job.log_file, job.metrics_file, job.threads}, error)) {
         printJson({false, false, error, {}, {}, {}});

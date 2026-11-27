@@ -1,7 +1,7 @@
-# ICE Implementation Roadmap
+# OpenVLSI Implementation Roadmap
 
 This roadmap records the capabilities, contracts, and acceptance criteria
-for ICE. Each area must preserve the core architectural boundaries. Work not
+for OpenVLSI. Each area must preserve the core architectural boundaries. Work not
 listed here is deferred.
 
 ## Foundation
@@ -13,11 +13,11 @@ foundations needed for a maintainable C++/Qt application.
 
 ### Scope
 
-- `icelib` C++ core library target.
-- `ice` Qt 6 desktop application target.
-- `ice-cli` headless CLI target.
-- `ice-pkg` package-manager target.
-- `ice-mcp` MCP-server target.
+- `openvlsilib` C++ core library target.
+- `openvlsi` Qt 6 desktop application target.
+- `openvlsi-cli` headless CLI target.
+- `openvlsi-pkg` package-manager target.
+- `openvlsi-mcp` MCP-server target.
 - xmake build configurations for the library, executables, and tests.
 - doctest test target.
 - structured logging with spdlog.
@@ -32,7 +32,7 @@ foundations needed for a maintainable C++/Qt application.
 - CLI version/help commands work.
 - A failing command returns a structured error and nonzero exit status.
 - The GUI can start without a project and reports configuration errors clearly.
-- All four executables link against the same `icelib` target.
+- All four executables link against the same `openvlsilib` target.
 
 ## Canonical project and domain model
 
@@ -64,8 +64,8 @@ validated domain model.
 
 ### Objective
 
-Expose the same core operations through `ice`, `ice-cli`, and Python bindings
-over `icelib`.
+Expose the same core operations through `openvlsi`, `openvlsi-cli`, and Python bindings
+over `openvlsilib`.
 
 ### Scope
 
@@ -79,7 +79,7 @@ over `icelib`.
 ### Acceptance criteria
 
 - A minimal design can be created and edited through each interface.
-- `ice`, `ice-cli`, and Python produce equivalent model changes for the same
+- `openvlsi`, `openvlsi-cli`, and Python produce equivalent model changes for the same
   operation.
 - Python can inspect, mutate, save, and reload a project.
 - UI state is not required to run core or CLI tests.
@@ -88,12 +88,12 @@ over `icelib`.
 
 ### Objective
 
-Make the layout model useful for real geometry operations without coupling ICE
+Make the layout model useful for real geometry operations without coupling OpenVLSI
 to Clipper2 types.
 
 ### Scope
 
-- ICE-owned geometry kernel interface.
+- OpenVLSI-owned geometry kernel interface.
 - Clipper2 adapter.
 - Polygon validation and cleanup.
 - Boolean and offset operations.
@@ -200,7 +200,7 @@ operation model is stable.
 - experimental plugin loading and lifecycle.
 - plugin target-build and dependency declarations.
 - provisional in-process versus out-of-process plugin policy.
-- `ice-mcp` server over stdio JSON-RPC.
+- `openvlsi-mcp` server over stdio JSON-RPC.
 - resource, prompt, progress, cancellation, and error contracts.
 - ACP chatbox with permission prompts and session state.
 - transactional agent operations, dry runs, previews, and audit events.
@@ -214,7 +214,7 @@ operation model is stable.
 - MCP and ACP failures do not corrupt the project database.
 
 Stable plugin API/ABI versioning, compatibility windows, and migration tooling
-are intentionally deferred until ICE has a substantial user and plugin base.
+are intentionally deferred until OpenVLSI has a substantial user and plugin base.
 
 ## Cross-cutting requirements
 

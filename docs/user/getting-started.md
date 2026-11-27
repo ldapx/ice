@@ -1,50 +1,50 @@
 # Getting Started
 
-ICE is a programmable integrated-circuit design environment. The `ice` desktop
-application, `ice-cli`, Python bindings, MCP server, and agent tools all operate
+OpenVLSI is a programmable integrated-circuit design environment. The `openvlsi` desktop
+application, `openvlsi-cli`, Python bindings, MCP server, and agent tools all operate
 on the same validated project model, so a design created in one interface is
 immediately available in the others.
 
-This guide is for people using ICE. If you are building, testing, or extending
-ICE itself, start with the {doc}`/developer/index` instead.
+This guide is for people using OpenVLSI. If you are building, testing, or extending
+OpenVLSI itself, start with the {doc}`/developer/index` instead.
 
 ## Before you begin
 
-You need an ICE build on your `PATH`:
+You need an OpenVLSI build on your `PATH`:
 
-- `ice` — the desktop application.
-- `ice-cli` — headless project, layout, simulation, and verification commands.
-- `ice-pkg` — package and PDK management.
-- `ice-mcp` — the optional MCP server for agents (when built/installed).
+- `openvlsi` — the desktop application.
+- `openvlsi-cli` — headless project, layout, simulation, and verification commands.
+- `openvlsi-pkg` — package and PDK management.
+- `openvlsi-mcp` — the optional MCP server for agents (when built/installed).
 
 If you do not have binaries yet, follow {doc}`/developer/building`. Tagged
 releases publish three packages: a Windows NSIS installer, a macOS zip with
-`ICE.app`, and a Linux `tar.gz`/zip with the four executables and shared
-resources. The Windows installer adds `bin` to `PATH`; on macOS move `ICE.app`
+`OpenVLSI.app`, and a Linux `tar.gz`/zip with the four executables and shared
+resources. The Windows installer adds `bin` to `PATH`; on macOS move `OpenVLSI.app`
 to Applications; on Linux extract the archive and add its `bin` directory to
 `PATH`.
 
 ## Launch the desktop application
 
 ```sh
-ice
+openvlsi
 ```
 
-When no project is open, ICE shows a startup view with recent projects and
+When no project is open, OpenVLSI shows a startup view with recent projects and
 actions to create or open a project. Closing a project returns to this view.
 
 ## Create a project
 
-Create a project from the startup view or **File → New Project**. ICE asks for
+Create a project from the startup view or **File → New Project**. OpenVLSI asks for
 a project name, a project folder, and whether to create a folder named after
 the project. The new project is initialized with:
 
 ```text
-project.icepro
-sch/                 # schematic cells (*.icesch, text SPICE, SystemVerilog)
-lay/                 # layout cells (*.icelay) and procedural layouts
-impl/                # implementation runs (*.iceimpl)
-sim/                 # simulations (*.icesim)
+project.ovpro
+sch/                 # schematic cells (*.ovsch, text SPICE, SystemVerilog)
+lay/                 # layout cells (*.ovlay) and procedural layouts
+impl/                # implementation runs (*.ovimpl)
+sim/                 # simulations (*.ovsim)
 scripts/             # project-level Python scripts
 build/               # generated outputs and simulation results
 .gitignore
@@ -79,27 +79,27 @@ See {doc}`gui` for the full desktop workflow, shortcuts, and editor contracts.
 Every command prints JSON on success and diagnostics on stderr. Start with:
 
 ```sh
-ice-cli --version
-ice-cli project-create ./demo "Demo project"
-ice-cli project-info ./demo
-ice-cli project-validate ./demo
-ice-cli doctor ./demo
+openvlsi-cli --version
+openvlsi-cli project-create ./demo "Demo project"
+openvlsi-cli project-info ./demo
+openvlsi-cli project-validate ./demo
+openvlsi-cli doctor ./demo
 ```
 
-`project-info` can omit the path: ICE uses `ICE_PROJECT` or searches the
-current directory and its parents for a single `project.icepro`.
+`project-info` can omit the path: OpenVLSI uses `OPENVLSI_PROJECT` or searches the
+current directory and its parents for a single `project.ovpro`.
 
 See {doc}`cli` for the complete command reference.
 
 ## Install a PDK package
 
-Simulation and package PDKs come from ICE packages. Install and verify one
+Simulation and package PDKs come from OpenVLSI packages. Install and verify one
 before simulating:
 
 ```sh
-ice-pkg resolve ~/.ice/packages 0.1.0 ihp.sg13g2
-ice-cli pdk-build ihp-sg13g2
-ice-cli pdk-info ihp-sg13g2 --probe
+openvlsi-pkg resolve ~/.openvlsi/packages 0.1.0 ihp.sg13g2
+openvlsi-cli pdk-build ihp-sg13g2
+openvlsi-cli pdk-info ihp-sg13g2 --probe
 ```
 
 The bundled index provides IHP SG13G2, SKY130, and GF180MCU packages. The GUI
@@ -110,9 +110,9 @@ package manager is under **Project → Manage Packages**. See
 
 | Surface | Start with |
 | --- | --- |
-| Python API | {doc}`icepy` |
+| Python API | {doc}`openvlsipy` |
 | Procedural layout scripts | {doc}`procedural-layout` |
-| MCP tools for agents | {doc}`ice-mcp` |
+| MCP tools for agents | {doc}`openvlsi-mcp` |
 | End-to-end agent examples | {doc}`agent-cookbook` |
 
 ## Next steps
@@ -122,4 +122,4 @@ package manager is under **Project → Manage Packages**. See
 - {doc}`simulation` — SPICE, mixed-signal, and digital simulation.
 - {doc}`symbols` — built-in symbol library reference.
 - {doc}`packages` — installing and managing PDK packages.
-- {doc}`/project/vision` — why ICE is organized around one canonical core.
+- {doc}`/project/vision` — why OpenVLSI is organized around one canonical core.

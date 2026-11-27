@@ -1,6 +1,6 @@
-#include "icelib/connectivity.hpp"
-#include "icelib/operations.hpp"
-#include "icelib/pdk.hpp"
+#include "openvlsilib/connectivity.hpp"
+#include "openvlsilib/operations.hpp"
+#include "openvlsilib/pdk.hpp"
 
 #include <doctest/doctest.h>
 
@@ -13,24 +13,24 @@
 
 namespace {
 struct ConnectivityFixture {
-    ice::Project project;
-    ice::ObjectId cell = 0;
-    ice::ObjectId metal = 0;
-    ice::ObjectId via = 0;
+    openvlsi::Project project;
+    openvlsi::ObjectId cell = 0;
+    openvlsi::ObjectId metal = 0;
+    openvlsi::ObjectId via = 0;
 };
 
 ConnectivityFixture makeFixture() {
     ConnectivityFixture fixture;
     fixture.project.identity = "connectivity";
     fixture.project.name = "connectivity";
-    fixture.cell = ice::createLayoutCell(fixture.project, "top");
-    fixture.metal = ice::addLayer(fixture.project, "Metal1", 10);
-    fixture.via = ice::addLayer(fixture.project, "Via1", 20);
+    fixture.cell = openvlsi::createLayoutCell(fixture.project, "top");
+    fixture.metal = openvlsi::addLayer(fixture.project, "Metal1", 10);
+    fixture.via = openvlsi::addLayer(fixture.project, "Via1", 20);
     return fixture;
 }
 
-const ice::LayoutNetGroup *groupFor(const std::vector<ice::LayoutNetGroup> &groups, ice::ObjectId shape) {
-    const auto found = std::find_if(groups.begin(), groups.end(), [shape](const ice::LayoutNetGroup &group) {
+const openvlsi::LayoutNetGroup *groupFor(const std::vector<openvlsi::LayoutNetGroup> &groups, openvlsi::ObjectId shape) {
+    const auto found = std::find_if(groups.begin(), groups.end(), [shape](const openvlsi::LayoutNetGroup &group) {
         return std::find(group.shapes.begin(), group.shapes.end(), shape) != group.shapes.end();
     });
     return found == groups.end() ? nullptr : &*found;
@@ -39,13 +39,13 @@ const ice::LayoutNetGroup *groupFor(const std::vector<ice::LayoutNetGroup> &grou
 
 TEST_CASE("geometric connectivity merges same-layer and via-connected shapes") {
     auto fixture = makeFixture();
-    const auto left = ice::addRectangle(fixture.project, fixture.cell, fixture.metal, {0, 0, 1000, 1000});
-    const auto overlapping = ice::addRectangle(fixture.project, fixture.cell, fixture.metal, {500, 500, 1000, 1000});
-    const auto isolated = ice::addRectangle(fixture.project, fixture.cell, fixture.metal, {5000, 0, 500, 500});
-    const auto via = ice::addRectangle(fixture.project, fixture.cell, fixture.via, {2400, 0, 200, 200});
-    const auto upperMetal = ice::addRectangle(fixture.project, fixture.cell, fixture.metal, {2300, -100, 600, 400});
+    const auto left = openvlsi::addRectangle(fixture.project, fixture.cell, fixture.metal, {0, 0, 1000, 1000});
+    const auto overlapping = openvlsi::addRectangle(fixture.project, fixture.cell, fixture.metal, {500, 500, 1000, 1000});
+    const auto isolated = openvlsi::addRectangle(fixture.project, fixture.cell, fixture.metal, {5000, 0, 500, 500});
+    const auto via = openvlsi::addRectangle(fixture.project, fixture.cell, fixture.via, {2400, 0, 200, 200});
+    const auto upperMetal = openvlsi::addRectangle(fixture.project, fixture.cell, fixture.metal, {2300, -100, 600, 400});
 
-    const auto groups = ice::extractLayoutNets(fixture.project, fixture.cell);
+    const auto groups = openvlsi::extractLayoutNets(fixture.project, fixture.cell);
     const auto *lower = groupFor(groups, left);
     const auto *upper = groupFor(groups, upperMetal);
     CHECK(lower != nullptr);
@@ -59,73 +59,73 @@ TEST_CASE("geometric connectivity merges same-layer and via-connected shapes") {
 
 TEST_CASE("ports connect to overlapping conductors on their layer") {
     auto fixture = makeFixture();
-    const auto shape = ice::addRectangle(fixture.project, fixture.cell, fixture.metal, {0, 0, 1000, 500});
-    const auto pin = ice::addPort(fixture.project, fixture.cell, "VIN", fixture.metal,
-                                  ice::Rect{100, 100, 200, 200}, ice::PortDirection::input, ice::PortSide::left);
+    const auto shape = openvlsi::addRectangle(fixture.project, fixture.cell, fixture.metal, {0, 0, 1000, 500});
+    const auto pin = openvlsi::addPort(fixture.project, fixture.cell, "VIN", fixture.metal,
+                                  openvlsi::Rect{100, 100, 200, 200}, openvlsi::PortDirection::input, openvlsi::PortSide::left);
 
-    const auto groups = ice::extractLayoutNets(fixture.project, fixture.cell);
+    const auto groups = openvlsi::extractLayoutNets(fixture.project, fixture.cell);
     CHECK(groups.size() == 1);
     if (groups.size() != 1)
         return;
-    CHECK(groups.front().shapes == std::vector<ice::ObjectId>{shape});
-    CHECK(groups.front().ports == std::vector<ice::ObjectId>{pin});
+    CHECK(groups.front().shapes == std::vector<openvlsi::ObjectId>{shape});
+    CHECK(groups.front().ports == std::vector<openvlsi::ObjectId>{pin});
 }
 
 TEST_CASE("via cuts only connect their own layer pair") {
-    ice::Project project;
+    openvlsi::Project project;
     project.identity = "via-endpoints";
     project.name = "via-endpoints";
-    const auto cell = ice::createLayoutCell(project, "top");
-    const auto li1 = ice::addLayer(project, "li1", 67, 0, {}, 20);
-    const auto met1 = ice::addLayer(project, "met1", 68, 0, {}, 20);
-    const auto mcon = ice::addLayer(project, "mcon", 67, 0, {}, 44);
-    const auto met2 = ice::addLayer(project, "met2", 69, 0, {}, 20);
-    const auto via = ice::addLayer(project, "via", 68, 0, {}, 44);
+    const auto cell = openvlsi::createLayoutCell(project, "top");
+    const auto li1 = openvlsi::addLayer(project, "li1", 67, 0, {}, 20);
+    const auto met1 = openvlsi::addLayer(project, "met1", 68, 0, {}, 20);
+    const auto mcon = openvlsi::addLayer(project, "mcon", 67, 0, {}, 44);
+    const auto met2 = openvlsi::addLayer(project, "met2", 69, 0, {}, 20);
+    const auto via = openvlsi::addLayer(project, "via", 68, 0, {}, 44);
 
-    const auto lower = ice::addRectangle(project, cell, met1, {0, 0, 1000, 1000});
-    const auto landing = ice::addRectangle(project, cell, li1, {0, 0, 1000, 1000});
-    const auto mconCut = ice::addRectangle(project, cell, mcon, {400, 400, 200, 200});
-    const auto upper = ice::addRectangle(project, cell, met2, {0, 0, 1000, 1000});
+    const auto lower = openvlsi::addRectangle(project, cell, met1, {0, 0, 1000, 1000});
+    const auto landing = openvlsi::addRectangle(project, cell, li1, {0, 0, 1000, 1000});
+    const auto mconCut = openvlsi::addRectangle(project, cell, mcon, {400, 400, 200, 200});
+    const auto upper = openvlsi::addRectangle(project, cell, met2, {0, 0, 1000, 1000});
 
-    auto groups = ice::extractLayoutNets(project, cell);
+    auto groups = openvlsi::extractLayoutNets(project, cell);
     CHECK(groupFor(groups, lower) != nullptr);
     CHECK(groupFor(groups, lower) == groupFor(groups, landing));
     CHECK(groupFor(groups, lower) == groupFor(groups, mconCut));
     CHECK(groupFor(groups, lower) != groupFor(groups, upper));
 
-    const auto viaCut = ice::addRectangle(project, cell, via, {600, 600, 200, 200});
-    groups = ice::extractLayoutNets(project, cell);
+    const auto viaCut = openvlsi::addRectangle(project, cell, via, {600, 600, 200, 200});
+    groups = openvlsi::extractLayoutNets(project, cell);
     CHECK(groupFor(groups, lower) == groupFor(groups, upper));
     CHECK(groupFor(groups, lower) == groupFor(groups, viaCut));
 }
 
 TEST_CASE("resistor bodies do not alias the nets at their terminals") {
-    ice::Project project;
+    openvlsi::Project project;
     project.identity = "connectivity-resistor";
     project.name = "connectivity-resistor";
-    const auto cell = ice::createLayoutCell(project, "top");
-    const auto poly = ice::addLayer(project, "poly.drawing", 66, 0, {}, 20);
-    const auto polyRes = ice::addLayer(project, "poly.res", 66, 0, {}, 13);
-    const auto li1 = ice::addLayer(project, "li1.drawing", 67, 0, {}, 20);
-    const auto met1 = ice::addLayer(project, "met1.drawing", 68, 0, {}, 20);
-    const auto licon = ice::addLayer(project, "licon1.drawing", 66, 0, {}, 44);
-    const auto mcon = ice::addLayer(project, "mcon.drawing", 67, 0, {}, 44);
-    const auto netA = ice::createLayoutNet(project, cell, "A");
-    const auto netB = ice::createLayoutNet(project, cell, "B");
+    const auto cell = openvlsi::createLayoutCell(project, "top");
+    const auto poly = openvlsi::addLayer(project, "poly.drawing", 66, 0, {}, 20);
+    const auto polyRes = openvlsi::addLayer(project, "poly.res", 66, 0, {}, 13);
+    const auto li1 = openvlsi::addLayer(project, "li1.drawing", 67, 0, {}, 20);
+    const auto met1 = openvlsi::addLayer(project, "met1.drawing", 68, 0, {}, 20);
+    const auto licon = openvlsi::addLayer(project, "licon1.drawing", 66, 0, {}, 44);
+    const auto mcon = openvlsi::addLayer(project, "mcon.drawing", 67, 0, {}, 44);
+    const auto netA = openvlsi::createLayoutNet(project, cell, "A");
+    const auto netB = openvlsi::createLayoutNet(project, cell, "B");
 
-    const auto left = ice::addRectangle(project, cell, met1, {0, 0, 1000, 1000}, netA);
-    const auto right = ice::addRectangle(project, cell, met1, {3000, 0, 1000, 1000}, netB);
-    ice::addRectangle(project, cell, li1, {0, 0, 1000, 1000}, netA);
-    ice::addRectangle(project, cell, li1, {3000, 0, 1000, 1000}, netB);
-    ice::addRectangle(project, cell, licon, {400, 400, 200, 200}, netA);
-    ice::addRectangle(project, cell, licon, {3400, 400, 200, 200}, netB);
-    ice::addRectangle(project, cell, mcon, {400, 400, 200, 200}, netA);
-    ice::addRectangle(project, cell, mcon, {3400, 400, 200, 200}, netB);
-    const auto body = ice::addRectangle(project, cell, poly, {0, 0, 4000, 1000});
+    const auto left = openvlsi::addRectangle(project, cell, met1, {0, 0, 1000, 1000}, netA);
+    const auto right = openvlsi::addRectangle(project, cell, met1, {3000, 0, 1000, 1000}, netB);
+    openvlsi::addRectangle(project, cell, li1, {0, 0, 1000, 1000}, netA);
+    openvlsi::addRectangle(project, cell, li1, {3000, 0, 1000, 1000}, netB);
+    openvlsi::addRectangle(project, cell, licon, {400, 400, 200, 200}, netA);
+    openvlsi::addRectangle(project, cell, licon, {3400, 400, 200, 200}, netB);
+    openvlsi::addRectangle(project, cell, mcon, {400, 400, 200, 200}, netA);
+    openvlsi::addRectangle(project, cell, mcon, {3400, 400, 200, 200}, netB);
+    const auto body = openvlsi::addRectangle(project, cell, poly, {0, 0, 4000, 1000});
 
     // A marker is the normal way a PDK identifies a resistor body.
-    ice::addRectangle(project, cell, polyRes, {0, 0, 4000, 1000});
-    auto groups = ice::extractLayoutNets(project, cell);
+    openvlsi::addRectangle(project, cell, polyRes, {0, 0, 4000, 1000});
+    auto groups = openvlsi::extractLayoutNets(project, cell);
     CHECK(groupFor(groups, left) != nullptr);
     CHECK(groupFor(groups, right) != nullptr);
     CHECK(groupFor(groups, left) != groupFor(groups, right));
@@ -137,16 +137,16 @@ TEST_CASE("resistor bodies do not alias the nets at their terminals") {
     // metadata identifies the same body for connectivity extraction.
     auto &cellData = project.layoutCells.at(cell);
     cellData.shapes.clear();
-    const auto left2 = ice::addRectangle(project, cell, met1, {0, 0, 1000, 1000}, netA);
-    const auto right2 = ice::addRectangle(project, cell, met1, {3000, 0, 1000, 1000}, netB);
-    ice::addRectangle(project, cell, li1, {0, 0, 1000, 1000}, netA);
-    ice::addRectangle(project, cell, li1, {3000, 0, 1000, 1000}, netB);
-    ice::addRectangle(project, cell, licon, {400, 400, 200, 200}, netA);
-    ice::addRectangle(project, cell, licon, {3400, 400, 200, 200}, netB);
-    ice::addRectangle(project, cell, mcon, {400, 400, 200, 200}, netA);
-    ice::addRectangle(project, cell, mcon, {3400, 400, 200, 200}, netB);
-    ice::addRectangle(project, cell, poly, {0, 0, 4000, 1000});
-    ice::PlannedDevice planned;
+    const auto left2 = openvlsi::addRectangle(project, cell, met1, {0, 0, 1000, 1000}, netA);
+    const auto right2 = openvlsi::addRectangle(project, cell, met1, {3000, 0, 1000, 1000}, netB);
+    openvlsi::addRectangle(project, cell, li1, {0, 0, 1000, 1000}, netA);
+    openvlsi::addRectangle(project, cell, li1, {3000, 0, 1000, 1000}, netB);
+    openvlsi::addRectangle(project, cell, licon, {400, 400, 200, 200}, netA);
+    openvlsi::addRectangle(project, cell, licon, {3400, 400, 200, 200}, netB);
+    openvlsi::addRectangle(project, cell, mcon, {400, 400, 200, 200}, netA);
+    openvlsi::addRectangle(project, cell, mcon, {3400, 400, 200, 200}, netB);
+    openvlsi::addRectangle(project, cell, poly, {0, 0, 4000, 1000});
+    openvlsi::PlannedDevice planned;
     planned.id = project.nextId();
     planned.name = "R1";
     planned.device = "res_poly";
@@ -157,7 +157,7 @@ TEST_CASE("resistor bodies do not alias the nets at their terminals") {
     planned.height = 1000;
     planned.placeholder = false;
     cellData.plannedDevices.emplace(planned.id, planned);
-    groups = ice::extractLayoutNets(project, cell);
+    groups = openvlsi::extractLayoutNets(project, cell);
     CHECK(groupFor(groups, left2) != nullptr);
     CHECK(groupFor(groups, right2) != nullptr);
     CHECK(groupFor(groups, left2) != groupFor(groups, right2));
@@ -165,11 +165,11 @@ TEST_CASE("resistor bodies do not alias the nets at their terminals") {
 
 TEST_CASE("polygon connectivity does not merge overlapping bounding boxes") {
     auto fixture = makeFixture();
-    const auto left = ice::addPolygon(fixture.project, fixture.cell, fixture.metal,
+    const auto left = openvlsi::addPolygon(fixture.project, fixture.cell, fixture.metal,
                                       {{0, 0}, {1000, 0}, {1000, 200}, {200, 200}, {200, 1000}, {0, 1000}});
-    const auto right = ice::addPolygon(fixture.project, fixture.cell, fixture.metal,
+    const auto right = openvlsi::addPolygon(fixture.project, fixture.cell, fixture.metal,
                                        {{300, 300}, {1000, 300}, {1000, 1000}, {800, 1000}, {800, 800}, {300, 800}});
-    const auto groups = ice::extractLayoutNets(fixture.project, fixture.cell);
+    const auto groups = openvlsi::extractLayoutNets(fixture.project, fixture.cell);
     CHECK(groupFor(groups, left) != nullptr);
     CHECK(groupFor(groups, right) != nullptr);
     CHECK(groupFor(groups, left) != groupFor(groups, right));
@@ -177,11 +177,11 @@ TEST_CASE("polygon connectivity does not merge overlapping bounding boxes") {
 
 TEST_CASE("routed paths honor segment layers and point vias") {
     auto fixture = makeFixture();
-    const auto metal2 = ice::addLayer(fixture.project, "Metal2", 12);
-    const auto start = ice::addRectangle(fixture.project, fixture.cell, fixture.metal, {0, 0, 300, 300});
-    const auto end = ice::addRectangle(fixture.project, fixture.cell, metal2, {1700, 1700, 300, 300});
+    const auto metal2 = openvlsi::addLayer(fixture.project, "Metal2", 12);
+    const auto start = openvlsi::addRectangle(fixture.project, fixture.cell, fixture.metal, {0, 0, 300, 300});
+    const auto end = openvlsi::addRectangle(fixture.project, fixture.cell, metal2, {1700, 1700, 300, 300});
 
-    ice::Shape path;
+    openvlsi::Shape path;
     path.id = fixture.project.nextId();
     path.layer = fixture.metal;
     path.centerline = {{200, 200}, {1850, 200}, {1850, 1850}};
@@ -191,57 +191,57 @@ TEST_CASE("routed paths honor segment layers and point vias") {
     path.pointVias = {{}, {fixture.via}, {}};
     fixture.project.layoutCells.at(fixture.cell).shapes.emplace(path.id, path);
 
-    auto groups = ice::extractLayoutNets(fixture.project, fixture.cell);
+    auto groups = openvlsi::extractLayoutNets(fixture.project, fixture.cell);
     CHECK(groupFor(groups, start) != nullptr);
     CHECK(groupFor(groups, end) != nullptr);
     CHECK(groupFor(groups, start) == groupFor(groups, end));
 
     fixture.project.layoutCells.at(fixture.cell).shapes.at(path.id).pointVias[1].clear();
-    groups = ice::extractLayoutNets(fixture.project, fixture.cell);
+    groups = openvlsi::extractLayoutNets(fixture.project, fixture.cell);
     CHECK(groupFor(groups, start) != groupFor(groups, end));
 }
 
 TEST_CASE("explicit layout nets merge distant shapes and pins") {
     auto fixture = makeFixture();
-    const auto net = ice::createLayoutNet(fixture.project, fixture.cell, "VDD");
-    const auto shape = ice::addRectangle(fixture.project, fixture.cell, fixture.metal, {0, 0, 500, 500}, net);
-    const auto pin = ice::addPort(fixture.project, fixture.cell, "VDD", fixture.metal, {5000, 0, 500, 500},
-                                  ice::PortDirection::power, ice::PortSide::left, net, "VDD");
+    const auto net = openvlsi::createLayoutNet(fixture.project, fixture.cell, "VDD");
+    const auto shape = openvlsi::addRectangle(fixture.project, fixture.cell, fixture.metal, {0, 0, 500, 500}, net);
+    const auto pin = openvlsi::addPort(fixture.project, fixture.cell, "VDD", fixture.metal, {5000, 0, 500, 500},
+                                  openvlsi::PortDirection::power, openvlsi::PortSide::left, net, "VDD");
 
-    const auto groups = ice::extractLayoutNets(fixture.project, fixture.cell);
+    const auto groups = openvlsi::extractLayoutNets(fixture.project, fixture.cell);
     CHECK(groups.size() == 1);
     if (groups.size() != 1)
         return;
     CHECK(groups.front().net == net);
     CHECK(groups.front().name == "VDD");
-    CHECK(groups.front().shapes == std::vector<ice::ObjectId>{shape});
-    CHECK(groups.front().ports == std::vector<ice::ObjectId>{pin});
+    CHECK(groups.front().shapes == std::vector<openvlsi::ObjectId>{shape});
+    CHECK(groups.front().ports == std::vector<openvlsi::ObjectId>{pin});
 }
 
 TEST_CASE("distinct explicit nets stay separate when geometry overlaps") {
     auto fixture = makeFixture();
-    const auto powerNet = ice::createLayoutNet(fixture.project, fixture.cell, "VDD");
-    const auto groundNet = ice::createLayoutNet(fixture.project, fixture.cell, "VSS");
-    const auto power = ice::addRectangle(fixture.project, fixture.cell, fixture.metal, {0, 0, 1000, 1000}, powerNet);
+    const auto powerNet = openvlsi::createLayoutNet(fixture.project, fixture.cell, "VDD");
+    const auto groundNet = openvlsi::createLayoutNet(fixture.project, fixture.cell, "VSS");
+    const auto power = openvlsi::addRectangle(fixture.project, fixture.cell, fixture.metal, {0, 0, 1000, 1000}, powerNet);
     const auto ground =
-        ice::addRectangle(fixture.project, fixture.cell, fixture.metal, {500, 500, 1000, 1000}, groundNet);
+        openvlsi::addRectangle(fixture.project, fixture.cell, fixture.metal, {500, 500, 1000, 1000}, groundNet);
 
-    const auto groups = ice::extractLayoutNets(fixture.project, fixture.cell);
+    const auto groups = openvlsi::extractLayoutNets(fixture.project, fixture.cell);
     CHECK(groups.size() == 2);
     CHECK(groupFor(groups, power) != groupFor(groups, ground));
 }
 
 TEST_CASE("unlabeled geometry bridging two nets reports aliases") {
     auto fixture = makeFixture();
-    const auto powerNet = ice::createLayoutNet(fixture.project, fixture.cell, "VDD");
-    const auto biasNet = ice::createLayoutNet(fixture.project, fixture.cell, "NBIAS");
+    const auto powerNet = openvlsi::createLayoutNet(fixture.project, fixture.cell, "VDD");
+    const auto biasNet = openvlsi::createLayoutNet(fixture.project, fixture.cell, "NBIAS");
     // A resistor body is unlabeled geometry: its two ends never touch on the
     // metal layers, so only the body itself can join the named nets.
-    const auto power = ice::addRectangle(fixture.project, fixture.cell, fixture.metal, {0, 0, 1000, 1000}, powerNet);
-    const auto bias = ice::addRectangle(fixture.project, fixture.cell, fixture.metal, {3000, 0, 1000, 1000}, biasNet);
-    ice::addRectangle(fixture.project, fixture.cell, fixture.metal, {900, 400, 2200, 200}, 0);
+    const auto power = openvlsi::addRectangle(fixture.project, fixture.cell, fixture.metal, {0, 0, 1000, 1000}, powerNet);
+    const auto bias = openvlsi::addRectangle(fixture.project, fixture.cell, fixture.metal, {3000, 0, 1000, 1000}, biasNet);
+    openvlsi::addRectangle(fixture.project, fixture.cell, fixture.metal, {900, 400, 2200, 200}, 0);
 
-    const auto groups = ice::extractLayoutNets(fixture.project, fixture.cell);
+    const auto groups = openvlsi::extractLayoutNets(fixture.project, fixture.cell);
     CHECK(groups.size() == 1);
     if (groups.size() != 1)
         return;
@@ -256,26 +256,26 @@ TEST_CASE("unlabeled geometry bridging two nets reports aliases") {
 
 TEST_CASE("connectivity ignores hidden pins and text shapes") {
     auto fixture = makeFixture();
-    const auto shape = ice::addRectangle(fixture.project, fixture.cell, fixture.metal, {0, 0, 1000, 1000});
-    const auto hidden = ice::addPort(fixture.project, fixture.cell, "HIDDEN", fixture.metal, {0, 0, 1000, 1000});
+    const auto shape = openvlsi::addRectangle(fixture.project, fixture.cell, fixture.metal, {0, 0, 1000, 1000});
+    const auto hidden = openvlsi::addPort(fixture.project, fixture.cell, "HIDDEN", fixture.metal, {0, 0, 1000, 1000});
     auto &port = fixture.project.layoutCells.at(fixture.cell).ports.at(hidden);
     port.visible = false;
-    ice::addText(fixture.project, fixture.cell, fixture.metal, 100, 100, "NOTE");
+    openvlsi::addText(fixture.project, fixture.cell, fixture.metal, 100, 100, "NOTE");
 
-    const auto groups = ice::extractLayoutNets(fixture.project, fixture.cell);
+    const auto groups = openvlsi::extractLayoutNets(fixture.project, fixture.cell);
     CHECK(groups.size() == 1);
     if (groups.size() != 1)
         return;
-    CHECK(groups.front().shapes == std::vector<ice::ObjectId>{shape});
+    CHECK(groups.front().shapes == std::vector<openvlsi::ObjectId>{shape});
     CHECK(groups.front().ports.empty());
 }
 
 TEST_CASE("package connectivity metadata declares roles and via endpoints") {
-    const auto root = std::filesystem::temp_directory_path() / "ice-pdk-connectivity-test";
+    const auto root = std::filesystem::temp_directory_path() / "openvlsi-pdk-connectivity-test";
     std::filesystem::remove_all(root);
     std::filesystem::create_directories(root / "technology");
     std::ofstream(root / "technology" / "connectivity.json") << R"({
-  "format": "ice-pdk-connectivity",
+  "format": "openvlsi-pdk-connectivity",
   "schema_version": 1,
   "layers": [
     {"name": "diff", "role": "active"},
@@ -290,7 +290,7 @@ TEST_CASE("package connectivity metadata declares roles and via endpoints") {
   ],
   "routing": {"stack": ["met1", "met2"]}
 })";
-    const auto connectivity = ice::PdkConnectivity::load(root / "technology" / "connectivity.json");
+    const auto connectivity = openvlsi::PdkConnectivity::load(root / "technology" / "connectivity.json");
     CHECK(connectivity.declared);
     CHECK(connectivity.roleFor("met1.drawing") == "conductor");
     CHECK(connectivity.roleFor("met1.pin") == "conductor");
@@ -312,7 +312,7 @@ TEST_CASE("package connectivity metadata declares roles and via endpoints") {
 }
 
 TEST_CASE("declared package connectivity drives the layer graph") {
-    const auto root = std::filesystem::temp_directory_path() / "ice-pdk-connectivity-graph";
+    const auto root = std::filesystem::temp_directory_path() / "openvlsi-pdk-connectivity-graph";
     std::filesystem::remove_all(root);
     std::filesystem::create_directories(root / "technology");
     std::ofstream(root / "package.toml") << R"([package]
@@ -340,22 +340,22 @@ display_name = "Connectivity Test"
   ],
   "routing": {"stack": ["met1", "met2"]}
 })";
-    const auto previous = std::getenv("ICE_PACKAGE_ROOTS");
+    const auto previous = std::getenv("OPENVLSI_PACKAGE_ROOTS");
     const auto saved = previous ? std::string(previous) : std::string{};
-    setenv("ICE_PACKAGE_ROOTS", root.c_str(), 1);
+    setenv("OPENVLSI_PACKAGE_ROOTS", root.c_str(), 1);
 
-    ice::Project project;
+    openvlsi::Project project;
     project.identity = "connectivity-graph";
     project.name = "connectivity-graph";
-    (void)ice::createLayoutCell(project, "top", "connectivity-test");
-    const auto diff = ice::addLayer(project, "diff.drawing", 65, 0, {}, 20);
-    const auto poly = ice::addLayer(project, "poly.drawing", 66, 0, {}, 20);
-    const auto met1 = ice::addLayer(project, "met1.drawing", 68, 0, {}, 20);
-    const auto met2 = ice::addLayer(project, "met2.drawing", 69, 0, {}, 20);
-    const auto via = ice::addLayer(project, "via.drawing", 68, 0, {}, 44);
-    const auto nwell = ice::addLayer(project, "nwell.drawing", 64, 0, {}, 20);
+    (void)openvlsi::createLayoutCell(project, "top", "connectivity-test");
+    const auto diff = openvlsi::addLayer(project, "diff.drawing", 65, 0, {}, 20);
+    const auto poly = openvlsi::addLayer(project, "poly.drawing", 66, 0, {}, 20);
+    const auto met1 = openvlsi::addLayer(project, "met1.drawing", 68, 0, {}, 20);
+    const auto met2 = openvlsi::addLayer(project, "met2.drawing", 69, 0, {}, 20);
+    const auto via = openvlsi::addLayer(project, "via.drawing", 68, 0, {}, 44);
+    const auto nwell = openvlsi::addLayer(project, "nwell.drawing", 64, 0, {}, 20);
 
-    const auto graph = ice::inferLayoutConnectivity(project, "connectivity-test");
+    const auto graph = openvlsi::inferLayoutConnectivity(project, "connectivity-test");
     CHECK(!graph.conductors.contains(diff));
     CHECK(!graph.conductors.contains(poly));
     CHECK(graph.conductors.contains(met1));
@@ -372,8 +372,8 @@ display_name = "Connectivity Test"
     CHECK(!graph.routingLayers.contains(poly));
 
     if (previous)
-        setenv("ICE_PACKAGE_ROOTS", saved.c_str(), 1);
+        setenv("OPENVLSI_PACKAGE_ROOTS", saved.c_str(), 1);
     else
-        unsetenv("ICE_PACKAGE_ROOTS");
+        unsetenv("OPENVLSI_PACKAGE_ROOTS");
     std::filesystem::remove_all(root);
 }

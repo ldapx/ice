@@ -1,0 +1,84 @@
+#include "openvlsilib/core.hpp"
+#include "openvlsilib/packages.hpp"
+#include "openvlsilib/pdk.hpp"
+#include <filesystem>
+#include <iostream>
+int main(int argc, char **argv) {
+    if (argc > 1 && (std::string(argv[1]) == "--version" || std::string(argv[1]) == "version")) {
+        std::cout << openvlsi::version() << "\n";
+        return 0;
+    }
+    if (argc < 2 || std::string(argv[1]) == "--help") {
+        std::cout << "openvlsi-pkg " << openvlsi::version()
+                  << "\nUsage: openvlsi-pkg <manifest|hash|install|resolve|verify|pdk-build> ...\n";
+        return 0;
+    }
+    try {
+        std::string command = argv[1];
+        if (command == "manifest" && argc == 3) {
+            auto package = openvlsi::PackageManager::readManifest(argv[2]);
+            std::cout << package.name << " " << package.version << "\n";
+            for (const auto &capability : openvlsi::PackageManager::capabilities(package))
+                std::cout << "capability: " << capability << "\n";
+            return 0;
+        }
+        if (command == "pdk-build" && argc == 3) {
+            const auto pdks = openvlsi::findPdks(argv[2]);
+            if (pdks.empty())
+                throw openvlsi::ProjectError("pdk.build", "Unknown OpenVLSI PDK package: " + std::string(argv[2]));
+            const auto result = openvlsi::buildPdkOsdi(pdks.front());
+            std::cout << nlohmann::json{{"ok", result.ok},
+                                        {"summary", result.summary},
+                                        {"compiler", result.compiler},
+                                        {"osdi_dir", result.osdiDir.string()},
+                                        {"log", result.log}}
+                             .dump(2)
+                      << "\n";
+            return result.ok ? 0 : 1;
+        }
+        if (command == "hash" && argc == 3) {
+            std::cout << openvlsi::PackageManager::contentHash(argv[2]) << "\n";
+            return 0;
+        }
+        if (command == "install" && (argc == 6 || argc == 7)) {
+            const std::string revision = argc == 7 ? argv[6] : std::string{};
+            openvlsi::PackageManager::installGit(argv[2], argv[3], argv[4], argv[5], revision);
+            std::cout << "installed " << argv[3] << " in " << argv[2] << "\n";
+            return 0;
+        }
+        if (command == "resolve" && argc >= 5) {
+            std::vector<std::filesystem::path> repositories{argv[2]};
+            std::map<std::string, std::string> requested;
+            std::filesystem::path outputPath = "openvlsi.lock";
+            for (int index = 4; index < argc; ++index) {
+                if (std::string(argv[index]) == "--output") {
+                    if (++index >= argc)
+                        throw openvlsi::ProjectError("package.arguments", "--output requires a path");
+                    outputPath = argv[index];
+                    continue;
+                }
+                auto separator = std::string(argv[index]).find('=');
+                if (separator == std::string::npos)
+                    throw openvlsi::ProjectError("package.arguments", "Dependencies must use name=constraint");
+                requested.emplace(std::string(argv[index]).substr(0, separator),
+                                  std::string(argv[index]).substr(separator + 1));
+            }
+            auto lock = openvlsi::PackageManager::resolve(repositories, requested, argv[3]);
+            openvlsi::PackageManager::writeLockfile(outputPath, lock);
+            std::cout << "wrote " << outputPath.string() << "\n";
+            return 0;
+        }
+        if (command == "verify" && argc == 4) {
+            openvlsi::PackageManager::verifyLockfile(openvlsi::PackageManager::readLockfile(argv[3]), {argv[2]});
+            std::cout << "lockfile verified\n";
+            return 0;
+        }
+        throw openvlsi::ProjectError("package.arguments", "Invalid package-manager command or arguments");
+    } catch (const openvlsi::ProjectError &error) {
+        std::cerr << "error[" << error.code() << "]: " << error.what() << "\n";
+        return 2;
+    } catch (const std::exception &error) {
+        std::cerr << "error[internal]: " << error.what() << "\n";
+        return 3;
+    }
+}

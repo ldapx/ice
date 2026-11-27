@@ -1,5 +1,5 @@
-#include "icelib/operations.hpp"
-#include "icelib/pex.hpp"
+#include "openvlsilib/operations.hpp"
+#include "openvlsilib/pex.hpp"
 
 #include <doctest/doctest.h>
 
@@ -14,22 +14,22 @@ bool near(double left, double right, double tolerance = 1.0e-9) { return std::ab
 } // namespace
 
 TEST_CASE("PEX creates a text schematic with extracted net parasitics") {
-    ice::Project project;
+    openvlsi::Project project;
     project.identity = "pex-basic";
     project.name = "pex-basic";
-    const auto cell = ice::createLayoutCell(project, "top");
-    const auto metal = ice::addLayer(project, "Metal1", 8);
-    const auto net = ice::createLayoutNet(project, cell, "VIN");
-    const auto left = ice::addRectangle(project, cell, metal, {0, 0, 10000, 1000}, net);
-    const auto right = ice::addRectangle(project, cell, metal, {10000, 0, 10000, 1000}, net);
+    const auto cell = openvlsi::createLayoutCell(project, "top");
+    const auto metal = openvlsi::addLayer(project, "Metal1", 8);
+    const auto net = openvlsi::createLayoutNet(project, cell, "VIN");
+    const auto left = openvlsi::addRectangle(project, cell, metal, {0, 0, 10000, 1000}, net);
+    const auto right = openvlsi::addRectangle(project, cell, metal, {10000, 0, 10000, 1000}, net);
     CHECK(left != 0);
     CHECK(right != 0);
-    ice::addPort(project, cell, "P1", metal, {0, 0, 1000, 1000}, ice::PortDirection::input, ice::PortSide::left, net,
+    openvlsi::addPort(project, cell, "P1", metal, {0, 0, 1000, 1000}, openvlsi::PortDirection::input, openvlsi::PortSide::left, net,
                  "P1");
-    ice::addPort(project, cell, "P2", metal, {19000, 0, 1000, 1000}, ice::PortDirection::output, ice::PortSide::right,
+    openvlsi::addPort(project, cell, "P2", metal, {19000, 0, 1000, 1000}, openvlsi::PortDirection::output, openvlsi::PortSide::right,
                  net, "P2");
 
-    const auto report = ice::runPex(project, cell);
+    const auto report = openvlsi::runPex(project, cell);
     CHECK(report.nets.size() == 1);
     if (report.nets.size() != 1)
         return;
@@ -51,41 +51,41 @@ TEST_CASE("PEX creates a text schematic with extracted net parasitics") {
     const auto &cellText = project.schematicCells.at(report.schematicCell);
     CHECK(cellText.textSchematic);
     CHECK(cellText.name == "top PEX");
-    CHECK(cellText.spiceText.find("* ICE PEX layout-cell:") != std::string::npos);
+    CHECK(cellText.spiceText.find("* OpenVLSI PEX layout-cell:") != std::string::npos);
     CHECK(cellText.spiceText.find(".title top PEX") != std::string::npos);
     CHECK(cellText.spiceText.find("RPEX1 P1 VIN 0.5") != std::string::npos);
     CHECK(cellText.spiceText.find("RPEX2 P2 VIN 0.5") != std::string::npos);
     CHECK(cellText.spiceText.find("CPEX1 VIN 0 0.84f") != std::string::npos);
 
-    const auto second = ice::runPex(project, cell);
+    const auto second = openvlsi::runPex(project, cell);
     CHECK(second.schematicCell == report.schematicCell);
     CHECK(project.schematicCells.size() == 1);
 
-    const auto json = ice::serializePexReport(report);
+    const auto json = openvlsi::serializePexReport(report);
     CHECK(json.find("\"resistance\"") != std::string::npos);
     CHECK(json.find("\"capacitance\"") != std::string::npos);
     CHECK(json.find("\"schematic\": \"top PEX\"") != std::string::npos);
 
-    const auto roundTrip = ice::Project::deserialize(project.serialize());
+    const auto roundTrip = openvlsi::Project::deserialize(project.serialize());
     CHECK(roundTrip.schematicCells.contains(report.schematicCell));
     CHECK(roundTrip.schematicCells.at(report.schematicCell).textSchematic);
 }
 
 TEST_CASE("PEX ignores text and non-conducting layers and separates nets") {
-    ice::Project project;
+    openvlsi::Project project;
     project.identity = "pex-layers";
     project.name = "pex-layers";
-    const auto cell = ice::createLayoutCell(project, "top");
-    const auto metal = ice::addLayer(project, "Metal1", 8);
-    const auto well = ice::addLayer(project, "NWell", 31);
-    const auto firstNet = ice::createLayoutNet(project, cell, "A");
-    const auto secondNet = ice::createLayoutNet(project, cell, "B");
-    ice::addRectangle(project, cell, metal, {0, 0, 1000, 1000}, firstNet);
-    ice::addRectangle(project, cell, metal, {5000, 0, 1000, 1000}, secondNet);
-    ice::addRectangle(project, cell, well, {0, 0, 10000, 10000}, firstNet);
-    ice::addText(project, cell, metal, 0, 0, "NOTE", 500, firstNet);
+    const auto cell = openvlsi::createLayoutCell(project, "top");
+    const auto metal = openvlsi::addLayer(project, "Metal1", 8);
+    const auto well = openvlsi::addLayer(project, "NWell", 31);
+    const auto firstNet = openvlsi::createLayoutNet(project, cell, "A");
+    const auto secondNet = openvlsi::createLayoutNet(project, cell, "B");
+    openvlsi::addRectangle(project, cell, metal, {0, 0, 1000, 1000}, firstNet);
+    openvlsi::addRectangle(project, cell, metal, {5000, 0, 1000, 1000}, secondNet);
+    openvlsi::addRectangle(project, cell, well, {0, 0, 10000, 10000}, firstNet);
+    openvlsi::addText(project, cell, metal, 0, 0, "NOTE", 500, firstNet);
 
-    const auto report = ice::runPex(project, cell);
+    const auto report = openvlsi::runPex(project, cell);
     CHECK(report.nets.size() == 2);
     if (report.nets.size() != 2)
         return;
@@ -104,18 +104,18 @@ TEST_CASE("PEX ignores text and non-conducting layers and separates nets") {
 }
 
 TEST_CASE("PEX connects pin-purpose layers to their drawing layer") {
-    ice::Project project;
+    openvlsi::Project project;
     project.identity = "pex-pin-layer";
     project.name = "pex-pin-layer";
-    const auto cell = ice::createLayoutCell(project, "top");
-    const auto metal = ice::addLayer(project, "Metal1", 8);
-    const auto pinLayer = ice::addLayer(project, "Metal1.pin", 8, 0, {}, 2);
-    const auto net = ice::createLayoutNet(project, cell, "VIN");
-    ice::addRectangle(project, cell, metal, {0, 0, 10000, 1000});
-    ice::addPort(project, cell, "VIN", pinLayer, {0, 0, 1000, 1000}, ice::PortDirection::input, ice::PortSide::left,
+    const auto cell = openvlsi::createLayoutCell(project, "top");
+    const auto metal = openvlsi::addLayer(project, "Metal1", 8);
+    const auto pinLayer = openvlsi::addLayer(project, "Metal1.pin", 8, 0, {}, 2);
+    const auto net = openvlsi::createLayoutNet(project, cell, "VIN");
+    openvlsi::addRectangle(project, cell, metal, {0, 0, 10000, 1000});
+    openvlsi::addPort(project, cell, "VIN", pinLayer, {0, 0, 1000, 1000}, openvlsi::PortDirection::input, openvlsi::PortSide::left,
                  net, "VIN");
 
-    const auto report = ice::runPex(project, cell);
+    const auto report = openvlsi::runPex(project, cell);
     CHECK(report.nets.size() == 1);
     if (report.nets.size() != 1)
         return;
@@ -128,17 +128,17 @@ TEST_CASE("PEX connects pin-purpose layers to their drawing layer") {
 }
 
 TEST_CASE("PEX recognizes polygon and via geometry") {
-    ice::Project project;
+    openvlsi::Project project;
     project.identity = "pex-polygon";
     project.name = "pex-polygon";
-    const auto cell = ice::createLayoutCell(project, "top");
-    const auto poly = ice::addLayer(project, "GatPoly", 5);
-    const auto via = ice::addLayer(project, "Via1", 19);
-    const auto net = ice::createLayoutNet(project, cell, "GATE");
-    ice::addPolygon(project, cell, poly, {{0, 0}, {10000, 0}, {10000, 1000}, {0, 1000}}, net);
-    ice::addRectangle(project, cell, via, {1000, 0, 200, 200}, net);
+    const auto cell = openvlsi::createLayoutCell(project, "top");
+    const auto poly = openvlsi::addLayer(project, "GatPoly", 5);
+    const auto via = openvlsi::addLayer(project, "Via1", 19);
+    const auto net = openvlsi::createLayoutNet(project, cell, "GATE");
+    openvlsi::addPolygon(project, cell, poly, {{0, 0}, {10000, 0}, {10000, 1000}, {0, 1000}}, net);
+    openvlsi::addRectangle(project, cell, via, {1000, 0, 200, 200}, net);
 
-    const auto report = ice::runPex(project, cell);
+    const auto report = openvlsi::runPex(project, cell);
     CHECK(report.nets.size() == 1);
     if (report.nets.size() != 1)
         return;
@@ -151,66 +151,66 @@ TEST_CASE("PEX recognizes polygon and via geometry") {
 }
 
 TEST_CASE("PEX combines parallel conductors instead of summing them") {
-    ice::Project project;
+    openvlsi::Project project;
     project.identity = "pex-parallel";
     project.name = "pex-parallel";
-    const auto cell = ice::createLayoutCell(project, "top");
-    const auto metal = ice::addLayer(project, "Metal1", 8);
-    const auto net = ice::createLayoutNet(project, cell, "VIN");
-    ice::addRectangle(project, cell, metal, {0, 0, 10000, 1000}, net);
-    ice::addRectangle(project, cell, metal, {0, 2000, 10000, 1000}, net);
-    ice::addPort(project, cell, "P1", metal, {0, 0, 1000, 3000}, ice::PortDirection::input, ice::PortSide::left, net,
+    const auto cell = openvlsi::createLayoutCell(project, "top");
+    const auto metal = openvlsi::addLayer(project, "Metal1", 8);
+    const auto net = openvlsi::createLayoutNet(project, cell, "VIN");
+    openvlsi::addRectangle(project, cell, metal, {0, 0, 10000, 1000}, net);
+    openvlsi::addRectangle(project, cell, metal, {0, 2000, 10000, 1000}, net);
+    openvlsi::addPort(project, cell, "P1", metal, {0, 0, 1000, 3000}, openvlsi::PortDirection::input, openvlsi::PortSide::left, net,
                  "P1");
-    ice::addPort(project, cell, "P2", metal, {10000, 0, 1000, 3000}, ice::PortDirection::output, ice::PortSide::right,
+    openvlsi::addPort(project, cell, "P2", metal, {10000, 0, 1000, 3000}, openvlsi::PortDirection::output, openvlsi::PortSide::right,
                  net, "P2");
-    const auto report = ice::runPex(project, cell);
+    const auto report = openvlsi::runPex(project, cell);
     REQUIRE(report.nets.size() == 1);
     CHECK(near(report.nets.front().resistance, 0.25));
 }
 
 TEST_CASE("PEX combines via arrays in parallel") {
-    ice::Project project;
+    openvlsi::Project project;
     project.identity = "pex-via-array";
     project.name = "pex-via-array";
-    const auto cell = ice::createLayoutCell(project, "top");
-    const auto poly = ice::addLayer(project, "GatPoly", 5);
-    const auto via = ice::addLayer(project, "Via1", 19);
-    const auto net = ice::createLayoutNet(project, cell, "GATE");
-    ice::addPolygon(project, cell, poly, {{0, 0}, {10000, 0}, {10000, 1000}, {0, 1000}}, net);
+    const auto cell = openvlsi::createLayoutCell(project, "top");
+    const auto poly = openvlsi::addLayer(project, "GatPoly", 5);
+    const auto via = openvlsi::addLayer(project, "Via1", 19);
+    const auto net = openvlsi::createLayoutNet(project, cell, "GATE");
+    openvlsi::addPolygon(project, cell, poly, {{0, 0}, {10000, 0}, {10000, 1000}, {0, 1000}}, net);
     for (int index = 0; index < 4; ++index)
-        ice::addRectangle(project, cell, via, {1000, 0, 200, 200}, net);
-    const auto report = ice::runPex(project, cell);
+        openvlsi::addRectangle(project, cell, via, {1000, 0, 200, 200}, net);
+    const auto report = openvlsi::runPex(project, cell);
     REQUIRE(report.nets.size() == 1);
     CHECK(report.nets.front().viaCount == 4);
     CHECK(near(report.nets.front().resistance, 50.125));
 }
 
 TEST_CASE("PEX merges duplicate planned and placed devices without dropping distinct ones") {
-    ice::Project project;
+    openvlsi::Project project;
     project.identity = "pex-mixed-devices";
     project.name = "pex-mixed-devices";
-    const auto metal = ice::addLayer(project, "Metal1", 8);
-    const auto child = ice::createLayoutCell(project, "res_dev");
+    const auto metal = openvlsi::addLayer(project, "Metal1", 8);
+    const auto child = openvlsi::createLayoutCell(project, "res_dev");
     auto &deviceCell = project.layoutCells.at(child);
     deviceCell.library = true;
     deviceCell.device = "resistor";
     deviceCell.parameters.push_back({project.nextId(), "resistance", "1k"});
-    ice::addPort(project, child, "A", metal, {0, 0, 200, 200}, ice::PortDirection::inout, ice::PortSide::left);
-    ice::addPort(project, child, "B", metal, {1000, 0, 200, 200}, ice::PortDirection::inout, ice::PortSide::right);
+    openvlsi::addPort(project, child, "A", metal, {0, 0, 200, 200}, openvlsi::PortDirection::inout, openvlsi::PortSide::left);
+    openvlsi::addPort(project, child, "B", metal, {1000, 0, 200, 200}, openvlsi::PortDirection::inout, openvlsi::PortSide::right);
 
-    const auto layout = ice::createLayoutCell(project, "top");
-    ice::addLayoutInstance(project, layout, child, "R1", 0, 0);
-    ice::addLayoutInstance(project, layout, child, "R2", 3000, 0);
-    const auto netA = ice::createLayoutNet(project, layout, "A");
-    const auto netB = ice::createLayoutNet(project, layout, "B");
-    const auto netC = ice::createLayoutNet(project, layout, "C");
-    const auto netD = ice::createLayoutNet(project, layout, "D");
-    ice::addRectangle(project, layout, metal, {0, 0, 200, 200}, netA);
-    ice::addRectangle(project, layout, metal, {1000, 0, 200, 200}, netB);
-    ice::addRectangle(project, layout, metal, {3000, 0, 200, 200}, netC);
-    ice::addRectangle(project, layout, metal, {4000, 0, 200, 200}, netD);
+    const auto layout = openvlsi::createLayoutCell(project, "top");
+    openvlsi::addLayoutInstance(project, layout, child, "R1", 0, 0);
+    openvlsi::addLayoutInstance(project, layout, child, "R2", 3000, 0);
+    const auto netA = openvlsi::createLayoutNet(project, layout, "A");
+    const auto netB = openvlsi::createLayoutNet(project, layout, "B");
+    const auto netC = openvlsi::createLayoutNet(project, layout, "C");
+    const auto netD = openvlsi::createLayoutNet(project, layout, "D");
+    openvlsi::addRectangle(project, layout, metal, {0, 0, 200, 200}, netA);
+    openvlsi::addRectangle(project, layout, metal, {1000, 0, 200, 200}, netB);
+    openvlsi::addRectangle(project, layout, metal, {3000, 0, 200, 200}, netC);
+    openvlsi::addRectangle(project, layout, metal, {4000, 0, 200, 200}, netD);
 
-    ice::PlannedDevice planned;
+    openvlsi::PlannedDevice planned;
     planned.id = project.nextId();
     planned.name = "R1";
     planned.device = "resistor";
@@ -223,7 +223,7 @@ TEST_CASE("PEX merges duplicate planned and placed devices without dropping dist
     planned.placeholder = false;
     project.layoutCells.at(layout).plannedDevices.emplace(planned.id, planned);
 
-    const auto report = ice::runPex(project, layout);
+    const auto report = openvlsi::runPex(project, layout);
     CHECK(report.devices.size() == 2);
     CHECK(std::any_of(report.notes.begin(), report.notes.end(), [](const std::string &note) {
         return note.find("duplicate placed device 'R1'") != std::string::npos;
@@ -231,37 +231,37 @@ TEST_CASE("PEX merges duplicate planned and placed devices without dropping dist
 }
 
 TEST_CASE("PEX extracts placed MOS devices and prefers them over the schematic") {
-    ice::Project project;
+    openvlsi::Project project;
     project.identity = "pex-placed-device";
     project.name = "pex-placed-device";
-    const auto metal = ice::addLayer(project, "Metal1", 8);
-    const auto metalPin = ice::addLayer(project, "Metal1.pin", 8, 0, {}, 2);
-    const auto poly = ice::addLayer(project, "GatPoly", 5);
-    const auto polyPin = ice::addLayer(project, "GatPoly.pin", 5, 0, {}, 2);
+    const auto metal = openvlsi::addLayer(project, "Metal1", 8);
+    const auto metalPin = openvlsi::addLayer(project, "Metal1.pin", 8, 0, {}, 2);
+    const auto poly = openvlsi::addLayer(project, "GatPoly", 5);
+    const auto polyPin = openvlsi::addLayer(project, "GatPoly.pin", 5, 0, {}, 2);
 
-    const auto child = ice::createLayoutCell(project, "nmos_dev", "ihp.sg13g2");
+    const auto child = openvlsi::createLayoutCell(project, "nmos_dev", "ihp.sg13g2");
     auto &deviceCell = project.layoutCells.at(child);
     deviceCell.library = true;
     deviceCell.device = "nmos";
     deviceCell.parameters.push_back({project.nextId(), "model", "sg13_lv_nmos"});
     deviceCell.parameters.push_back({project.nextId(), "w", "1u"});
     deviceCell.parameters.push_back({project.nextId(), "l", "0.1u"});
-    ice::addPort(project, child, "D", metalPin, {1000, 0, 200, 200}, ice::PortDirection::inout, ice::PortSide::right);
-    ice::addPort(project, child, "G", polyPin, {500, 500, 200, 200}, ice::PortDirection::input, ice::PortSide::top);
-    ice::addPort(project, child, "S", metalPin, {0, 0, 200, 200}, ice::PortDirection::inout, ice::PortSide::left);
+    openvlsi::addPort(project, child, "D", metalPin, {1000, 0, 200, 200}, openvlsi::PortDirection::inout, openvlsi::PortSide::right);
+    openvlsi::addPort(project, child, "G", polyPin, {500, 500, 200, 200}, openvlsi::PortDirection::input, openvlsi::PortSide::top);
+    openvlsi::addPort(project, child, "S", metalPin, {0, 0, 200, 200}, openvlsi::PortDirection::inout, openvlsi::PortSide::left);
 
-    const auto parent = ice::createLayoutCell(project, "top", "ihp.sg13g2");
-    ice::addLayoutInstance(project, parent, child, "M1", 10000, 0);
-    const auto drainNet = ice::createLayoutNet(project, parent, "DRAIN");
-    const auto gateNet = ice::createLayoutNet(project, parent, "GATE");
-    const auto sourceNet = ice::createLayoutNet(project, parent, "SOURCE");
-    ice::addRectangle(project, parent, metal, {11000, 0, 400, 400}, drainNet);
-    ice::addRectangle(project, parent, poly, {10500, 500, 400, 400}, gateNet);
-    ice::addRectangle(project, parent, metal, {10000, 0, 400, 400}, sourceNet);
+    const auto parent = openvlsi::createLayoutCell(project, "top", "ihp.sg13g2");
+    openvlsi::addLayoutInstance(project, parent, child, "M1", 10000, 0);
+    const auto drainNet = openvlsi::createLayoutNet(project, parent, "DRAIN");
+    const auto gateNet = openvlsi::createLayoutNet(project, parent, "GATE");
+    const auto sourceNet = openvlsi::createLayoutNet(project, parent, "SOURCE");
+    openvlsi::addRectangle(project, parent, metal, {11000, 0, 400, 400}, drainNet);
+    openvlsi::addRectangle(project, parent, poly, {10500, 500, 400, 400}, gateNet);
+    openvlsi::addRectangle(project, parent, metal, {10000, 0, 400, 400}, sourceNet);
 
-    ice::createTextSchematicCell(project, "top", "ihp.sg13g2", "* linked schematic\nRSCH 1 2 1k\n.end\n");
+    openvlsi::createTextSchematicCell(project, "top", "ihp.sg13g2", "* linked schematic\nRSCH 1 2 1k\n.end\n");
 
-    const auto report = ice::runPex(project, parent);
+    const auto report = openvlsi::runPex(project, parent);
     CHECK(report.devicesFromLayout);
     CHECK(!report.devicesFromSchematic);
     CHECK(report.devices.size() == 1);
@@ -279,36 +279,36 @@ TEST_CASE("PEX extracts placed MOS devices and prefers them over the schematic")
     CHECK(text.find("XM1 DRAIN GATE SOURCE 0 sg13_lv_nmos w=1u l=0.1u") != std::string::npos);
     CHECK(text.find("RSCH") == std::string::npos);
 
-    const auto json = ice::serializePexReport(report);
+    const auto json = openvlsi::serializePexReport(report);
     CHECK(json.find("\"devices_from_layout\": true") != std::string::npos);
     CHECK(json.find("\"devices_from_schematic\": false") != std::string::npos);
     CHECK(json.find("XM1 DRAIN GATE SOURCE 0 sg13_lv_nmos w=1u l=0.1u") != std::string::npos);
 }
 
 TEST_CASE("PEX extracts placed capacitor devices with their library values") {
-    ice::Project project;
+    openvlsi::Project project;
     project.identity = "pex-placed-cap";
     project.name = "pex-placed-cap";
-    const auto metal = ice::addLayer(project, "Metal1", 8);
-    const auto metalPin = ice::addLayer(project, "Metal1.pin", 8, 0, {}, 2);
-    const auto child = ice::createLayoutCell(project, "cmim", "ihp.sg13g2");
+    const auto metal = openvlsi::addLayer(project, "Metal1", 8);
+    const auto metalPin = openvlsi::addLayer(project, "Metal1.pin", 8, 0, {}, 2);
+    const auto child = openvlsi::createLayoutCell(project, "cmim", "ihp.sg13g2");
     auto &deviceCell = project.layoutCells.at(child);
     deviceCell.library = true;
     deviceCell.device = "cmim";
     deviceCell.parameters.push_back({project.nextId(), "model", "cap_cmim"});
     deviceCell.parameters.push_back({project.nextId(), "C", "74.6f"});
-    ice::addPort(project, child, "PLUS", metalPin, {0, 0, 200, 200}, ice::PortDirection::inout, ice::PortSide::left);
-    ice::addPort(project, child, "MINUS", metalPin, {1000, 0, 200, 200}, ice::PortDirection::inout,
-                 ice::PortSide::right);
+    openvlsi::addPort(project, child, "PLUS", metalPin, {0, 0, 200, 200}, openvlsi::PortDirection::inout, openvlsi::PortSide::left);
+    openvlsi::addPort(project, child, "MINUS", metalPin, {1000, 0, 200, 200}, openvlsi::PortDirection::inout,
+                 openvlsi::PortSide::right);
 
-    const auto parent = ice::createLayoutCell(project, "top", "ihp.sg13g2");
-    ice::addLayoutInstance(project, parent, child, "C1", 5000, 0);
-    const auto plus = ice::createLayoutNet(project, parent, "PLUS");
-    const auto minus = ice::createLayoutNet(project, parent, "MINUS");
-    ice::addRectangle(project, parent, metal, {5000, 0, 400, 400}, plus);
-    ice::addRectangle(project, parent, metal, {6000, 0, 400, 400}, minus);
+    const auto parent = openvlsi::createLayoutCell(project, "top", "ihp.sg13g2");
+    openvlsi::addLayoutInstance(project, parent, child, "C1", 5000, 0);
+    const auto plus = openvlsi::createLayoutNet(project, parent, "PLUS");
+    const auto minus = openvlsi::createLayoutNet(project, parent, "MINUS");
+    openvlsi::addRectangle(project, parent, metal, {5000, 0, 400, 400}, plus);
+    openvlsi::addRectangle(project, parent, metal, {6000, 0, 400, 400}, minus);
 
-    const auto report = ice::runPex(project, parent);
+    const auto report = openvlsi::runPex(project, parent);
     CHECK(report.devices.size() == 1);
     if (report.devices.size() != 1)
         return;
@@ -319,27 +319,27 @@ TEST_CASE("PEX extracts placed capacitor devices with their library values") {
 }
 
 TEST_CASE("PEX skips imported digital macros even when names match passives") {
-    ice::Project project;
+    openvlsi::Project project;
     project.identity = "pex-digital-macro";
     project.name = "pex-digital-macro";
-    const auto metal = ice::addLayer(project, "Metal1", 8);
-    const auto metalPin = ice::addLayer(project, "Metal1.pin", 8, 0, {}, 2);
-    const auto child = ice::createLayoutCell(project, "digital_cap_macro", ice::genericPdkId);
+    const auto metal = openvlsi::addLayer(project, "Metal1", 8);
+    const auto metalPin = openvlsi::addLayer(project, "Metal1.pin", 8, 0, {}, 2);
+    const auto child = openvlsi::createLayoutCell(project, "digital_cap_macro", openvlsi::genericPdkId);
     auto &deviceCell = project.layoutCells.at(child);
     deviceCell.library = true;
     deviceCell.readOnly = true;
     deviceCell.device = "digital:cap_impl";
-    ice::addPort(project, child, "A", metalPin, {0, 0, 200, 200}, ice::PortDirection::inout, ice::PortSide::left);
-    ice::addPort(project, child, "B", metalPin, {1000, 0, 200, 200}, ice::PortDirection::inout, ice::PortSide::right);
+    openvlsi::addPort(project, child, "A", metalPin, {0, 0, 200, 200}, openvlsi::PortDirection::inout, openvlsi::PortSide::left);
+    openvlsi::addPort(project, child, "B", metalPin, {1000, 0, 200, 200}, openvlsi::PortDirection::inout, openvlsi::PortSide::right);
 
-    const auto parent = ice::createLayoutCell(project, "top", ice::genericPdkId);
-    ice::addLayoutInstance(project, parent, child, "D1", 5000, 0);
-    const auto netA = ice::createLayoutNet(project, parent, "A");
-    const auto netB = ice::createLayoutNet(project, parent, "B");
-    ice::addRectangle(project, parent, metal, {5000, 0, 400, 400}, netA);
-    ice::addRectangle(project, parent, metal, {6000, 0, 400, 400}, netB);
+    const auto parent = openvlsi::createLayoutCell(project, "top", openvlsi::genericPdkId);
+    openvlsi::addLayoutInstance(project, parent, child, "D1", 5000, 0);
+    const auto netA = openvlsi::createLayoutNet(project, parent, "A");
+    const auto netB = openvlsi::createLayoutNet(project, parent, "B");
+    openvlsi::addRectangle(project, parent, metal, {5000, 0, 400, 400}, netA);
+    openvlsi::addRectangle(project, parent, metal, {6000, 0, 400, 400}, netB);
 
-    const auto report = ice::runPex(project, parent);
+    const auto report = openvlsi::runPex(project, parent);
     CHECK(report.devices.empty());
     CHECK(std::any_of(report.notes.begin(), report.notes.end(), [](const std::string &note) {
         return note.find("not a recognized device") != std::string::npos;
@@ -347,30 +347,30 @@ TEST_CASE("PEX skips imported digital macros even when names match passives") {
 }
 
 TEST_CASE("PEX extracts polygon MOS devices from PDK rules") {
-    ice::Project project;
+    openvlsi::Project project;
     project.identity = "pex-polygon-mos";
     project.name = "pex-polygon-mos";
-    const auto active = ice::addLayer(project, "Activ", 1);
-    const auto gateLayer = ice::addLayer(project, "GatPoly", 5);
-    const auto contact = ice::addLayer(project, "Contact", 6);
-    const auto metal = ice::addLayer(project, "Metal1", 8);
-    const auto well = ice::addLayer(project, "NWell", 31);
-    const auto cell = ice::createLayoutCell(project, "top", "test.pdk");
-    const auto gateNet = ice::createLayoutNet(project, cell, "G");
-    const auto sourceNet = ice::createLayoutNet(project, cell, "S");
-    const auto drainNet = ice::createLayoutNet(project, cell, "D");
-    const auto bodyNet = ice::createLayoutNet(project, cell, "B");
-    ice::addRectangle(project, cell, active, {0, 0, 2000, 1000});
-    ice::addRectangle(project, cell, gateLayer, {900, -200, 200, 1400}, gateNet);
-    ice::addRectangle(project, cell, well, {-500, -500, 3000, 2000}, bodyNet);
-    ice::addRectangle(project, cell, contact, {100, 100, 200, 200});
-    ice::addRectangle(project, cell, contact, {1700, 100, 200, 200});
-    ice::addRectangle(project, cell, metal, {0, 0, 500, 300}, sourceNet);
-    ice::addRectangle(project, cell, metal, {1500, 0, 500, 300}, drainNet);
+    const auto active = openvlsi::addLayer(project, "Activ", 1);
+    const auto gateLayer = openvlsi::addLayer(project, "GatPoly", 5);
+    const auto contact = openvlsi::addLayer(project, "Contact", 6);
+    const auto metal = openvlsi::addLayer(project, "Metal1", 8);
+    const auto well = openvlsi::addLayer(project, "NWell", 31);
+    const auto cell = openvlsi::createLayoutCell(project, "top", "test.pdk");
+    const auto gateNet = openvlsi::createLayoutNet(project, cell, "G");
+    const auto sourceNet = openvlsi::createLayoutNet(project, cell, "S");
+    const auto drainNet = openvlsi::createLayoutNet(project, cell, "D");
+    const auto bodyNet = openvlsi::createLayoutNet(project, cell, "B");
+    openvlsi::addRectangle(project, cell, active, {0, 0, 2000, 1000});
+    openvlsi::addRectangle(project, cell, gateLayer, {900, -200, 200, 1400}, gateNet);
+    openvlsi::addRectangle(project, cell, well, {-500, -500, 3000, 2000}, bodyNet);
+    openvlsi::addRectangle(project, cell, contact, {100, 100, 200, 200});
+    openvlsi::addRectangle(project, cell, contact, {1700, 100, 200, 200});
+    openvlsi::addRectangle(project, cell, metal, {0, 0, 500, 300}, sourceNet);
+    openvlsi::addRectangle(project, cell, metal, {1500, 0, 500, 300}, drainNet);
 
-    const auto rulesPath = std::filesystem::temp_directory_path() / "ice-pex-polygon-rules.json";
+    const auto rulesPath = std::filesystem::temp_directory_path() / "openvlsi-pex-polygon-rules.json";
     std::ofstream(rulesPath) << R"({
-      "format": "ice-device-extraction",
+      "format": "openvlsi-device-extraction",
       "schema_version": 1,
       "devices": [
         {
@@ -388,10 +388,10 @@ TEST_CASE("PEX extracts polygon MOS devices from PDK rules") {
       ]
     })";
 
-    ice::PexOptions options;
+    openvlsi::PexOptions options;
     options.extractionRulesPath = rulesPath;
     options.includeLinkedSchematic = false;
-    const auto report = ice::runPex(project, cell, options);
+    const auto report = openvlsi::runPex(project, cell, options);
     std::filesystem::remove(rulesPath);
 
     CHECK(report.devicesFromLayout);
@@ -407,22 +407,22 @@ TEST_CASE("PEX extracts polygon MOS devices from PDK rules") {
 }
 
 TEST_CASE("PEX extracts polygon capacitors from PDK rules") {
-    ice::Project project;
+    openvlsi::Project project;
     project.identity = "pex-polygon-cap";
     project.name = "pex-polygon-cap";
-    const auto metal1 = ice::addLayer(project, "Metal1", 8);
-    const auto metal2 = ice::addLayer(project, "Metal2", 10);
-    const auto mim = ice::addLayer(project, "MIM", 36);
-    const auto cell = ice::createLayoutCell(project, "top", "test.pdk");
-    const auto firstNet = ice::createLayoutNet(project, cell, "A");
-    const auto secondNet = ice::createLayoutNet(project, cell, "B");
-    ice::addRectangle(project, cell, metal1, {0, 0, 1000, 1000}, firstNet);
-    ice::addRectangle(project, cell, metal2, {0, 0, 1000, 1000}, secondNet);
-    ice::addRectangle(project, cell, mim, {0, 0, 1000, 1000});
+    const auto metal1 = openvlsi::addLayer(project, "Metal1", 8);
+    const auto metal2 = openvlsi::addLayer(project, "Metal2", 10);
+    const auto mim = openvlsi::addLayer(project, "MIM", 36);
+    const auto cell = openvlsi::createLayoutCell(project, "top", "test.pdk");
+    const auto firstNet = openvlsi::createLayoutNet(project, cell, "A");
+    const auto secondNet = openvlsi::createLayoutNet(project, cell, "B");
+    openvlsi::addRectangle(project, cell, metal1, {0, 0, 1000, 1000}, firstNet);
+    openvlsi::addRectangle(project, cell, metal2, {0, 0, 1000, 1000}, secondNet);
+    openvlsi::addRectangle(project, cell, mim, {0, 0, 1000, 1000});
 
-    const auto rulesPath = std::filesystem::temp_directory_path() / "ice-pex-polygon-cap-rules.json";
+    const auto rulesPath = std::filesystem::temp_directory_path() / "openvlsi-pex-polygon-cap-rules.json";
     std::ofstream(rulesPath) << R"({
-      "format": "ice-device-extraction",
+      "format": "openvlsi-device-extraction",
       "schema_version": 1,
       "devices": [
         {
@@ -437,10 +437,10 @@ TEST_CASE("PEX extracts polygon capacitors from PDK rules") {
       ]
     })";
 
-    ice::PexOptions options;
+    openvlsi::PexOptions options;
     options.extractionRulesPath = rulesPath;
     options.includeLinkedSchematic = false;
-    const auto report = ice::runPex(project, cell, options);
+    const auto report = openvlsi::runPex(project, cell, options);
     std::filesystem::remove(rulesPath);
 
     CHECK(report.devices.size() == 1);
@@ -452,36 +452,36 @@ TEST_CASE("PEX extracts polygon capacitors from PDK rules") {
 }
 
 TEST_CASE("PEX keeps the layout ground net as SPICE node zero") {
-    ice::Project project;
+    openvlsi::Project project;
     project.identity = "pex-ground";
     project.name = "pex-ground";
-    const auto metal = ice::addLayer(project, "Metal1", 8);
-    const auto cell = ice::createLayoutCell(project, "top");
-    const auto ground = ice::createLayoutNet(project, cell, "0");
-    ice::addRectangle(project, cell, metal, {0, 0, 10000, 1000}, ground);
+    const auto metal = openvlsi::addLayer(project, "Metal1", 8);
+    const auto cell = openvlsi::createLayoutCell(project, "top");
+    const auto ground = openvlsi::createLayoutNet(project, cell, "0");
+    openvlsi::addRectangle(project, cell, metal, {0, 0, 10000, 1000}, ground);
 
-    const auto report = ice::runPex(project, cell);
+    const auto report = openvlsi::runPex(project, cell);
 
     CHECK(report.spiceText.find("n_0") == std::string::npos);
     CHECK(report.spiceText.find("* Net 0") != std::string::npos);
 }
 
 TEST_CASE("PEX extracts polygon resistors from PDK rules") {
-    ice::Project project;
+    openvlsi::Project project;
     project.identity = "pex-polygon-res";
     project.name = "pex-polygon-res";
-    const auto body = ice::addLayer(project, "RES", 24);
-    const auto metal = ice::addLayer(project, "Metal1", 8);
-    const auto cell = ice::createLayoutCell(project, "top", "test.pdk");
-    const auto firstNet = ice::createLayoutNet(project, cell, "A");
-    const auto secondNet = ice::createLayoutNet(project, cell, "B");
-    ice::addRectangle(project, cell, body, {0, 0, 2000, 500});
-    ice::addRectangle(project, cell, metal, {0, 0, 300, 500}, firstNet);
-    ice::addRectangle(project, cell, metal, {1700, 0, 300, 500}, secondNet);
+    const auto body = openvlsi::addLayer(project, "RES", 24);
+    const auto metal = openvlsi::addLayer(project, "Metal1", 8);
+    const auto cell = openvlsi::createLayoutCell(project, "top", "test.pdk");
+    const auto firstNet = openvlsi::createLayoutNet(project, cell, "A");
+    const auto secondNet = openvlsi::createLayoutNet(project, cell, "B");
+    openvlsi::addRectangle(project, cell, body, {0, 0, 2000, 500});
+    openvlsi::addRectangle(project, cell, metal, {0, 0, 300, 500}, firstNet);
+    openvlsi::addRectangle(project, cell, metal, {1700, 0, 300, 500}, secondNet);
 
-    const auto rulesPath = std::filesystem::temp_directory_path() / "ice-pex-polygon-res-rules.json";
+    const auto rulesPath = std::filesystem::temp_directory_path() / "openvlsi-pex-polygon-res-rules.json";
     std::ofstream(rulesPath) << R"({
-      "format": "ice-device-extraction",
+      "format": "openvlsi-device-extraction",
       "schema_version": 1,
       "devices": [
         {
@@ -496,10 +496,10 @@ TEST_CASE("PEX extracts polygon resistors from PDK rules") {
       ]
     })";
 
-    ice::PexOptions options;
+    openvlsi::PexOptions options;
     options.extractionRulesPath = rulesPath;
     options.includeLinkedSchematic = false;
-    const auto report = ice::runPex(project, cell, options);
+    const auto report = openvlsi::runPex(project, cell, options);
     std::filesystem::remove(rulesPath);
 
     CHECK(report.devices.size() == 1);
@@ -511,21 +511,21 @@ TEST_CASE("PEX extracts polygon resistors from PDK rules") {
 }
 
 TEST_CASE("PEX resistor rules can accept terminals that touch the body") {
-    ice::Project project;
+    openvlsi::Project project;
     project.identity = "pex-touch-res";
     project.name = "pex-touch-res";
-    const auto body = ice::addLayer(project, "PolyRes", 128);
-    const auto terminals = ice::addLayer(project, "GatPoly", 5);
-    const auto cell = ice::createLayoutCell(project, "top", "test.pdk");
-    const auto firstNet = ice::createLayoutNet(project, cell, "A");
-    const auto secondNet = ice::createLayoutNet(project, cell, "B");
-    ice::addRectangle(project, cell, body, {0, 0, 2000, 500});
-    ice::addRectangle(project, cell, terminals, {-500, 0, 500, 500}, firstNet);
-    ice::addRectangle(project, cell, terminals, {2000, 0, 500, 500}, secondNet);
+    const auto body = openvlsi::addLayer(project, "PolyRes", 128);
+    const auto terminals = openvlsi::addLayer(project, "GatPoly", 5);
+    const auto cell = openvlsi::createLayoutCell(project, "top", "test.pdk");
+    const auto firstNet = openvlsi::createLayoutNet(project, cell, "A");
+    const auto secondNet = openvlsi::createLayoutNet(project, cell, "B");
+    openvlsi::addRectangle(project, cell, body, {0, 0, 2000, 500});
+    openvlsi::addRectangle(project, cell, terminals, {-500, 0, 500, 500}, firstNet);
+    openvlsi::addRectangle(project, cell, terminals, {2000, 0, 500, 500}, secondNet);
 
-    const auto rulesPath = std::filesystem::temp_directory_path() / "ice-pex-touch-res-rules.json";
+    const auto rulesPath = std::filesystem::temp_directory_path() / "openvlsi-pex-touch-res-rules.json";
     std::ofstream(rulesPath) << R"({
-      "format": "ice-device-extraction",
+      "format": "openvlsi-device-extraction",
       "schema_version": 1,
       "devices": [
         {
@@ -541,10 +541,10 @@ TEST_CASE("PEX resistor rules can accept terminals that touch the body") {
       ]
     })";
 
-    ice::PexOptions options;
+    openvlsi::PexOptions options;
     options.extractionRulesPath = rulesPath;
     options.includeLinkedSchematic = false;
-    const auto report = ice::runPex(project, cell, options);
+    const auto report = openvlsi::runPex(project, cell, options);
     std::filesystem::remove(rulesPath);
 
     CHECK(report.devices.size() == 1);
@@ -556,20 +556,20 @@ TEST_CASE("PEX resistor rules can accept terminals that touch the body") {
 }
 
 TEST_CASE("PEX extracts planned passive devices from procedural layouts") {
-    ice::Project project;
+    openvlsi::Project project;
     project.identity = "pex-planned";
     project.name = "pex-planned";
-    const auto cell = ice::createLayoutCell(project, "top");
-    const auto metal = ice::addLayer(project, "met1.drawing", 68, 0, {}, 20);
-    const auto netA = ice::createLayoutNet(project, cell, "A");
-    const auto netB = ice::createLayoutNet(project, cell, "B");
-    const auto netC = ice::createLayoutNet(project, cell, "C");
-    ice::addRectangle(project, cell, metal, {0, 0, 1000, 1000}, netA);
-    ice::addRectangle(project, cell, metal, {5000, 0, 1000, 1000}, netB);
-    ice::addRectangle(project, cell, metal, {10000, 0, 1000, 1000}, netC);
+    const auto cell = openvlsi::createLayoutCell(project, "top");
+    const auto metal = openvlsi::addLayer(project, "met1.drawing", 68, 0, {}, 20);
+    const auto netA = openvlsi::createLayoutNet(project, cell, "A");
+    const auto netB = openvlsi::createLayoutNet(project, cell, "B");
+    const auto netC = openvlsi::createLayoutNet(project, cell, "C");
+    openvlsi::addRectangle(project, cell, metal, {0, 0, 1000, 1000}, netA);
+    openvlsi::addRectangle(project, cell, metal, {5000, 0, 1000, 1000}, netB);
+    openvlsi::addRectangle(project, cell, metal, {10000, 0, 1000, 1000}, netC);
 
     auto &layout = project.layoutCells.at(cell);
-    ice::PlannedDevice resistor;
+    openvlsi::PlannedDevice resistor;
     resistor.id = project.nextId();
     resistor.name = "RBIAS";
     resistor.device = "res_poly";
@@ -579,7 +579,7 @@ TEST_CASE("PEX extracts planned passive devices from procedural layouts") {
     resistor.placeholder = false;
     layout.plannedDevices.emplace(resistor.id, resistor);
 
-    ice::PlannedDevice capacitor;
+    openvlsi::PlannedDevice capacitor;
     capacitor.id = project.nextId();
     capacitor.name = "CC";
     capacitor.device = "mim_cap";
@@ -589,7 +589,7 @@ TEST_CASE("PEX extracts planned passive devices from procedural layouts") {
     capacitor.placeholder = false;
     layout.plannedDevices.emplace(capacitor.id, capacitor);
 
-    const auto report = ice::runPex(project, cell);
+    const auto report = openvlsi::runPex(project, cell);
     CHECK(report.devices.size() == 2);
     if (report.devices.size() != 2)
         return;
@@ -602,22 +602,22 @@ TEST_CASE("PEX extracts planned passive devices from procedural layouts") {
 }
 
 TEST_CASE("PEX keeps planned MOS terminal order without polygon extraction") {
-    ice::Project project;
+    openvlsi::Project project;
     project.identity = "pex-planned-mos";
     project.name = "pex-planned-mos";
-    const auto cell = ice::createLayoutCell(project, "top");
-    const auto metal = ice::addLayer(project, "met1.drawing", 68, 0, {}, 20);
-    const auto netD = ice::createLayoutNet(project, cell, "DRAIN");
-    const auto netG = ice::createLayoutNet(project, cell, "GATE");
-    const auto netS = ice::createLayoutNet(project, cell, "SOURCE");
-    const auto netB = ice::createLayoutNet(project, cell, "BULK");
-    ice::addRectangle(project, cell, metal, {0, 0, 1000, 1000}, netD);
-    ice::addRectangle(project, cell, metal, {5000, 0, 1000, 1000}, netG);
-    ice::addRectangle(project, cell, metal, {10000, 0, 1000, 1000}, netS);
-    ice::addRectangle(project, cell, metal, {15000, 0, 1000, 1000}, netB);
+    const auto cell = openvlsi::createLayoutCell(project, "top");
+    const auto metal = openvlsi::addLayer(project, "met1.drawing", 68, 0, {}, 20);
+    const auto netD = openvlsi::createLayoutNet(project, cell, "DRAIN");
+    const auto netG = openvlsi::createLayoutNet(project, cell, "GATE");
+    const auto netS = openvlsi::createLayoutNet(project, cell, "SOURCE");
+    const auto netB = openvlsi::createLayoutNet(project, cell, "BULK");
+    openvlsi::addRectangle(project, cell, metal, {0, 0, 1000, 1000}, netD);
+    openvlsi::addRectangle(project, cell, metal, {5000, 0, 1000, 1000}, netG);
+    openvlsi::addRectangle(project, cell, metal, {10000, 0, 1000, 1000}, netS);
+    openvlsi::addRectangle(project, cell, metal, {15000, 0, 1000, 1000}, netB);
 
     auto &layout = project.layoutCells.at(cell);
-    ice::PlannedDevice mos;
+    openvlsi::PlannedDevice mos;
     mos.id = project.nextId();
     mos.name = "M1";
     mos.device = "nfet";
@@ -631,9 +631,9 @@ TEST_CASE("PEX keeps planned MOS terminal order without polygon extraction") {
     // Polygon extraction is disabled: the planned metadata alone must provide
     // the device, and its D/G/S/B order must come from the pin metadata rather
     // than from the geometry, so mirrored and rotated instances stay correct.
-    ice::PexOptions options;
+    openvlsi::PexOptions options;
     options.extractPolygonDevices = false;
-    const auto report = ice::runPex(project, cell, options);
+    const auto report = openvlsi::runPex(project, cell, options);
     CHECK(report.devices.size() == 1);
     if (report.devices.size() != 1)
         return;
@@ -644,25 +644,25 @@ TEST_CASE("PEX keeps planned MOS terminal order without polygon extraction") {
 }
 
 TEST_CASE("PEX copies the linked schematic device netlist") {
-    ice::Project project;
+    openvlsi::Project project;
     project.identity = "pex-linked";
     project.name = "pex-linked";
-    const auto schematic = ice::createSchematicCell(project, "top");
-    const auto symbol = ice::addSymbol(project, schematic, "resistor");
+    const auto schematic = openvlsi::createSchematicCell(project, "top");
+    const auto symbol = openvlsi::addSymbol(project, schematic, "resistor");
     const auto firstPin = project.nextId();
     const auto secondPin = project.nextId();
     auto &definition = project.schematicCells.at(schematic).symbols.at(symbol);
-    definition.pins.push_back({firstPin, "A", 0, 0, ice::PinDirection::left});
-    definition.pins.push_back({secondPin, "B", 0, 0, ice::PinDirection::right});
-    ice::addSchematicInstance(project, schematic, symbol, "R1", 0, 0);
-    ice::addNet(project, schematic, "VIN", {firstPin, secondPin});
+    definition.pins.push_back({firstPin, "A", 0, 0, openvlsi::PinDirection::left});
+    definition.pins.push_back({secondPin, "B", 0, 0, openvlsi::PinDirection::right});
+    openvlsi::addSchematicInstance(project, schematic, symbol, "R1", 0, 0);
+    openvlsi::addNet(project, schematic, "VIN", {firstPin, secondPin});
 
-    const auto cell = ice::createLayoutCell(project, "top");
-    const auto metal = ice::addLayer(project, "Metal1", 8);
-    const auto net = ice::createLayoutNet(project, cell, "VIN");
-    ice::addRectangle(project, cell, metal, {0, 0, 2000, 1000}, net);
+    const auto cell = openvlsi::createLayoutCell(project, "top");
+    const auto metal = openvlsi::addLayer(project, "Metal1", 8);
+    const auto net = openvlsi::createLayoutNet(project, cell, "VIN");
+    openvlsi::addRectangle(project, cell, metal, {0, 0, 2000, 1000}, net);
 
-    const auto report = ice::runPex(project, cell);
+    const auto report = openvlsi::runPex(project, cell);
     CHECK(report.devicesFromSchematic);
     CHECK(!report.devicesFromLayout);
     const auto &text = project.schematicCells.at(report.schematicCell).spiceText;
@@ -671,16 +671,16 @@ TEST_CASE("PEX copies the linked schematic device netlist") {
 }
 
 TEST_CASE("PEX does not overwrite an unrelated text schematic with the same name") {
-    ice::Project project;
+    openvlsi::Project project;
     project.identity = "pex-name";
     project.name = "pex-name";
-    const auto cell = ice::createLayoutCell(project, "top");
-    const auto metal = ice::addLayer(project, "Metal1", 8);
-    const auto net = ice::createLayoutNet(project, cell, "VIN");
-    ice::addRectangle(project, cell, metal, {0, 0, 2000, 1000}, net);
-    const auto existing = ice::createTextSchematicCell(project, "top PEX", ice::genericPdkId, "* user text\n.end\n");
+    const auto cell = openvlsi::createLayoutCell(project, "top");
+    const auto metal = openvlsi::addLayer(project, "Metal1", 8);
+    const auto net = openvlsi::createLayoutNet(project, cell, "VIN");
+    openvlsi::addRectangle(project, cell, metal, {0, 0, 2000, 1000}, net);
+    const auto existing = openvlsi::createTextSchematicCell(project, "top PEX", openvlsi::genericPdkId, "* user text\n.end\n");
 
-    const auto report = ice::runPex(project, cell);
+    const auto report = openvlsi::runPex(project, cell);
     CHECK(report.schematicCell != existing);
     CHECK(report.schematic == "top PEX 2");
     CHECK(project.schematicCells.at(existing).spiceText == "* user text\n.end\n");

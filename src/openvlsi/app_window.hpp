@@ -1,0 +1,20 @@
+#pragma once
+
+#include "appearance.hpp"
+#include "openvlsilib/core.hpp"
+
+#include <memory>
+
+class QString;
+
+class AppWindow {
+  public:
+    virtual ~AppWindow() = default;
+    virtual bool setProject(openvlsi::Project project) = 0;
+    virtual void setProjectPath(const QString &path) = 0;
+    virtual void show() = 0;
+    virtual void resize(int width, int height) = 0;
+    virtual void showMessage(const QString &message) = 0;
+};
+
+std::unique_ptr<AppWindow> createAppWindow(openvlsi::AppearanceMode appearance);

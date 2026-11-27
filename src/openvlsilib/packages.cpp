@@ -1,0 +1,938 @@
+#include "openvlsilib/packages.hpp"
+
+#include "openvlsilib/core.hpp"
+#include "openvlsilib/process.hpp"
+
+#include <algorithm>
+#include <array>
+#include <cctype>
+#include <chrono>
+#include <cstdlib>
+#include <fstream>
+#include <iomanip>
+#include <memory>
+#include <nlohmann/json.hpp>
+#include <openssl/evp.h>
+#include <set>
+#include <sstream>
+#include <toml++/toml.h>
+
+namespace openvlsi {
+namespace {
+std::string readString(const toml::table &table, std::string_view key, std::string fallback = {}) {
+    if (auto value = table[key].value<std::string>())
+        return *value;
+    return fallback;
+}
+
+std::vector<std::string> readStringArray(const toml::table &table, std::string_view key) {
+    std::vector<std::string> result;
+    if (const auto *array = table[key].as_array()) {
+        for (const auto &item : *array) {
+            if (auto value = item.value<std::string>())
+                result.push_back(*value);
+        }
+    }
+    return result;
+}
+
+std::filesystem::path relativePackagePath(const std::string &text, std::string_view fieldName) {
+    if (text.empty())
+        return {};
+    const std::filesystem::path path(text);
+    if (path.is_absolute() || text.find("..") != std::string::npos)
+        throw ProjectError("package.manifest",
+                           std::string(fieldName) + " must be a relative path inside the package: " + text);
+    return path.lexically_normal();
+}
+
+std::filesystem::path readRelativePath(const toml::table &table, std::string_view key, std::string_view fieldName) {
+    return relativePackagePath(readString(table, key), fieldName);
+}
+
+PackagePdkStackImplementation readStackImplementation(const toml::table &table, const std::string &prefix) {
+    PackagePdkStackImplementation implementation;
+    implementation.site = readString(table, "site");
+    implementation.techLef = readRelativePath(table, "tech_lef", prefix + ".tech_lef");
+    implementation.cellLef = readRelativePath(table, "cell_lef", prefix + ".cell_lef");
+    implementation.gds = readRelativePath(table, "gds", prefix + ".gds");
+    implementation.layerMap = readRelativePath(table, "layer_map", prefix + ".layer_map");
+    implementation.ioHorizontalLayers = readStringArray(table, "io_horizontal_layers");
+    implementation.ioVerticalLayers = readStringArray(table, "io_vertical_layers");
+    implementation.routingMinLayer = readString(table, "routing_min_layer");
+    implementation.routingMaxLayer = readString(table, "routing_max_layer");
+    implementation.tapcellScript = readRelativePath(table, "tapcell_script", prefix + ".tapcell_script");
+    implementation.pdnScript = readRelativePath(table, "pdn_script", prefix + ".pdn_script");
+    implementation.rcScript = readRelativePath(table, "rc_script", prefix + ".rc_script");
+    implementation.fillCells = readStringArray(table, "fill_cells");
+    implementation.rcxRules = readRelativePath(table, "rcx_rules", prefix + ".rcx_rules");
+    if (const auto *liberty = table["liberty"].as_table()) {
+        for (const auto &[corner, value] : *liberty) {
+            const auto *files = value.as_array();
+            if (!files)
+                throw ProjectError("package.manifest", prefix + ".liberty entries must be arrays");
+            std::vector<std::filesystem::path> corners;
+            for (const auto &file : *files) {
+                const auto text = file.value<std::string>();
+                if (!text)
+                    throw ProjectError("package.manifest", "Liberty file entries must be strings");
+                corners.push_back(relativePackagePath(*text, prefix + ".liberty." + std::string(corner)));
+            }
+            implementation.liberty.emplace(std::string(corner), std::move(corners));
+        }
+    }
+    return implementation;
+}
+
+std::vector<int> parseVersionParts(const std::string &version) {
+    std::vector<int> parts;
+    std::string current;
+    for (char c : version) {
+        if (c == '.') {
+            try {
+                parts.push_back(std::stoi(current));
+            } catch (...) {
+                return {};
+            }
+            current.clear();
+        } else if (std::isdigit(static_cast<unsigned char>(c))) {
+            current.push_back(c);
+        } else {
+            // Stop at pre-release/build metadata or any suffix.
+            break;
+        }
+    }
+    if (!current.empty()) {
+        try {
+            parts.push_back(std::stoi(current));
+        } catch (...) {
+            return {};
+        }
+    }
+    return parts;
+}
+
+int compareVersions(const std::string &left, const std::string &right) {
+    const auto l = parseVersionParts(left);
+    const auto r = parseVersionParts(right);
+    if (l.empty() || r.empty())
+        return left.compare(right);
+    const std::size_t count = std::max(l.size(), r.size());
+    for (std::size_t i = 0; i < count; ++i) {
+        const int lv = i < l.size() ? l[i] : 0;
+        const int rv = i < r.size() ? r[i] : 0;
+        if (lv != rv)
+            return lv < rv ? -1 : 1;
+    }
+    return 0;
+}
+
+bool satisfies(const std::string &version, const std::string &constraint) {
+    if (constraint.empty() || constraint == "*" || constraint == version)
+        return true;
+    if (constraint.starts_with('^')) {
+        const std::string base = constraint.substr(1);
+        if (compareVersions(version, base) < 0)
+            return false;
+        const auto baseParts = parseVersionParts(base);
+        const auto versionParts = parseVersionParts(version);
+        if (baseParts.empty() || versionParts.empty())
+            return false;
+        if (baseParts[0] != 0)
+            return !versionParts.empty() && versionParts[0] == baseParts[0];
+        if (baseParts.size() > 1 && baseParts[1] != 0)
+            return versionParts.size() > 1 && versionParts[0] == 0 && versionParts[1] == baseParts[1];
+        return compareVersions(version, base) == 0;
+    }
+    if (constraint.starts_with(">=")) {
+        const std::string base = constraint.substr(2);
+        // Trim leading whitespace after ">=".
+        const auto first = base.find_first_not_of(" \t");
+        const std::string trimmed = first == std::string::npos ? std::string{} : base.substr(first);
+        if (trimmed.empty())
+            return true;
+        return compareVersions(version, trimmed) >= 0;
+    }
+    return false;
+}
+
+std::string trimText(std::string value) {
+    const auto first = value.find_first_not_of(" \t\r\n");
+    if (first == std::string::npos)
+        return {};
+    const auto last = value.find_last_not_of(" \t\r\n");
+    return value.substr(first, last - first + 1);
+}
+
+std::string unquoteText(std::string value) {
+    value = trimText(std::move(value));
+    if (value.size() >= 2 &&
+        ((value.front() == '"' && value.back() == '"') || (value.front() == '\'' && value.back() == '\'')))
+        return value.substr(1, value.size() - 2);
+    return value;
+}
+
+std::string relativeGeneric(const std::filesystem::path &path, const std::filesystem::path &root) {
+    std::error_code error;
+    const auto relative = std::filesystem::relative(path, root, error);
+    if (error)
+        return {};
+    return relative.lexically_normal().generic_string();
+}
+
+struct SubmoduleEntry {
+    std::string path;
+    std::string url;
+    std::string revision;
+};
+
+std::vector<SubmoduleEntry> readGitmodules(const std::filesystem::path &indexRoot) {
+    std::ifstream input(indexRoot / ".gitmodules");
+    if (!input)
+        return {};
+    std::vector<SubmoduleEntry> entries;
+    SubmoduleEntry current;
+    bool inSubmodule = false;
+    const auto flush = [&] {
+        if (inSubmodule && !current.path.empty())
+            entries.push_back(current);
+        current = {};
+    };
+    std::string line;
+    while (std::getline(input, line)) {
+        line = trimText(std::move(line));
+        if (line.empty() || line.starts_with('#'))
+            continue;
+        if (line.front() == '[') {
+            flush();
+            inSubmodule = line.find("submodule") != std::string::npos;
+            continue;
+        }
+        if (!inSubmodule)
+            continue;
+        const auto separator = line.find('=');
+        if (separator == std::string::npos)
+            continue;
+        const auto key = trimText(line.substr(0, separator));
+        const auto value = unquoteText(line.substr(separator + 1));
+        if (key == "path")
+            current.path = value;
+        else if (key == "url")
+            current.url = value;
+        else if (key == "branch")
+            current.revision = value;
+    }
+    flush();
+    return entries;
+}
+
+const SubmoduleEntry *findSubmodule(const std::vector<SubmoduleEntry> &entries, const std::string &relativePath) {
+    const SubmoduleEntry *selected = nullptr;
+    for (const auto &entry : entries) {
+        if (relativePath != entry.path && !relativePath.starts_with(entry.path + "/"))
+            continue;
+        if (!selected || entry.path.size() > selected->path.size())
+            selected = &entry;
+    }
+    return selected;
+}
+
+std::filesystem::path temporaryInstallPath(const std::filesystem::path &repository) {
+    const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
+    auto path = repository / (".openvlsi-install-" + std::to_string(stamp));
+    for (unsigned int suffix = 1; std::filesystem::exists(path); ++suffix)
+        path = repository / (".openvlsi-install-" + std::to_string(stamp) + "-" + std::to_string(suffix));
+    return path;
+}
+
+void removeQuietly(const std::filesystem::path &path) {
+    std::error_code error;
+    std::filesystem::remove_all(path, error);
+}
+
+std::filesystem::path findPackage(const std::vector<std::filesystem::path> &roots, const std::string &name,
+                                  const std::string &constraint) {
+    std::filesystem::path selected;
+    std::string selectedVersion;
+    for (const auto &root : roots) {
+        if (!std::filesystem::exists(root))
+            continue;
+        for (const auto &entry : std::filesystem::directory_iterator(root)) {
+            if (!entry.is_directory())
+                continue;
+            try {
+                auto spec = PackageManager::readManifest(entry.path());
+                if (spec.name != name || !satisfies(spec.version, constraint))
+                    continue;
+                if (selected.empty() || compareVersions(spec.version, selectedVersion) > 0) {
+                    selected = entry.path();
+                    selectedVersion = spec.version;
+                }
+            } catch (const ProjectError &) {
+                // Ignore unrelated or malformed package directories while
+                // searching a repository root.
+            }
+        }
+    }
+    if (selected.empty())
+        throw ProjectError("package.resolve", "Unable to resolve package: " + name);
+    return selected;
+}
+} // namespace
+
+PackageSpec PackageManager::readManifest(const std::filesystem::path &packageRoot) {
+    try {
+        auto table = toml::parse_file((packageRoot / "package.toml").string());
+        const auto *package = table["package"].as_table();
+        if (!package)
+            throw ProjectError("package.manifest", "Missing [package] table");
+        PackageSpec spec;
+        spec.schemaVersion = static_cast<int>((*package)["schema_version"].value_or(1LL));
+        spec.name = readString(*package, "name");
+        spec.version = readString(*package, "version");
+        spec.description = readString(*package, "description");
+        spec.license = readString(*package, "license");
+        spec.root = packageRoot;
+        if (spec.name.empty() || spec.version.empty())
+            throw ProjectError("package.manifest", "Package name and version are required");
+        if (const auto *dependencies = table["dependencies"].as_table())
+            for (const auto &[key, value] : *dependencies)
+                if (auto text = value.value<std::string>())
+                    spec.dependencies.emplace(std::string(key), *text);
+        if (const auto *provides = table["provides"].as_table())
+            for (const auto &[key, value] : *provides)
+                if (auto enabled = value.value<bool>())
+                    spec.capabilities.emplace(std::string(key), *enabled);
+        if (const auto *trust = table["trust"].as_table())
+            spec.trusted = (*trust)["trusted"].value_or(false);
+        if (const auto *source = table["source"].as_table()) {
+            spec.sourceType = readString(*source, "type");
+            spec.sourceUrl = readString(*source, "url");
+            spec.sourceRevision = readString(*source, "revision");
+        }
+        if (const auto *pdk = table["pdk"].as_table()) {
+            PackagePdk pdkSpec;
+            pdkSpec.id = readString(*pdk, "id", spec.name);
+            pdkSpec.aliases = readStringArray(*pdk, "aliases");
+            pdkSpec.displayName = readString(*pdk, "display_name", spec.name);
+            pdkSpec.defaultSchematic = readString(*pdk, "default_schematic");
+            pdkSpec.manufacturingGrid = (*pdk)["manufacturing_grid"].value_or(0LL);
+            if (pdkSpec.manufacturingGrid < 0)
+                throw ProjectError("package.manifest", "PDK manufacturing_grid must not be negative");
+            if (const auto *layers = (*pdk)["layer"].as_array()) {
+                std::set<std::string> layerNames;
+                for (const auto &item : *layers) {
+                    const auto *layer = item.as_table();
+                    if (!layer)
+                        throw ProjectError("package.manifest", "PDK layer entry must be a table");
+                    PackageLayer entry;
+                    entry.name = readString(*layer, "name");
+                    entry.number = static_cast<int>((*layer)["number"].value_or(-1LL));
+                    entry.datatype = static_cast<int>((*layer)["datatype"].value_or(0LL));
+                    entry.minimumWidth = (*layer)["minimum_width"].value_or(0LL);
+                    if (entry.name.empty() || entry.number < 0 || entry.datatype < 0 || entry.datatype > 65535 ||
+                        entry.minimumWidth < 0)
+                        throw ProjectError("package.manifest",
+                                           "PDK layers require a name, non-negative GDS number, datatype, and "
+                                           "minimum width");
+                    if (!layerNames.insert(entry.name).second)
+                        throw ProjectError("package.manifest", "Duplicate PDK layer name: " + entry.name);
+                    pdkSpec.layers.push_back(std::move(entry));
+                }
+            }
+            pdkSpec.defaultStack = readString(*pdk, "default_stack");
+            if (const auto *implementation = (*pdk)["implementation"].as_table()) {
+                PackagePdkImplementation entry;
+                entry.engine = readString(*implementation, "engine", "openroad");
+                entry.synthesis = readString(*implementation, "synthesis", "yosys");
+                entry.minOpenRoad = readString(*implementation, "min_openroad");
+                entry.minYosys = readString(*implementation, "min_yosys");
+                if (const auto *orfs = (*implementation)["orfs"].as_table()) {
+                    entry.orfsPlatform = readString(*orfs, "platform");
+                    entry.orfsMetalOption = readString(*orfs, "metal_option");
+                    entry.orfsTrackOption = readString(*orfs, "track_option");
+                    entry.orfsPowerOption = readString(*orfs, "power_option");
+                    entry.orfsCorner = readString(*orfs, "corner");
+                    entry.orfsLibertyPattern = readString(*orfs, "liberty_pattern");
+                    entry.orfsSite = readString(*orfs, "site");
+                    entry.orfsIoHorizontalLayers = readStringArray(*orfs, "io_horizontal_layers");
+                    entry.orfsIoVerticalLayers = readStringArray(*orfs, "io_vertical_layers");
+                    entry.orfsRoutingMinLayer = readString(*orfs, "routing_min_layer");
+                    entry.orfsRoutingMaxLayer = readString(*orfs, "routing_max_layer");
+                    entry.orfsGdsTrack = readString(*orfs, "gds_track");
+                }
+                auto files = readStackImplementation(*implementation, "pdk.implementation");
+                if (!files.site.empty() || !files.techLef.empty() || !files.cellLef.empty() || !files.gds.empty() ||
+                    !files.layerMap.empty() || !files.liberty.empty() || !files.tapcellScript.empty() ||
+                    !files.pdnScript.empty() || !files.rcScript.empty())
+                    entry.files = std::move(files);
+                pdkSpec.implementation = std::move(entry);
+            }
+            if (const auto *stacks = (*pdk)["stack"].as_array()) {
+                std::set<std::string> stackIds;
+                for (const auto &item : *stacks) {
+                    const auto *stack = item.as_table();
+                    if (!stack)
+                        throw ProjectError("package.manifest", "PDK stack entry must be a table");
+                    PackagePdkStack entry;
+                    entry.id = readString(*stack, "id");
+                    entry.displayName = readString(*stack, "display_name", entry.id);
+                    if (entry.id.empty() || entry.id.find_first_of("/\\") != std::string::npos)
+                        throw ProjectError("package.manifest", "PDK stacks require a valid id");
+                    if (!stackIds.insert(entry.id).second)
+                        throw ProjectError("package.manifest", "Duplicate PDK stack id: " + entry.id);
+                    entry.layers = readStringArray(*stack, "layers");
+                    if (const auto *implementation = (*stack)["implementation"].as_table())
+                        entry.implementation = readStackImplementation(*implementation, "pdk.stack.implementation");
+                    pdkSpec.stacks.push_back(std::move(entry));
+                }
+            }
+            if (pdkSpec.defaultStack.empty() && !pdkSpec.stacks.empty())
+                pdkSpec.defaultStack = pdkSpec.stacks.front().id;
+            if (!pdkSpec.defaultStack.empty() &&
+                std::none_of(pdkSpec.stacks.begin(), pdkSpec.stacks.end(),
+                             [&](const auto &stack) { return stack.id == pdkSpec.defaultStack; }))
+                throw ProjectError("package.manifest", "Default PDK stack is not declared: " + pdkSpec.defaultStack);
+
+            const auto stylesPath = packageRoot / "technology" / "layer-styles.json";
+            if (std::filesystem::is_regular_file(stylesPath)) {
+                const auto document = [&] {
+                    try {
+                        std::ifstream input(stylesPath);
+                        return nlohmann::json::parse(input);
+                    } catch (const std::exception &error) {
+                        throw ProjectError("package.manifest", "Unable to read layer styles '" + stylesPath.string() +
+                                                                   "': " + error.what());
+                    }
+                }();
+                if (document.value("schema_version", 0) != 1)
+                    throw ProjectError("package.manifest", "Layer styles must use schema_version 1");
+                if (const auto styles = document.find("layers"); styles != document.end()) {
+                    if (!styles->is_array())
+                        throw ProjectError("package.manifest", "Layer styles 'layers' must be an array");
+                    for (const auto &item : *styles) {
+                        if (!item.is_object())
+                            throw ProjectError("package.manifest", "Layer style entry must be an object");
+                        PackageLayerStyle style;
+                        style.name = item.value("name", std::string{});
+                        style.color = item.value("color", std::string{});
+                        style.pattern = item.value("pattern", std::string{});
+                        style.visible = item.contains("visible") ? (item.value("visible", true) ? 1 : 0) : -1;
+                        if (style.name.empty())
+                            throw ProjectError("package.manifest", "Layer styles require a layer name");
+                        pdkSpec.layerStyles.push_back(std::move(style));
+                    }
+                }
+            }
+            if (const auto *simulation = (*pdk)["simulation"].as_table()) {
+                PackagePdkSimulation sim;
+                sim.engine = readString(*simulation, "engine", "ngspice");
+                sim.root = readRelativePath(*simulation, "root", "pdk.simulation.root");
+                sim.modelFile = readRelativePath(*simulation, "model_file", "pdk.simulation.model_file");
+                sim.section = readString(*simulation, "section");
+                for (const auto &include : readStringArray(*simulation, "includes")) {
+                    const std::filesystem::path path(include);
+                    if (path.is_absolute() || include.find("..") != std::string::npos)
+                        throw ProjectError("package.manifest",
+                                           "pdk.simulation.includes must stay inside the model root: " + include);
+                    sim.includes.push_back(path.lexically_normal());
+                }
+                sim.options = readStringArray(*simulation, "options");
+                sim.requiresOsdi = (*simulation)["requires_osdi"].value_or(false);
+                sim.verilogA = readRelativePath(*simulation, "verilog_a", "pdk.simulation.verilog_a");
+                sim.spiceinit = readRelativePath(*simulation, "spiceinit", "pdk.simulation.spiceinit");
+                sim.compilerFlags = readStringArray(*simulation, "compiler_flags");
+                if (const auto *devices = (*simulation)["devices"].as_table()) {
+                    for (const auto &[key, value] : *devices) {
+                        if (auto text = value.value<std::string>())
+                            sim.devices.emplace(std::string(key), *text);
+                    }
+                }
+                if (const auto *probe = (*simulation)["probe"].as_table()) {
+                    sim.probe.declared = true;
+                    sim.probe.width = readString(*probe, "w", sim.probe.width);
+                    sim.probe.length = readString(*probe, "l", sim.probe.length);
+                    sim.probe.vdd = (*probe)["vdd"].value_or(sim.probe.vdd);
+                    sim.probe.vd = (*probe)["vd"].value_or(sim.probe.vd);
+                }
+                if (const auto *sources = (*simulation)["osdi"].as_array()) {
+                    for (const auto &item : *sources) {
+                        const auto *source = item.as_table();
+                        if (!source)
+                            throw ProjectError("package.manifest", "pdk.simulation.osdi entries must be tables");
+                        PackagePdkOsdiSource osdi;
+                        osdi.source = readRelativePath(*source, "source", "pdk.simulation.osdi.source");
+                        osdi.output = readString(*source, "output");
+                        if (osdi.source.empty() || osdi.output.empty())
+                            throw ProjectError("package.manifest", "pdk.simulation.osdi requires source and output");
+                        sim.osdiSources.push_back(std::move(osdi));
+                    }
+                }
+                if (sim.root.empty() || sim.modelFile.empty())
+                    throw ProjectError("package.manifest", "pdk.simulation requires root and model_file");
+                pdkSpec.simulation = std::move(sim);
+            }
+            spec.pdk = std::move(pdkSpec);
+        }
+        return spec;
+    } catch (const ProjectError &) {
+        throw;
+    } catch (const std::exception &error) {
+        throw ProjectError("package.manifest", error.what());
+    }
+}
+
+void PackageManager::installGit(const std::filesystem::path &repository, const std::string &name,
+                                const std::string &version, const std::string &url, const std::string &revision) {
+    if (name.empty() || version.empty() || url.empty())
+        throw ProjectError("package.install", "Package name, version, and URL are required");
+    if (name.find_first_of("/\\") != std::string::npos || name == "." || name == "..")
+        throw ProjectError("package.install", "Package name must not contain path separators");
+    std::filesystem::create_directories(repository);
+    const auto destination = repository / name;
+    if (std::filesystem::exists(destination))
+        throw ProjectError("package.install", "Destination already exists: " + destination.string());
+    ProcessOptions clone;
+    clone.arguments = {"git", "clone", "--depth", "1"};
+    if (!revision.empty()) {
+        clone.arguments.push_back("--branch");
+        clone.arguments.push_back(revision);
+    }
+    clone.arguments.push_back("--");
+    clone.arguments.push_back(url);
+    clone.arguments.push_back(destination.string());
+    clone.environment["GIT_TERMINAL_PROMPT"] = "0";
+    const auto cloneResult = runProcess(clone);
+    if (!cloneResult.succeeded())
+        throw ProjectError("package.install", "Git clone failed for: " + url);
+    // Preserve upstream manifests; only generate one when the clone has none.
+    if (std::filesystem::exists(destination / "package.toml"))
+        return;
+    std::ofstream manifest(destination / "package.toml");
+    if (!manifest)
+        throw ProjectError("package.install", "Unable to write generated package manifest");
+    manifest << "[package]\n"
+             << "schema_version = 1\n"
+             << "name = \"" << name << "\"\n"
+             << "version = \"" << version << "\"\n"
+             << "description = \"Imported external package\"\n"
+             << "license = \"See upstream repository\"\n\n"
+             << "[source]\n"
+             << "type = \"git\"\n"
+             << "url = \"" << url << "\"\n";
+    if (!revision.empty())
+        manifest << "revision = \"" << revision << "\"\n";
+    manifest << "\n[provides]\n"
+             << "pdk = true\n"
+             << "models = true\n"
+             << "symbols = true\n"
+             << "layout = true\n\n"
+             << "[trust]\n"
+             << "trusted = false\n";
+}
+
+PackageSpec PackageManager::installGitPackage(const std::filesystem::path &repository, const std::string &url,
+                                              const std::string &revision) {
+    if (url.empty())
+        throw ProjectError("package.install", "Package repository URL is required");
+    std::filesystem::create_directories(repository);
+    const auto temporary = temporaryInstallPath(repository);
+    ProcessOptions clone;
+    clone.arguments = {"git", "clone", "--depth", "1"};
+    if (!revision.empty()) {
+        clone.arguments.push_back("--branch");
+        clone.arguments.push_back(revision);
+    }
+    clone.arguments.push_back("--");
+    clone.arguments.push_back(url);
+    clone.arguments.push_back(temporary.string());
+    clone.environment["GIT_TERMINAL_PROMPT"] = "0";
+    const auto cloneResult = runProcess(clone);
+    if (!cloneResult.succeeded()) {
+        removeQuietly(temporary);
+        throw ProjectError("package.install", "Git clone failed for: " + url);
+    }
+
+    PackageSpec spec;
+    try {
+        spec = readManifest(temporary);
+    } catch (const std::exception &error) {
+        removeQuietly(temporary);
+        throw ProjectError("package.install",
+                           std::string("Package repository does not contain a valid package.toml: ") + error.what());
+    }
+    if (spec.name.find_first_of("/\\") != std::string::npos || spec.name == "." || spec.name == "..") {
+        removeQuietly(temporary);
+        throw ProjectError("package.install", "Package name must not contain path separators");
+    }
+    if (spec.version.empty()) {
+        removeQuietly(temporary);
+        throw ProjectError("package.install", "Package manifest is missing a version");
+    }
+    const auto destination = repository / spec.name;
+    if (std::filesystem::exists(destination)) {
+        removeQuietly(temporary);
+        throw ProjectError("package.install", "Destination already exists: " + destination.string());
+    }
+    std::error_code error;
+    std::filesystem::rename(temporary, destination, error);
+    if (error) {
+        std::filesystem::copy(temporary, destination,
+                              std::filesystem::copy_options::recursive | std::filesystem::copy_options::copy_symlinks,
+                              error);
+        if (error) {
+            removeQuietly(temporary);
+            removeQuietly(destination);
+            throw ProjectError("package.install", "Unable to move installed package: " + error.message());
+        }
+        removeQuietly(temporary);
+    }
+    return readManifest(destination);
+}
+
+void PackageManager::uninstallPackage(const std::filesystem::path &repository, const std::string &name) {
+    if (name.empty() || name.find_first_of("/\\") != std::string::npos || name == "." || name == "..")
+        throw ProjectError("package.uninstall", "Invalid package name");
+    const auto root = repository / name;
+    std::error_code error;
+    if (!std::filesystem::is_directory(root, error) || error)
+        throw ProjectError("package.uninstall", "Package is not installed: " + name);
+    if (std::filesystem::is_regular_file(root / "package.toml", error) && !error) {
+        const auto spec = readManifest(root);
+        if (spec.name != name)
+            throw ProjectError("package.uninstall", "Package manifest name does not match the install directory");
+    }
+    std::filesystem::remove_all(root, error);
+    if (error)
+        throw ProjectError("package.uninstall", "Unable to remove package: " + error.message());
+}
+
+std::filesystem::path PackageManager::packageLogo(const std::filesystem::path &packageRoot) {
+    auto logo = packageRoot / ".github" / "logo.png";
+    std::error_code error;
+    if (std::filesystem::is_regular_file(logo, error) && !error)
+        return logo;
+    return {};
+}
+
+std::vector<PackageIndexEntry> PackageManager::scanPackageIndex(const std::filesystem::path &indexRoot) {
+    std::vector<PackageIndexEntry> result;
+    std::error_code error;
+    if (!std::filesystem::is_directory(indexRoot, error) || error)
+        return result;
+
+    const auto submodules = readGitmodules(indexRoot);
+    std::vector<std::filesystem::path> packageRoots;
+    if (std::filesystem::is_regular_file(indexRoot / "package.toml", error) && !error)
+        packageRoots.push_back(indexRoot);
+
+    for (std::filesystem::recursive_directory_iterator
+             iterator(indexRoot, std::filesystem::directory_options::skip_permission_denied, error),
+         end;
+         iterator != end; iterator.increment(error)) {
+        if (error) {
+            error.clear();
+            continue;
+        }
+        if (!iterator->is_directory(error)) {
+            error.clear();
+            continue;
+        }
+        const auto name = iterator->path().filename().string();
+        if (name.empty() || name.front() == '.' || name == "build" || name == "node_modules") {
+            iterator.disable_recursion_pending();
+            continue;
+        }
+        if (std::filesystem::is_regular_file(iterator->path() / "package.toml", error) && !error) {
+            packageRoots.push_back(iterator->path());
+            iterator.disable_recursion_pending();
+            continue;
+        }
+        error.clear();
+        if (iterator.depth() >= 4)
+            iterator.disable_recursion_pending();
+    }
+
+    std::sort(packageRoots.begin(), packageRoots.end());
+    std::map<std::string, PackageIndexEntry> selected;
+    for (const auto &root : packageRoots) {
+        try {
+            PackageIndexEntry entry;
+            entry.spec = readManifest(root);
+            entry.root = root;
+            entry.logo = packageLogo(root);
+            const auto relative = relativeGeneric(root, indexRoot);
+            if (const auto *submodule = findSubmodule(submodules, relative)) {
+                entry.repositoryUrl = submodule->url;
+                entry.repositoryRevision = submodule->revision;
+            }
+            if (const auto existing = selected.find(entry.spec.name); existing != selected.end()) {
+                if (compareVersions(entry.spec.version, existing->second.spec.version) <= 0)
+                    continue;
+            }
+            selected[entry.spec.name] = std::move(entry);
+        } catch (const ProjectError &) {
+            // Ignore malformed or unrelated directories in the index.
+        }
+    }
+    for (auto &[_, entry] : selected)
+        result.push_back(std::move(entry));
+    return result;
+}
+
+void PackageManager::cloneIndex(const std::filesystem::path &indexRoot, const std::string &url,
+                                const std::string &revision) {
+    if (url.empty())
+        throw ProjectError("package.index", "Package index URL is required");
+    std::error_code error;
+    if (std::filesystem::exists(indexRoot, error) && !error) {
+        const bool empty = std::filesystem::is_empty(indexRoot, error);
+        if (error || !empty)
+            throw ProjectError("package.index", "Package index destination already exists: " + indexRoot.string());
+    } else if (error) {
+        throw ProjectError("package.index", error.message());
+    }
+    if (!indexRoot.parent_path().empty())
+        std::filesystem::create_directories(indexRoot.parent_path());
+    ProcessOptions clone;
+    clone.arguments = {"git", "clone", "--depth", "1", "--recurse-submodules", "--shallow-submodules"};
+    if (!revision.empty()) {
+        clone.arguments.push_back("--branch");
+        clone.arguments.push_back(revision);
+    }
+    clone.arguments.push_back("--");
+    clone.arguments.push_back(url);
+    clone.arguments.push_back(indexRoot.string());
+    clone.environment["GIT_TERMINAL_PROMPT"] = "0";
+    const auto cloneResult = runProcess(clone);
+    if (!cloneResult.succeeded()) {
+        removeQuietly(indexRoot);
+        throw ProjectError("package.index", "Unable to clone package index: " + url);
+    }
+}
+
+void PackageManager::updateIndex(const std::filesystem::path &indexRoot) {
+    std::error_code error;
+    if (!std::filesystem::is_directory(indexRoot, error) || error)
+        throw ProjectError("package.index", "Package index not found: " + indexRoot.string());
+    if (!std::filesystem::exists(indexRoot / ".git", error) || error)
+        return;
+    // Best-effort fast-forward. A local checkout may intentionally have no
+    // upstream, local commits, or offline remotes; submodule initialization and
+    // scanning still work in those cases.
+    ProcessOptions pull;
+    pull.arguments = {"git", "pull", "--ff-only", "--quiet"};
+    pull.workingDirectory = indexRoot;
+    pull.environment["GIT_TERMINAL_PROMPT"] = "0";
+    (void)runProcess(pull);
+    ProcessOptions submodules;
+    submodules.arguments = {"git", "submodule", "update", "--init", "--recursive"};
+    submodules.workingDirectory = indexRoot;
+    submodules.environment["GIT_TERMINAL_PROMPT"] = "0";
+    const auto submoduleResult = runProcess(submodules);
+    if (!submoduleResult.succeeded())
+        throw ProjectError("package.index", "Unable to update package index submodules");
+}
+
+std::string PackageManager::contentHash(const std::filesystem::path &packageRoot) {
+    using DigestContext = std::unique_ptr<EVP_MD_CTX, decltype(&EVP_MD_CTX_free)>;
+    DigestContext context(EVP_MD_CTX_new(), &EVP_MD_CTX_free);
+    if (!context || EVP_DigestInit_ex(context.get(), EVP_sha256(), nullptr) != 1)
+        throw ProjectError("package.index", "Unable to initialize the package content hash");
+    std::vector<std::filesystem::path> files;
+    for (const auto &entry : std::filesystem::recursive_directory_iterator(packageRoot)) {
+        if (!entry.is_regular_file())
+            continue;
+        const auto relative = std::filesystem::relative(entry.path(), packageRoot).generic_string();
+        // Ignore VCS metadata so clones and exports hash identically.
+        if (relative == ".git" || relative.starts_with(".git/"))
+            continue;
+        files.push_back(entry.path());
+    }
+    std::sort(files.begin(), files.end());
+    std::array<unsigned char, 8192> buffer{};
+    for (const auto &file : files) {
+        auto relative = std::filesystem::relative(file, packageRoot).generic_string();
+        EVP_DigestUpdate(context.get(), relative.data(), relative.size());
+        std::ifstream input(file, std::ios::binary);
+        while (input) {
+            input.read(reinterpret_cast<char *>(buffer.data()), buffer.size());
+            auto count = input.gcount();
+            if (count > 0)
+                EVP_DigestUpdate(context.get(), buffer.data(), static_cast<std::size_t>(count));
+        }
+    }
+    std::array<unsigned char, EVP_MAX_MD_SIZE> digest{};
+    unsigned int digestLength = 0;
+    if (EVP_DigestFinal_ex(context.get(), digest.data(), &digestLength) != 1)
+        throw ProjectError("package.index", "Unable to finalize the package content hash");
+    std::ostringstream result;
+    result << "sha256:";
+    for (unsigned int index = 0; index < digestLength; ++index)
+        result << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(digest[index]);
+    return result.str();
+}
+
+Lockfile PackageManager::resolve(const std::vector<std::filesystem::path> &repositories,
+                                 const std::map<std::string, std::string> &requested, std::string openvlsiVersion) {
+    Lockfile lock;
+    lock.openvlsiVersion = std::move(openvlsiVersion);
+    std::map<std::string, std::string> pending = requested;
+    std::map<std::string, std::string> resolved;
+    while (!pending.empty()) {
+        auto [name, constraint] = *pending.begin();
+        pending.erase(pending.begin());
+        if (const auto existing = resolved.find(name); existing != resolved.end()) {
+            if (!satisfies(existing->second, constraint)) {
+                std::ostringstream message;
+                message << "Conflicting constraints for package: " << name << " (" << existing->second
+                        << " does not satisfy " << constraint << ")";
+                throw ProjectError("package.resolve", message.str());
+            }
+            continue;
+        }
+        auto root = findPackage(repositories, name, constraint);
+        auto spec = readManifest(root);
+        if (!satisfies(spec.version, constraint))
+            throw ProjectError("package.resolve", "Resolved version does not satisfy constraint: " + name);
+        resolved[name] = spec.version;
+        lock.packages.push_back({spec.name, spec.version, root.generic_string(), contentHash(root), spec.trusted,
+                                 spec.capabilities, spec.pdk ? spec.pdk->id : std::string{}});
+        for (const auto &dependency : spec.dependencies)
+            pending.emplace(dependency.first, dependency.second);
+    }
+    std::sort(lock.packages.begin(), lock.packages.end(),
+              [](const auto &left, const auto &right) { return left.name < right.name; });
+    return lock;
+}
+
+std::string serializeLockfile(const Lockfile &lockfile) {
+    const auto escape = [](const std::string &text) {
+        std::string result;
+        result.reserve(text.size());
+        for (char c : text) {
+            if (c == '"' || c == '\\')
+                result.push_back('\\');
+            result.push_back(c);
+        }
+        return result;
+    };
+    std::ostringstream output;
+    output << "schema_version = " << lockfile.schemaVersion << "\nopenvlsi_version = \""
+           << escape(lockfile.openvlsiVersion) << "\"\n\n";
+    for (const auto &package : lockfile.packages) {
+        output << "[[package]]\nname = \"" << escape(package.name) << "\"\nversion = \"" << escape(package.version)
+               << "\"\nsource = \"" << escape(package.source) << "\"\ncontent_hash = \"" << escape(package.contentHash)
+               << "\"\ntrusted = " << (package.trusted ? "true" : "false") << "\n";
+        if (!package.pdkId.empty())
+            output << "pdk_id = \"" << escape(package.pdkId) << "\"\n";
+        for (const auto &[capability, enabled] : package.capabilities)
+            output << "provides." << capability << " = " << (enabled ? "true" : "false") << "\n";
+        output << "\n";
+    }
+    return output.str();
+}
+
+void PackageManager::writeLockfile(const std::filesystem::path &path, const Lockfile &lockfile) {
+    std::ofstream output(path);
+    if (!output)
+        throw ProjectError("package.lockfile", "Unable to open lockfile for writing");
+    output << serializeLockfile(lockfile);
+}
+
+Lockfile PackageManager::readLockfile(const std::filesystem::path &path) {
+    try {
+        auto table = toml::parse_file(path.string());
+        Lockfile lock;
+        lock.schemaVersion = static_cast<int>(table["schema_version"].value_or(1LL));
+        lock.openvlsiVersion = table["openvlsi_version"].value_or(std::string{});
+        if (const auto *packages = table["package"].as_array())
+            for (const auto &item : *packages) {
+                const auto *package = item.as_table();
+                if (!package)
+                    continue;
+                std::map<std::string, bool> capabilities;
+                if (const auto *provides = (*package)["provides"].as_table()) {
+                    for (const auto &[key, value] : *provides) {
+                        if (auto enabled = value.value<bool>())
+                            capabilities.emplace(std::string(key), *enabled);
+                    }
+                }
+                lock.packages.push_back({readString(*package, "name"), readString(*package, "version"),
+                                         readString(*package, "source"), readString(*package, "content_hash"),
+                                         (*package)["trusted"].value_or(false), std::move(capabilities),
+                                         readString(*package, "pdk_id")});
+            }
+        return lock;
+    } catch (const std::exception &error) {
+        throw ProjectError("package.lockfile", error.what());
+    }
+}
+
+void PackageManager::verifyLockfile(const Lockfile &lockfile, const std::vector<std::filesystem::path> &repositories) {
+    for (const auto &locked : lockfile.packages) {
+        auto root = findPackage(repositories, locked.name, locked.version);
+        if (contentHash(root) != locked.contentHash)
+            throw ProjectError("package.integrity", "Content hash mismatch for package: " + locked.name);
+    }
+}
+
+std::vector<std::string> PackageManager::capabilities(const PackageSpec &package) {
+    std::vector<std::string> result;
+    for (const auto &[name, enabled] : package.capabilities)
+        if (enabled)
+            result.push_back(name);
+    return result;
+}
+
+std::vector<ProvenanceDiagnostic> PackageManager::provenance(const Lockfile &lockfile,
+                                                             const std::vector<std::filesystem::path> &repositories) {
+    std::vector<ProvenanceDiagnostic> result;
+    for (const auto &package : lockfile.packages) {
+        try {
+            auto root = findPackage(repositories, package.name, package.version);
+            if (contentHash(root) != package.contentHash)
+                result.push_back(
+                    {"package.integrity", "Package content hash does not match the lockfile", package.name});
+            auto manifest = readManifest(root);
+            if (manifest.trusted != package.trusted)
+                result.push_back({"package.trust", "Package trust metadata changed since resolution", package.name});
+        } catch (const ProjectError &error) {
+            result.push_back({error.code(), error.what(), package.name});
+        }
+    }
+    return result;
+}
+std::string resolvePdkStack(const PackagePdk &pdk, const std::string &requested) {
+    const auto id = requested.empty() ? pdk.defaultStack : requested;
+    if (id.empty())
+        return {};
+    const auto stack =
+        std::find_if(pdk.stacks.begin(), pdk.stacks.end(), [&](const auto &entry) { return entry.id == id; });
+    if (stack == pdk.stacks.end())
+        throw ProjectError("layout.stack", "Unknown stack '" + id + "' for PDK '" + pdk.id + "'");
+    return id;
+}
+
+bool packageMatchesPdk(const PackageSpec &package, const std::string &pdkId) {
+    const auto normalize = [](std::string value) {
+        for (auto &character : value)
+            character = static_cast<char>(std::tolower(static_cast<unsigned char>(character)));
+        std::replace(value.begin(), value.end(), '.', '-');
+        std::replace(value.begin(), value.end(), '_', '-');
+        return value;
+    };
+    const auto wanted = normalize(pdkId);
+    if (normalize(package.name) == wanted)
+        return true;
+    if (!package.pdk)
+        return false;
+    if (normalize(package.pdk->id) == wanted)
+        return true;
+    for (const auto &alias : package.pdk->aliases)
+        if (normalize(alias) == wanted)
+            return true;
+    return false;
+}
+
+} // namespace openvlsi

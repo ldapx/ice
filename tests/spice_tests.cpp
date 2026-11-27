@@ -1,6 +1,6 @@
-#include "icelib/agent_api.hpp"
-#include "icelib/operations.hpp"
-#include "icelib/spice.hpp"
+#include "openvlsilib/agent_api.hpp"
+#include "openvlsilib/operations.hpp"
+#include "openvlsilib/spice.hpp"
 
 #include <doctest/doctest.h>
 
@@ -27,7 +27,7 @@ F1 OUT 0 V1 0.5
 Xstage IN MID dmod W=2u L=0.18u
 .ends filter
 )";
-    const auto document = ice::parseSpiceDocument(source);
+    const auto document = openvlsi::parseSpiceDocument(source);
     CHECK(document.title == "rc filter");
     CHECK(document.includes.size() == 1);
     CHECK(document.libraries.size() == 1);
@@ -35,7 +35,7 @@ Xstage IN MID dmod W=2u L=0.18u
     CHECK(document.models.size() == 1);
     REQUIRE(document.subcircuits.size() == 1);
 
-    const auto *filter = ice::findSpiceSubcircuit(document, "FILTER");
+    const auto *filter = openvlsi::findSpiceSubcircuit(document, "FILTER");
     REQUIRE(filter != nullptr);
     CHECK((filter->ports == std::vector<std::string>{"IN", "OUT"}));
     REQUIRE(filter->parameters.size() == 2);
@@ -68,7 +68,7 @@ R1 A B 1k
 R1 data[0] out[0] 1k
 .ends data_block
 )";
-    const auto interface = ice::spiceInterfaceForText(source, "data_block");
+    const auto interface = openvlsi::spiceInterfaceForText(source, "data_block");
     REQUIRE(interface.ok);
     CHECK(interface.subcircuitName == "data_block");
     REQUIRE(interface.ports.size() == 10);
@@ -79,7 +79,7 @@ R1 data[0] out[0] 1k
     REQUIRE(interface.parameters.size() == 1);
     CHECK(interface.parameters[0].name == "WIDTH");
 
-    const auto ambiguous = ice::spiceInterfaceForText(source, "missing");
+    const auto ambiguous = openvlsi::spiceInterfaceForText(source, "missing");
     CHECK(!ambiguous.ok);
     CHECK(ambiguous.error.find("several subcircuits") != std::string::npos);
 }
@@ -95,7 +95,7 @@ R1 IN OUT {A}
 .ends block
 .end
 )";
-    const auto lines = ice::spiceSourceLinesForHierarchy(source);
+    const auto lines = openvlsi::spiceSourceLinesForHierarchy(source);
     CHECK(std::find(lines.begin(), lines.end(), ".subckt block IN OUT") != lines.end());
     CHECK(std::find(lines.begin(), lines.end(), "R1 IN OUT {A}") != lines.end());
     CHECK(std::find(lines.begin(), lines.end(), ".param A=1") != lines.end());
@@ -105,11 +105,11 @@ R1 IN OUT {A}
 }
 
 TEST_CASE("Text SPICE import retains subcircuit parameter defaults") {
-    ice::Project project;
+    openvlsi::Project project;
     project.identity = "spice-import";
     project.name = "spice-import";
-    const auto imported = ice::createSchematicFromSpice(
-        project, "filter", ice::genericPdkId,
+    const auto imported = openvlsi::createSchematicFromSpice(
+        project, "filter", openvlsi::genericPdkId,
         ".subckt filter IN OUT params: R=1k C=1n\nR1 IN OUT {R}\nC1 OUT 0 {C}\n.ends filter\n", false);
     REQUIRE(imported.cell != 0);
     const auto &cell = project.schematicCells.at(imported.cell);
@@ -120,16 +120,16 @@ TEST_CASE("Text SPICE import retains subcircuit parameter defaults") {
 }
 
 TEST_CASE("Text SPICE subcircuits become hierarchical blocks with parameter overrides") {
-    ice::Project project;
+    openvlsi::Project project;
     project.identity = "spice-hierarchy";
     project.name = "spice-hierarchy";
-    const auto filter = ice::createTextSchematicCell(
-        project, "filter", ice::genericPdkId,
+    const auto filter = openvlsi::createTextSchematicCell(
+        project, "filter", openvlsi::genericPdkId,
         ".subckt filter IN OUT params: R=1k C=1n\nR1 IN MID {R}\nC1 MID OUT {C}\n.ends filter\n");
-    const auto parent = ice::createSchematicCell(project, "top");
+    const auto parent = openvlsi::createSchematicCell(project, "top");
 
-    ice::ObjectId symbol = 0;
-    const auto block = ice::addTextSpiceInstance(project, parent, filter, "X1", 0, 0, &symbol);
+    openvlsi::ObjectId symbol = 0;
+    const auto block = openvlsi::addTextSpiceInstance(project, parent, filter, "X1", 0, 0, &symbol);
     CHECK(symbol != 0);
     const auto &cell = project.schematicCells.at(parent);
     CHECK(cell.symbols.at(symbol).sourceCell == filter);
@@ -140,23 +140,23 @@ TEST_CASE("Text SPICE subcircuits become hierarchical blocks with parameter over
     CHECK(cell.symbols.at(symbol).artwork.find("<svg") != std::string::npos);
     CHECK(cell.symbols.at(symbol).artwork.find("filter") != std::string::npos);
     project.schematicCells.at(parent).symbols.at(symbol).artwork.clear();
-    CHECK(ice::repairHierarchicalSymbolArtwork(project) >= 1);
+    CHECK(openvlsi::repairHierarchicalSymbolArtwork(project) >= 1);
     CHECK(!project.schematicCells.at(parent).symbols.at(symbol).artwork.empty());
     CHECK(project.schematicCells.at(filter).parameters.size() == 2);
-    ice::setSchematicParameter(project, parent, block, "R", "2k");
+    openvlsi::setSchematicParameter(project, parent, block, "R", "2k");
 
     const auto source =
-        ice::addSchematicComponent(project, parent, {"voltage source", {}, "V1", 0, 0, {{0, "value", "1"}}});
+        openvlsi::addSchematicComponent(project, parent, {"voltage source", {}, "V1", 0, 0, {{0, "value", "1"}}});
     const auto resistor =
-        ice::addSchematicComponent(project, parent, {"resistor", {}, "R1", 0, 0, {{0, "resistance", "10k"}}});
+        openvlsi::addSchematicComponent(project, parent, {"resistor", {}, "R1", 0, 0, {{0, "resistance", "10k"}}});
     const auto pin = [&](const std::string &name) {
-        return ice::resolveSchematicPin(project.schematicCells.at(parent), name);
+        return openvlsi::resolveSchematicPin(project.schematicCells.at(parent), name);
     };
-    ice::addNet(project, parent, "in", {pin("X1.IN"), pin("V1.+")});
-    ice::addNet(project, parent, "out", {pin("X1.OUT"), pin("R1.1")});
-    ice::addNet(project, parent, "0", {pin("V1.-"), pin("R1.2")});
+    openvlsi::addNet(project, parent, "in", {pin("X1.IN"), pin("V1.+")});
+    openvlsi::addNet(project, parent, "out", {pin("X1.OUT"), pin("R1.1")});
+    openvlsi::addNet(project, parent, "0", {pin("V1.-"), pin("R1.2")});
 
-    const auto lines = ice::buildSchematicNetlist(project, parent);
+    const auto lines = openvlsi::buildSchematicNetlist(project, parent);
     const auto joined = [&] {
         std::string text;
         for (const auto &line : lines)
@@ -167,36 +167,36 @@ TEST_CASE("Text SPICE subcircuits become hierarchical blocks with parameter over
     CHECK(joined.find("X1 in out filter R=2k C=1n") != std::string::npos);
     CHECK(joined.find("R1 IN MID {R}") != std::string::npos);
 
-    const auto secondParent = ice::createSchematicCell(project, "top2");
-    const auto placed = ice::addSchematicComponent(project, secondParent, {"filter", {}, "X2", 0, 0, {}});
+    const auto secondParent = openvlsi::createSchematicCell(project, "top2");
+    const auto placed = openvlsi::addSchematicComponent(project, secondParent, {"filter", {}, "X2", 0, 0, {}});
     CHECK(placed.instance != 0);
     CHECK(placed.pins.size() == 2);
     CHECK(!project.schematicCells.at(secondParent).symbols.at(placed.symbol).artwork.empty());
 }
 
 TEST_CASE("Text SPICE bus ports expand into scalar block pins") {
-    ice::Project project;
+    openvlsi::Project project;
     project.identity = "spice-bus";
     project.name = "spice-bus";
-    const auto source = ice::createTextSchematicCell(
-        project, "bus_block", ice::genericPdkId,
+    const auto source = openvlsi::createTextSchematicCell(
+        project, "bus_block", openvlsi::genericPdkId,
         ".subckt bus_block data[1:0] out[1:0]\nR1 data[0] out[0] 1k\nR2 data[1] out[1] 1k\n.ends bus_block\n");
-    const auto parent = ice::createSchematicCell(project, "top");
-    ice::ObjectId symbol = 0;
-    ice::addTextSpiceInstance(project, parent, source, "X1", 0, 0, &symbol);
+    const auto parent = openvlsi::createSchematicCell(project, "top");
+    openvlsi::ObjectId symbol = 0;
+    openvlsi::addTextSpiceInstance(project, parent, source, "X1", 0, 0, &symbol);
     const auto &pins = project.schematicCells.at(parent).symbols.at(symbol).pins;
     REQUIRE(pins.size() == 4);
     CHECK(pins[0].name == "data[0]");
     CHECK(pins[1].name == "data[1]");
     CHECK(pins[2].name == "out[0]");
     CHECK(pins[3].name == "out[1]");
-    const auto lines = ice::buildSchematicNetlist(project, parent);
+    const auto lines = openvlsi::buildSchematicNetlist(project, parent);
     CHECK(std::find(lines.begin(), lines.end(), ".subckt bus_block data[0] data[1] out[0] out[1]") != lines.end());
     CHECK(std::find(lines.begin(), lines.end(), "X1 0 0 0 0 bus_block") != lines.end());
 }
 
 TEST_CASE("SPICE parser accepts behavioral controlled sources") {
-    const auto document = ice::parseSpiceDocument(
+    const auto document = openvlsi::parseSpiceDocument(
         ".subckt amp IN OUT\nE1 OUT 0 VALUE={V(IN)*2}\nG1 0 OUT TABLE {V(IN)}=(0,0) (1,1)\n.ends amp\n");
     CHECK(document.warnings.empty());
     REQUIRE(document.subcircuits.size() == 1);
@@ -207,23 +207,23 @@ TEST_CASE("SPICE parser accepts behavioral controlled sources") {
 }
 
 TEST_CASE("SPICE parser records global nets") {
-    const auto document = ice::parseSpiceDocument(".global VDD VSS\n.subckt block A\nR1 A VDD 1k\n.ends block\n");
+    const auto document = openvlsi::parseSpiceDocument(".global VDD VSS\n.subckt block A\nR1 A VDD 1k\n.ends block\n");
     REQUIRE(document.globals.size() == 2);
     CHECK(document.globals[0] == "VDD");
     CHECK(document.globals[1] == "VSS");
 }
 
 TEST_CASE("Editing text SPICE source reconciles parent symbol pins") {
-    ice::Project project;
+    openvlsi::Project project;
     project.identity = "spice-edit";
     project.name = "spice-edit";
-    const auto source = ice::createTextSchematicCell(project, "block", ice::genericPdkId,
+    const auto source = openvlsi::createTextSchematicCell(project, "block", openvlsi::genericPdkId,
                                                      ".subckt block A B\nR1 A B 1k\n.ends block\n");
-    const auto parent = ice::createSchematicCell(project, "top");
-    ice::ObjectId symbolId = 0;
-    ice::addTextSpiceInstance(project, parent, source, "X1", 0, 0, &symbolId);
+    const auto parent = openvlsi::createSchematicCell(project, "top");
+    openvlsi::ObjectId symbolId = 0;
+    openvlsi::addTextSpiceInstance(project, parent, source, "X1", 0, 0, &symbolId);
     const auto changed =
-        ice::setSchematicSourceText(project, source, false, ".subckt block C D\nR1 C D 2k\n.ends block\n");
+        openvlsi::setSchematicSourceText(project, source, false, ".subckt block C D\nR1 C D 2k\n.ends block\n");
     CHECK(changed.addedPins == 2);
     CHECK(changed.removedPins == 2);
     const auto &pins = project.schematicCells.at(parent).symbols.at(symbolId).pins;
@@ -233,34 +233,34 @@ TEST_CASE("Editing text SPICE source reconciles parent symbol pins") {
     const auto &symbol = project.schematicCells.at(parent).symbols.at(symbolId);
     CHECK(symbol.artwork.find(">C<") != std::string::npos);
     CHECK(symbol.artwork.find(">D<") != std::string::npos);
-    const auto netlist = ice::buildSchematicNetlist(project, parent);
+    const auto netlist = openvlsi::buildSchematicNetlist(project, parent);
     CHECK(std::find(netlist.begin(), netlist.end(), "X1 0 0 block") != netlist.end());
 }
 
 TEST_CASE("Editing text SPICE source rejects removing connected pins") {
-    ice::Project project;
+    openvlsi::Project project;
     project.identity = "spice-edit-connected";
     project.name = "spice-edit-connected";
-    const auto source = ice::createTextSchematicCell(project, "block", ice::genericPdkId,
+    const auto source = openvlsi::createTextSchematicCell(project, "block", openvlsi::genericPdkId,
                                                      ".subckt block A B\nR1 A B 1k\n.ends block\n");
-    const auto parent = ice::createSchematicCell(project, "top");
-    ice::ObjectId symbolId = 0;
-    ice::addTextSpiceInstance(project, parent, source, "X1", 0, 0, &symbolId);
+    const auto parent = openvlsi::createSchematicCell(project, "top");
+    openvlsi::ObjectId symbolId = 0;
+    openvlsi::addTextSpiceInstance(project, parent, source, "X1", 0, 0, &symbolId);
     auto &parentCell = project.schematicCells.at(parent);
-    const auto other = ice::addSymbol(project, parent, "resistor");
+    const auto other = openvlsi::addSymbol(project, parent, "resistor");
     const auto otherPin = project.nextId();
     parentCell.symbols.at(other).pins.push_back({otherPin, "A", 0, 0});
     const auto otherPinB = project.nextId();
     parentCell.symbols.at(other).pins.push_back({otherPinB, "B", 0, 0});
     const auto blockPin = parentCell.symbols.at(symbolId).pins.front().id;
     const auto netId = project.nextId();
-    parentCell.nets.emplace(netId, ice::Net{netId, "net", {blockPin, otherPin}});
-    CHECK_THROWS_AS(ice::setSchematicSourceText(project, source, false, ".subckt block C D\nR1 C D 2k\n.ends block\n"),
-                    ice::ProjectError);
+    parentCell.nets.emplace(netId, openvlsi::Net{netId, "net", {blockPin, otherPin}});
+    CHECK_THROWS_AS(openvlsi::setSchematicSourceText(project, source, false, ".subckt block C D\nR1 C D 2k\n.ends block\n"),
+                    openvlsi::ProjectError);
 }
 
 TEST_CASE("Text SPICE resolves includes and library sections") {
-    const auto root = std::filesystem::temp_directory_path() / "ice-spice-include-test";
+    const auto root = std::filesystem::temp_directory_path() / "openvlsi-spice-include-test";
     std::filesystem::remove_all(root);
     std::filesystem::create_directories(root / "models");
     std::ofstream(root / "models" / "devices.inc") << ".subckt inc_block A B\nR1 A B 2k\n.ends inc_block\n";
@@ -273,35 +273,35 @@ TEST_CASE("Text SPICE resolves includes and library sections") {
                                ".ends top\n";
     const auto sourcePath = root / "top.sp";
     std::vector<std::string> warnings;
-    const auto document = ice::parseSpiceDocumentResolved(source, sourcePath, &warnings);
+    const auto document = openvlsi::parseSpiceDocumentResolved(source, sourcePath, &warnings);
     CHECK(warnings.empty());
-    CHECK(ice::findSpiceSubcircuit(document, "inc_block") != nullptr);
-    CHECK(ice::findSpiceSubcircuit(document, "lib_block") != nullptr);
+    CHECK(openvlsi::findSpiceSubcircuit(document, "inc_block") != nullptr);
+    CHECK(openvlsi::findSpiceSubcircuit(document, "lib_block") != nullptr);
     CHECK(document.models.size() == 1);
-    CHECK(ice::findSpiceSubcircuit(document, "top") != nullptr);
+    CHECK(openvlsi::findSpiceSubcircuit(document, "top") != nullptr);
 
-    const auto interface = ice::spiceInterfaceForText(source, "top", sourcePath);
+    const auto interface = openvlsi::spiceInterfaceForText(source, "top", sourcePath);
     REQUIRE(interface.ok);
     CHECK((interface.ports == std::vector<std::string>{"IN", "OUT"}));
     CHECK(interface.warnings.empty());
 
-    const auto lines = ice::spiceSourceLinesForHierarchy(source, sourcePath);
+    const auto lines = openvlsi::spiceSourceLinesForHierarchy(source, sourcePath);
     const auto hasAbsoluteInclude = std::any_of(lines.begin(), lines.end(), [&](const std::string &line) {
         return line.find("devices.inc") != std::string::npos && line.find(root.string()) != std::string::npos;
     });
     CHECK(hasAbsoluteInclude);
 
-    const auto missing = ice::spiceInterfaceForText(".include \"missing.inc\"\n.subckt top A B\nR1 A B 1\n.ends top\n",
+    const auto missing = openvlsi::spiceInterfaceForText(".include \"missing.inc\"\n.subckt top A B\nR1 A B 1\n.ends top\n",
                                                     "top", sourcePath);
     CHECK(missing.ok);
     CHECK(!missing.warnings.empty());
     CHECK(missing.warnings.front().find("not found") != std::string::npos);
 
-    ice::Project project;
+    openvlsi::Project project;
     project.identity = "spice-includes";
     project.name = "spice-includes";
-    const auto cell = ice::createTextSchematicCell(project, "top", ice::genericPdkId, source, sourcePath.string());
-    const auto cellInterface = ice::spiceInterfaceForCell(project.schematicCells.at(cell));
+    const auto cell = openvlsi::createTextSchematicCell(project, "top", openvlsi::genericPdkId, source, sourcePath.string());
+    const auto cellInterface = openvlsi::spiceInterfaceForCell(project.schematicCells.at(cell));
     CHECK(cellInterface.ok);
     CHECK(cellInterface.subcircuitName == "top");
     const auto serialized = project.serialize();
@@ -310,13 +310,13 @@ TEST_CASE("Text SPICE resolves includes and library sections") {
 }
 
 TEST_CASE("SPICE element helpers expose LVS-facing types and values") {
-    ice::SpiceDocument document;
-    const auto parsed = ice::parseSpiceDocument("R1 IN OUT 2k\nM1 D G S B nch W=2u L=0.15u M=2\nX1 A B cell param=3\n");
+    openvlsi::SpiceDocument document;
+    const auto parsed = openvlsi::parseSpiceDocument("R1 IN OUT 2k\nM1 D G S B nch W=2u L=0.15u M=2\nX1 A B cell param=3\n");
     REQUIRE(parsed.elements.size() == 3);
-    CHECK(ice::spiceElementType(parsed.elements[0]) == "resistor");
-    CHECK(ice::spiceElementParameters(parsed.elements[0]).at("resistance") == "2k");
-    CHECK(ice::spiceElementType(parsed.elements[1]) == "nch");
-    CHECK(ice::spiceElementParameters(parsed.elements[1]).at("w") == "2u");
-    CHECK(ice::spiceElementType(parsed.elements[2]) == "cell");
-    CHECK(ice::spiceElementParameters(parsed.elements[2]).at("param") == "3");
+    CHECK(openvlsi::spiceElementType(parsed.elements[0]) == "resistor");
+    CHECK(openvlsi::spiceElementParameters(parsed.elements[0]).at("resistance") == "2k");
+    CHECK(openvlsi::spiceElementType(parsed.elements[1]) == "nch");
+    CHECK(openvlsi::spiceElementParameters(parsed.elements[1]).at("w") == "2u");
+    CHECK(openvlsi::spiceElementType(parsed.elements[2]) == "cell");
+    CHECK(openvlsi::spiceElementParameters(parsed.elements[2]).at("param") == "3");
 }

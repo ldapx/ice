@@ -1,7 +1,7 @@
 import os
 import sys
 
-project = "ICE"
+project = "OpenVLSI"
 author = "the Libre Design Automation Project"
 copyright = "2026, the Libre Design Automation Project"
 version = "0.1.0"
@@ -50,7 +50,7 @@ exclude_patterns = [
 html_theme = "furo"
 html_static_path = ["_static"]
 html_css_files = ["custom.css"]
-html_title = "ICE"
+html_title = "OpenVLSI"
 html_logo = "logo.png"
 html_favicon = "logo.png"
 html_theme_options = {
@@ -67,7 +67,7 @@ html_theme_options = {
     "sidebar_hide_name": False,
     "navigation_with_keys": True,
     "top_of_page_buttons": ["view", "edit"],
-    "source_repository": "https://github.com/ldapx/ice",
+    "source_repository": "https://github.com/openvlsi/openvlsi",
     "source_branch": "main",
     "source_directory": "docs/",
 }

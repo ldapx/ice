@@ -12,7 +12,7 @@ staging="${1:?usage: bundle-macos-runtime.sh <staging-dir>}"
 bindir="$staging/bin"
 [[ -d "$bindir" ]] || exit 0
 
-qt_bin="${ICE_QT_BIN:-}"
+qt_bin="${OPENVLSI_QT_BIN:-}"
 if [[ -z "$qt_bin" ]]; then
     if command -v qmake6 >/dev/null 2>&1; then
         qt_bin="$(qmake6 -query QT_INSTALL_BINS 2>/dev/null || true)"
@@ -21,20 +21,20 @@ if [[ -z "$qt_bin" ]]; then
     fi
 fi
 
-app="$staging/ICE.app"
-if [[ -x "$bindir/ice" ]]; then
+app="$staging/OpenVLSI.app"
+if [[ -x "$bindir/openvlsi" ]]; then
     mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources" "$app/Contents/Frameworks"
-    cp "$bindir/ice" "$app/Contents/MacOS/ice"
-    chmod +x "$app/Contents/MacOS/ice"
+    cp "$bindir/openvlsi" "$app/Contents/MacOS/openvlsi"
+    chmod +x "$app/Contents/MacOS/openvlsi"
 
-    if [[ -d "$staging/share/ice/symbols" ]]; then
-        cp -R "$staging/share/ice/symbols" "$app/Contents/Resources/symbols"
+    if [[ -d "$staging/share/openvlsi/symbols" ]]; then
+        cp -R "$staging/share/openvlsi/symbols" "$app/Contents/Resources/symbols"
     fi
-    if [[ -d "$staging/share/ice/assets" ]]; then
-        cp -R "$staging/share/ice/assets" "$app/Contents/Resources/assets"
+    if [[ -d "$staging/share/openvlsi/assets" ]]; then
+        cp -R "$staging/share/openvlsi/assets" "$app/Contents/Resources/assets"
     fi
-    if [[ -d "$staging/share/ice/python" ]]; then
-        cp -R "$staging/share/ice/python" "$app/Contents/Resources/python"
+    if [[ -d "$staging/share/openvlsi/python" ]]; then
+        cp -R "$staging/share/openvlsi/python" "$app/Contents/Resources/python"
     fi
 
     cat >"$app/Contents/Info.plist" <<'PLIST'
@@ -45,15 +45,15 @@ if [[ -x "$bindir/ice" ]]; then
   <key>CFBundleDevelopmentRegion</key>
   <string>en</string>
   <key>CFBundleExecutable</key>
-  <string>ice</string>
+  <string>openvlsi</string>
   <key>CFBundleIdentifier</key>
-  <string>org.ice-eda.ice</string>
+  <string>org.openvlsi-eda.openvlsi</string>
   <key>CFBundleInfoDictionaryVersion</key>
   <string>6.0</string>
   <key>CFBundleName</key>
-  <string>ICE</string>
+  <string>OpenVLSI</string>
   <key>CFBundleDisplayName</key>
-  <string>ICE</string>
+  <string>OpenVLSI</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
@@ -71,7 +71,7 @@ PLIST
     fi
 
     if command -v dylibbundler >/dev/null 2>&1; then
-        dylibbundler -of -b -x "$app/Contents/MacOS/ice" -d "$app/Contents/Frameworks" \
+        dylibbundler -of -b -x "$app/Contents/MacOS/openvlsi" -d "$app/Contents/Frameworks" \
             -p @executable_path/../Frameworks || true
     fi
 fi

@@ -1,19 +1,19 @@
-#include "icelib/core.hpp"
-#include "icelib/geometry.hpp"
-#include "icelib/implementation.hpp"
-#include "icelib/interchange.hpp"
-#include "icelib/layout_library.hpp"
-#include "icelib/measure.hpp"
-#include "icelib/operations.hpp"
-#include "icelib/packages.hpp"
-#include "icelib/pdk.hpp"
-#include "icelib/plugins.hpp"
-#include "icelib/procedural_layout.hpp"
-#include "icelib/simulation.hpp"
-#include "icelib/simulation_report.hpp"
-#include "icelib/simulation_store.hpp"
-#include "icelib/symbols.hpp"
-#include "icelib/verification.hpp"
+#include "openvlsilib/core.hpp"
+#include "openvlsilib/geometry.hpp"
+#include "openvlsilib/implementation.hpp"
+#include "openvlsilib/interchange.hpp"
+#include "openvlsilib/layout_library.hpp"
+#include "openvlsilib/measure.hpp"
+#include "openvlsilib/operations.hpp"
+#include "openvlsilib/packages.hpp"
+#include "openvlsilib/pdk.hpp"
+#include "openvlsilib/plugins.hpp"
+#include "openvlsilib/procedural_layout.hpp"
+#include "openvlsilib/simulation.hpp"
+#include "openvlsilib/simulation_report.hpp"
+#include "openvlsilib/simulation_store.hpp"
+#include "openvlsilib/symbols.hpp"
+#include "openvlsilib/verification.hpp"
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <algorithm>
 #include <chrono>
@@ -27,7 +27,7 @@
 #include <thread>
 
 namespace {
-long double polygonArea(const ice::Polygon &polygon) {
+long double polygonArea(const openvlsi::Polygon &polygon) {
     long double area = 0.0L;
     for (std::size_t index = 0; index < polygon.size(); ++index) {
         const auto &current = polygon[index];
@@ -39,19 +39,19 @@ long double polygonArea(const ice::Polygon &polygon) {
 } // namespace
 
 TEST_CASE("layout layers preserve GDS datatypes") {
-    ice::Project project;
+    openvlsi::Project project;
     project.identity = "layer-datatype";
     project.name = "layer-datatype";
-    const auto layer = ice::addLayer(project, "Metal1.pin", 8, 0, {}, 2, {}, 140);
+    const auto layer = openvlsi::addLayer(project, "Metal1.pin", 8, 0, {}, 2, {}, 140);
     project.layers.at(layer).color = "#123456";
     project.layers.at(layer).pattern = 3;
     CHECK(project.layers.at(layer).number == 8);
     CHECK(project.layers.at(layer).datatype == 2);
     CHECK(project.layers.at(layer).minimumWidth == 140);
-    CHECK_THROWS_AS(ice::addLayer(project, "bad", 1, 0, {}, 70000), ice::ProjectError);
-    CHECK_THROWS_AS(ice::addLayer(project, "bad-width", 1, 0, {}, 0, {}, -1), ice::ProjectError);
+    CHECK_THROWS_AS(openvlsi::addLayer(project, "bad", 1, 0, {}, 70000), openvlsi::ProjectError);
+    CHECK_THROWS_AS(openvlsi::addLayer(project, "bad-width", 1, 0, {}, 0, {}, -1), openvlsi::ProjectError);
 
-    const auto roundTrip = ice::Project::deserialize(project.serialize());
+    const auto roundTrip = openvlsi::Project::deserialize(project.serialize());
     CHECK(roundTrip.layers.at(layer).number == 8);
     CHECK(roundTrip.layers.at(layer).datatype == 2);
     CHECK(roundTrip.layers.at(layer).name == "Metal1.pin");
@@ -71,23 +71,24 @@ TEST_CASE("layout layers preserve GDS datatypes") {
     if (lineBegin == std::string::npos || lineEnd == std::string::npos)
         return;
     missingDatatype.erase(lineBegin, lineEnd - lineBegin + 1);
-    CHECK_THROWS_AS(ice::Project::deserialize(missingDatatype), ice::ProjectError);
+    CHECK_THROWS_AS(openvlsi::Project::deserialize(missingDatatype), openvlsi::ProjectError);
 }
 
 TEST_CASE("layout cells preserve PDK stack selections") {
-    ice::Project project;
+    openvlsi::Project project;
     project.identity = "layout-stack";
     project.name = "layout-stack";
-    const auto layer = ice::addLayer(project, "Metal1", 34, 0, "gf180mcuA", 0, "3LM_1TM");
-    const auto cell = ice::createLayoutCell(project, "top", "gf180mcuA", "3LM_1TM");
-    const auto procedural = ice::createProceduralLayout(project, "scripted", "gf180mcuA", "layout = None\n", "6LM_1TM");
-    const auto child = ice::createLayoutCell(project, "child", "gf180mcuA", "6LM_1TM");
-    CHECK_THROWS_AS(ice::addLayoutInstance(project, cell, child, "I1", 0, 0), ice::ProjectError);
+    const auto layer = openvlsi::addLayer(project, "Metal1", 34, 0, "gf180mcuA", 0, "3LM_1TM");
+    const auto cell = openvlsi::createLayoutCell(project, "top", "gf180mcuA", "3LM_1TM");
+    const auto procedural =
+        openvlsi::createProceduralLayout(project, "scripted", "gf180mcuA", "layout = None\n", "6LM_1TM");
+    const auto child = openvlsi::createLayoutCell(project, "child", "gf180mcuA", "6LM_1TM");
+    CHECK_THROWS_AS(openvlsi::addLayoutInstance(project, cell, child, "I1", 0, 0), openvlsi::ProjectError);
     CHECK(project.layoutCells.at(cell).stack == "3LM_1TM");
     CHECK(project.layoutCells.at(project.proceduralLayouts.at(procedural).generatedCell).stack == "6LM_1TM");
     CHECK(project.layers.at(layer).stack == "3LM_1TM");
 
-    const auto roundTrip = ice::Project::deserialize(project.serialize());
+    const auto roundTrip = openvlsi::Project::deserialize(project.serialize());
     CHECK(roundTrip.layoutCells.at(cell).stack == "3LM_1TM");
     CHECK(roundTrip.layoutCells.at(project.proceduralLayouts.at(procedural).generatedCell).stack == "6LM_1TM");
     CHECK(roundTrip.proceduralLayouts.at(procedural).stack == "6LM_1TM");
@@ -96,14 +97,14 @@ TEST_CASE("layout cells preserve PDK stack selections") {
 }
 
 TEST_CASE("implementation runs serialize and persist with the project") {
-    const auto root = std::filesystem::temp_directory_path() / "ice-implementation-run-test";
+    const auto root = std::filesystem::temp_directory_path() / "openvlsi-implementation-run-test";
     std::filesystem::remove_all(root);
 
-    ice::Project project;
+    openvlsi::Project project;
     project.identity = "implementation-run";
     project.name = "implementation-run";
     const auto sourceId = project.nextId();
-    ice::SchematicCell source;
+    openvlsi::SchematicCell source;
     source.id = sourceId;
     source.name = "counter";
     source.pdk = "example.pdk";
@@ -111,54 +112,54 @@ TEST_CASE("implementation runs serialize and persist with the project") {
     source.systemVerilogText = "module counter(input clk); endmodule\n";
     project.schematicCells.emplace(sourceId, source);
 
-    ice::ImplementationConfig config;
+    openvlsi::ImplementationConfig config;
     config.name = "counter-gf180";
     config.top = "counter";
     config.pdk = "example.pdk";
     config.stack = "base";
     config.sourceCells = {sourceId};
     config.utilization = 0.45;
-    const auto runId = ice::createImplementationRun(project, config);
+    const auto runId = openvlsi::createImplementationRun(project, config);
     CHECK(runId != 0);
     CHECK(project.implementationRuns.at(runId).name == "counter-gf180");
-    CHECK(project.implementationRuns.at(runId).stages.size() == ice::implementationStages().size());
+    CHECK(project.implementationRuns.at(runId).stages.size() == openvlsi::implementationStages().size());
     CHECK(!project.implementationRuns.at(runId).configHash.empty());
-    CHECK_THROWS_AS(ice::createImplementationRun(project, config), ice::ProjectError);
+    CHECK_THROWS_AS(openvlsi::createImplementationRun(project, config), openvlsi::ProjectError);
 
-    const auto roundTrip = ice::Project::deserialize(project.serialize());
+    const auto roundTrip = openvlsi::Project::deserialize(project.serialize());
     CHECK(roundTrip.implementationRuns.at(runId).name == "counter-gf180");
     CHECK(roundTrip.implementationRuns.at(runId).config.top == "counter");
     CHECK(std::abs(roundTrip.implementationRuns.at(runId).config.utilization - 0.45) < 1e-9);
-    CHECK(roundTrip.implementationRuns.at(runId).stages.at(ice::ImplementationStage::placement).status ==
-          ice::ImplementationStageStatus::pending);
+    CHECK(roundTrip.implementationRuns.at(runId).stages.at(openvlsi::ImplementationStage::placement).status ==
+          openvlsi::ImplementationStageStatus::pending);
 
     project.save(root);
     const auto files = std::filesystem::directory_iterator(root / "impl");
     bool foundManifest = false;
     for (const auto &entry : files) {
-        if (entry.path().extension() == ".iceimpl") {
+        if (entry.path().extension() == ".ovimpl") {
             foundManifest = true;
             break;
         }
     }
     CHECK(foundManifest);
-    const auto loaded = ice::Project::load(root);
+    const auto loaded = openvlsi::Project::load(root);
     CHECK(loaded.implementationRuns.at(runId).name == "counter-gf180");
     CHECK(loaded.implementationRuns.at(runId).config.sourceCells.front() == sourceId);
 
-    const auto serialized = ice::serializeImplementationRun(project.implementationRuns.at(runId));
-    const auto parsed = ice::deserializeImplementationRun(serialized);
+    const auto serialized = openvlsi::serializeImplementationRun(project.implementationRuns.at(runId));
+    const auto parsed = openvlsi::deserializeImplementationRun(serialized);
     CHECK(parsed.name == "counter-gf180");
     CHECK(parsed.config.top == "counter");
-    CHECK(parsed.status == ice::ImplementationStatus::pending);
+    CHECK(parsed.status == openvlsi::ImplementationStatus::pending);
 
-    ice::removeImplementationRun(project, runId);
+    openvlsi::removeImplementationRun(project, runId);
     CHECK(!project.implementationRuns.contains(runId));
     std::filesystem::remove_all(root);
 }
 
 TEST_CASE("implementation preparation generates backend scripts") {
-    const auto root = std::filesystem::temp_directory_path() / "ice-implementation-prepare-test";
+    const auto root = std::filesystem::temp_directory_path() / "openvlsi-implementation-prepare-test";
     std::filesystem::remove_all(root);
     const auto packageRoot = root / "package";
     std::filesystem::create_directories(packageRoot / "implementation");
@@ -167,19 +168,19 @@ TEST_CASE("implementation preparation generates backend scripts") {
     std::ofstream(packageRoot / "implementation" / "tapcell.tcl") << "# tapcell\n";
     std::ofstream(packageRoot / "implementation" / "pdn.tcl") << "# pdn\n";
 
-    ice::PackageSpec package;
+    openvlsi::PackageSpec package;
     package.name = "example.pdk";
     package.version = "1.0.0";
     package.root = packageRoot;
-    ice::PackagePdk pdk;
+    openvlsi::PackagePdk pdk;
     pdk.id = "example.pdk";
     pdk.defaultStack = "base";
-    pdk.implementation = ice::PackagePdkImplementation{};
+    pdk.implementation = openvlsi::PackagePdkImplementation{};
     pdk.implementation->engine = "openroad";
     pdk.implementation->synthesis = "yosys";
-    ice::PackagePdkStack stack;
+    openvlsi::PackagePdkStack stack;
     stack.id = "base";
-    stack.implementation = ice::PackagePdkStackImplementation{
+    stack.implementation = openvlsi::PackagePdkStackImplementation{
         "example_site",
         "implementation/tech.lef",
         "implementation/cells.lef",
@@ -199,11 +200,11 @@ TEST_CASE("implementation preparation generates backend scripts") {
     pdk.stacks.push_back(stack);
     package.pdk = pdk;
 
-    ice::Project project;
+    openvlsi::Project project;
     project.identity = "implementation-prepare";
     project.name = "implementation-prepare";
     const auto sourceId = project.nextId();
-    ice::SchematicCell source;
+    openvlsi::SchematicCell source;
     source.id = sourceId;
     source.name = "counter";
     source.pdk = "example.pdk";
@@ -211,7 +212,7 @@ TEST_CASE("implementation preparation generates backend scripts") {
     source.systemVerilogText = "module counter(input clk); endmodule\n";
     project.schematicCells.emplace(sourceId, source);
 
-    ice::ImplementationConfig config;
+    openvlsi::ImplementationConfig config;
     config.name = "counter";
     config.top = "counter";
     config.pdk = "example.pdk";
@@ -220,16 +221,16 @@ TEST_CASE("implementation preparation generates backend scripts") {
     config.ctsRootBuffer = "BUF_X4";
     config.ctsBuffers = {"BUF_X1", "BUF_X2"};
     config.utilization = 0.45;
-    const auto runId = ice::createImplementationRun(project, config);
+    const auto runId = openvlsi::createImplementationRun(project, config);
     auto &run = project.implementationRuns.at(runId);
 
-    std::vector<ice::Diagnostic> diagnostics;
-    const auto platform = ice::resolveImplementationPlatform(package, "base", diagnostics);
+    std::vector<openvlsi::Diagnostic> diagnostics;
+    const auto platform = openvlsi::resolveImplementationPlatform(package, "base", diagnostics);
     CHECK(diagnostics.empty());
     CHECK(platform.site == "example_site");
     CHECK(platform.liberty.at("tt").front() == packageRoot / "implementation" / "tt.lib");
 
-    const auto preparation = ice::prepareImplementationRun(project, run, platform, root);
+    const auto preparation = openvlsi::prepareImplementationRun(project, run, platform, root);
     CHECK(preparation.ready);
     CHECK(std::filesystem::is_regular_file(preparation.runDirectory / "scripts" / "00-synth.ys"));
     CHECK(std::filesystem::is_regular_file(preparation.runDirectory / "scripts" / "01-floorplan.tcl"));
@@ -253,7 +254,7 @@ TEST_CASE("implementation preparation generates backend scripts") {
     CHECK(ctsText.find("BUF_X4") != std::string::npos);
 
     run.config.ctsEnabled = false;
-    const auto withoutCts = ice::prepareImplementationRun(project, run, platform, root);
+    const auto withoutCts = openvlsi::prepareImplementationRun(project, run, platform, root);
     CHECK(withoutCts.ready);
     std::ifstream routeWithoutCts(withoutCts.runDirectory / "scripts" / "04-route.tcl");
     const std::string routeWithoutCtsText((std::istreambuf_iterator<char>(routeWithoutCts)), {});
@@ -267,15 +268,15 @@ TEST_CASE("implementation preparation generates backend scripts") {
 }
 
 TEST_CASE("process runner captures output, timeouts, and cancellation") {
-    const auto root = std::filesystem::temp_directory_path() / "ice-process-runner-test";
+    const auto root = std::filesystem::temp_directory_path() / "openvlsi-process-runner-test";
     std::filesystem::remove_all(root);
     std::filesystem::create_directories(root);
 
-    ice::ProcessOptions options;
+    openvlsi::ProcessOptions options;
     options.arguments = {"/bin/sh", "-c", "printf 'hello\\n'; printf 'oops\\n' >&2; exit 7"};
     options.logPath = root / "tool.log";
     options.logTailBytes = 16;
-    const auto failed = ice::runProcess(options);
+    const auto failed = openvlsi::runProcess(options);
     CHECK(failed.started);
     CHECK(!failed.succeeded());
     CHECK(failed.exitCode == 7);
@@ -287,24 +288,24 @@ TEST_CASE("process runner captures output, timeouts, and cancellation") {
     CHECK(logText.find("hello") != std::string::npos);
     CHECK(logText.find("oops") != std::string::npos);
 
-    ice::ProcessOptions timeout;
+    openvlsi::ProcessOptions timeout;
     timeout.arguments = {"/bin/sh", "-c", "sleep 5"};
     timeout.timeoutSeconds = 1;
     timeout.logPath = root / "timeout.log";
-    const auto timedOut = ice::runProcess(timeout);
+    const auto timedOut = openvlsi::runProcess(timeout);
     CHECK(timedOut.started);
     CHECK(timedOut.timedOut);
     CHECK(!timedOut.succeeded());
 
-    ice::ProcessCancellation cancellation;
+    openvlsi::ProcessCancellation cancellation;
     std::thread canceller([&] {
         std::this_thread::sleep_for(std::chrono::milliseconds(150));
         cancellation.cancel();
     });
-    ice::ProcessOptions cancellable;
+    openvlsi::ProcessOptions cancellable;
     cancellable.arguments = {"/bin/sh", "-c", "sleep 5"};
     cancellable.logPath = root / "cancel.log";
-    const auto cancelled = ice::runProcess(cancellable, &cancellation);
+    const auto cancelled = openvlsi::runProcess(cancellable, &cancellation);
     canceller.join();
     CHECK(cancelled.started);
     CHECK(cancelled.cancelled);
@@ -345,7 +346,7 @@ void writeExecutable(const std::filesystem::path &path, const std::string &text)
                                            std::filesystem::perms::others_exec);
 }
 
-ice::PackagePdkStackImplementation executableTestPlatformFiles() {
+openvlsi::PackagePdkStackImplementation executableTestPlatformFiles() {
     return {"unit",
             "implementation/tech.lef",
             "implementation/cells.lef",
@@ -366,7 +367,7 @@ ice::PackagePdkStackImplementation executableTestPlatformFiles() {
 } // namespace
 
 TEST_CASE("implementation execution runs stages and records metrics") {
-    const auto root = std::filesystem::temp_directory_path() / "ice-implementation-execute-test";
+    const auto root = std::filesystem::temp_directory_path() / "openvlsi-implementation-execute-test";
     std::filesystem::remove_all(root);
     const auto packageRoot = root / "package";
     const auto binRoot = root / "bin";
@@ -412,9 +413,9 @@ done
 printf '<svg xmlns="http://www.w3.org/2000/svg"></svg>\n' > "$out"
 exit 0
 )");
-    writeExecutable(binRoot / "ice-openroad", R"(#!/bin/sh
+    writeExecutable(binRoot / "openvlsi-openroad", R"(#!/bin/sh
 if [ "$1" = "--version" ] || [ "$1" = "-version" ]; then
-  echo "Fake ice-openroad 9.99"
+  echo "Fake openvlsi-openroad 9.99"
   exit 0
 fi
 stage="$1"
@@ -428,7 +429,7 @@ while [ $# -gt 0 ]; do
   esac
 done
 if [ -n "$FAKE_OPENROAD_FAIL_STAGE" ] && [ "$stage" = "$FAKE_OPENROAD_FAIL_STAGE" ]; then
-  echo "fake ice-openroad failure" >&2
+  echo "fake openvlsi-openroad failure" >&2
   exit 3
 fi
 mkdir -p db def final reports logs
@@ -442,36 +443,36 @@ esac
 if [ -n "$metrics" ]; then
   printf '{"design__die__area": 1234.5, "route__wirelength": 42}\n' > "$metrics"
 fi
-message="fake ice-openroad $stage"
+message="fake openvlsi-openroad $stage"
 if [ -n "$log" ]; then
   echo "$message" > "$log"
 fi
 echo "$message"
 exit 0
 )");
-    ScopedEnvironment yosys("ICE_YOSYS", (binRoot / "yosys").string());
-    ScopedEnvironment openroad("ICE_OPENROAD_HELPER", (binRoot / "ice-openroad").string());
-    ScopedEnvironment graphviz("ICE_DOT", (binRoot / "dot").string());
+    ScopedEnvironment yosys("OPENVLSI_YOSYS", (binRoot / "yosys").string());
+    ScopedEnvironment openroad("OPENVLSI_OPENROAD_HELPER", (binRoot / "openvlsi-openroad").string());
+    ScopedEnvironment graphviz("OPENVLSI_DOT", (binRoot / "dot").string());
 
-    ice::PackageSpec package;
+    openvlsi::PackageSpec package;
     package.name = "example.pdk";
     package.version = "1.0.0";
     package.root = packageRoot;
-    ice::PackagePdk pdk;
+    openvlsi::PackagePdk pdk;
     pdk.id = "example.pdk";
     pdk.defaultStack = "base";
-    pdk.implementation = ice::PackagePdkImplementation{};
-    ice::PackagePdkStack stack;
+    pdk.implementation = openvlsi::PackagePdkImplementation{};
+    openvlsi::PackagePdkStack stack;
     stack.id = "base";
     stack.implementation = executableTestPlatformFiles();
     pdk.stacks.push_back(stack);
     package.pdk = pdk;
 
-    ice::Project project;
+    openvlsi::Project project;
     project.identity = "implementation-execute";
     project.name = "implementation-execute";
     const auto sourceId = project.nextId();
-    ice::SchematicCell source;
+    openvlsi::SchematicCell source;
     source.id = sourceId;
     source.name = "counter";
     source.pdk = "example.pdk";
@@ -479,35 +480,35 @@ exit 0
     source.systemVerilogText = "module counter(input clk); endmodule\n";
     project.schematicCells.emplace(sourceId, source);
 
-    ice::ImplementationConfig config;
+    openvlsi::ImplementationConfig config;
     config.name = "counter";
     config.top = "counter";
     config.pdk = "example.pdk";
     config.stack = "base";
     config.sourceCells = {sourceId};
     config.threads = 2;
-    const auto runId = ice::createImplementationRun(project, config);
+    const auto runId = openvlsi::createImplementationRun(project, config);
     auto &run = project.implementationRuns.at(runId);
-    std::vector<ice::Diagnostic> diagnostics;
-    const auto platform = ice::resolveImplementationPlatform(package, "base", diagnostics);
+    std::vector<openvlsi::Diagnostic> diagnostics;
+    const auto platform = openvlsi::resolveImplementationPlatform(package, "base", diagnostics);
     CHECK(diagnostics.empty());
 
-    std::vector<ice::ImplementationProgress> progress;
+    std::vector<openvlsi::ImplementationProgress> progress;
     std::size_t changes = 0;
-    ice::ImplementationExecutionOptions options;
-    options.progress = [&](const ice::ImplementationProgress &event) { progress.push_back(event); };
-    options.changed = [&](const ice::ImplementationRun &) { ++changes; };
-    const auto result = ice::executeImplementationRun(project, run, platform, root, options);
+    openvlsi::ImplementationExecutionOptions options;
+    options.progress = [&](const openvlsi::ImplementationProgress &event) { progress.push_back(event); };
+    options.changed = [&](const openvlsi::ImplementationRun &) { ++changes; };
+    const auto result = openvlsi::executeImplementationRun(project, run, platform, root, options);
     CHECK(result.success);
     CHECK(!result.cancelled);
-    CHECK(result.completedStage == ice::ImplementationStage::final);
-    CHECK(run.status == ice::ImplementationStatus::succeeded);
-    for (const auto stage :
-         {ice::ImplementationStage::synthesis, ice::ImplementationStage::floorplan, ice::ImplementationStage::placement,
-          ice::ImplementationStage::cts, ice::ImplementationStage::routing, ice::ImplementationStage::final})
-        CHECK(run.stages.at(stage).status == ice::ImplementationStageStatus::succeeded);
+    CHECK(result.completedStage == openvlsi::ImplementationStage::final);
+    CHECK(run.status == openvlsi::ImplementationStatus::succeeded);
+    for (const auto stage : {openvlsi::ImplementationStage::synthesis, openvlsi::ImplementationStage::floorplan,
+                             openvlsi::ImplementationStage::placement, openvlsi::ImplementationStage::cts,
+                             openvlsi::ImplementationStage::routing, openvlsi::ImplementationStage::final})
+        CHECK(run.stages.at(stage).status == openvlsi::ImplementationStageStatus::succeeded);
     CHECK(run.toolVersions.at("yosys") == "Fake Yosys 0.99");
-    CHECK(run.toolVersions.at("openroad") == "Fake ice-openroad 9.99");
+    CHECK(run.toolVersions.at("openroad") == "Fake openvlsi-openroad 9.99");
     CHECK(std::abs(run.metrics.at("synth.cells") - 12.0) < 1e-9);
     CHECK(std::abs(run.metrics.at("synth.chip_area_um2") - 56.75) < 1e-9);
     CHECK(std::abs(run.metrics.at("design__die__area") - 1234.5) < 1e-9);
@@ -518,49 +519,53 @@ exit 0
     CHECK(std::filesystem::is_regular_file(root / run.directory / "final" / "6_final.v"));
     CHECK(std::filesystem::is_regular_file(root / run.directory / "logs" / "05-final.log"));
     CHECK(std::filesystem::is_regular_file(root / run.directory / "reports" / "route_drc.rpt"));
-    CHECK(std::any_of(run.stages.at(ice::ImplementationStage::routing).artifacts.begin(),
-                      run.stages.at(ice::ImplementationStage::routing).artifacts.end(),
+    CHECK(std::any_of(run.stages.at(openvlsi::ImplementationStage::routing).artifacts.begin(),
+                      run.stages.at(openvlsi::ImplementationStage::routing).artifacts.end(),
                       [](const std::string &artifact) { return artifact.ends_with("reports/route_drc.rpt"); }));
     CHECK(std::filesystem::is_regular_file(root / run.directory / "reports" / "synthesis.svg"));
     CHECK(!std::filesystem::is_regular_file(root / run.directory / "reports" / "synthesis.dot"));
     CHECK(!std::filesystem::is_regular_file(root / run.directory / "reports" / "synthesis-overview.dot"));
-    CHECK(ice::readImplementationLog(run, root, ice::ImplementationStage::final).find("fake ice-openroad") !=
-          std::string::npos);
+    CHECK(openvlsi::readImplementationLog(run, root, openvlsi::ImplementationStage::final)
+              .find("fake openvlsi-openroad") != std::string::npos);
 
     // Rerunning one stage invalidates only that stage and later ones.
-    ice::ImplementationExecutionOptions placementOnly;
-    placementOnly.from = ice::ImplementationStage::placement;
-    placementOnly.to = ice::ImplementationStage::placement;
-    const auto rerun = ice::executeImplementationRun(project, run, platform, root, placementOnly);
+    openvlsi::ImplementationExecutionOptions placementOnly;
+    placementOnly.from = openvlsi::ImplementationStage::placement;
+    placementOnly.to = openvlsi::ImplementationStage::placement;
+    const auto rerun = openvlsi::executeImplementationRun(project, run, platform, root, placementOnly);
     CHECK(rerun.success);
-    CHECK(run.status == ice::ImplementationStatus::succeeded);
-    CHECK(run.stages.at(ice::ImplementationStage::synthesis).status == ice::ImplementationStageStatus::succeeded);
-    CHECK(run.stages.at(ice::ImplementationStage::floorplan).status == ice::ImplementationStageStatus::succeeded);
-    CHECK(run.stages.at(ice::ImplementationStage::placement).status == ice::ImplementationStageStatus::succeeded);
-    CHECK(run.stages.at(ice::ImplementationStage::routing).status == ice::ImplementationStageStatus::pending);
-    CHECK(run.stages.at(ice::ImplementationStage::final).status == ice::ImplementationStageStatus::pending);
+    CHECK(run.status == openvlsi::ImplementationStatus::succeeded);
+    CHECK(run.stages.at(openvlsi::ImplementationStage::synthesis).status ==
+          openvlsi::ImplementationStageStatus::succeeded);
+    CHECK(run.stages.at(openvlsi::ImplementationStage::floorplan).status ==
+          openvlsi::ImplementationStageStatus::succeeded);
+    CHECK(run.stages.at(openvlsi::ImplementationStage::placement).status ==
+          openvlsi::ImplementationStageStatus::succeeded);
+    CHECK(run.stages.at(openvlsi::ImplementationStage::routing).status == openvlsi::ImplementationStageStatus::pending);
+    CHECK(run.stages.at(openvlsi::ImplementationStage::final).status == openvlsi::ImplementationStageStatus::pending);
 
     // A failing stage preserves the earlier checkpoint and records the log.
     setenv("FAKE_OPENROAD_FAIL_STAGE", "routing", 1);
-    ice::ImplementationExecutionOptions failure;
-    failure.from = ice::ImplementationStage::routing;
-    failure.to = ice::ImplementationStage::final;
-    const auto failed = ice::executeImplementationRun(project, run, platform, root, failure);
+    openvlsi::ImplementationExecutionOptions failure;
+    failure.from = openvlsi::ImplementationStage::routing;
+    failure.to = openvlsi::ImplementationStage::final;
+    const auto failed = openvlsi::executeImplementationRun(project, run, platform, root, failure);
     unsetenv("FAKE_OPENROAD_FAIL_STAGE");
     CHECK(!failed.success);
-    CHECK(run.status == ice::ImplementationStatus::failed);
-    CHECK(run.stages.at(ice::ImplementationStage::placement).status == ice::ImplementationStageStatus::succeeded);
-    CHECK(run.stages.at(ice::ImplementationStage::routing).status == ice::ImplementationStageStatus::failed);
-    CHECK(run.stages.at(ice::ImplementationStage::final).status == ice::ImplementationStageStatus::pending);
+    CHECK(run.status == openvlsi::ImplementationStatus::failed);
+    CHECK(run.stages.at(openvlsi::ImplementationStage::placement).status ==
+          openvlsi::ImplementationStageStatus::succeeded);
+    CHECK(run.stages.at(openvlsi::ImplementationStage::routing).status == openvlsi::ImplementationStageStatus::failed);
+    CHECK(run.stages.at(openvlsi::ImplementationStage::final).status == openvlsi::ImplementationStageStatus::pending);
     CHECK(run.lastError.find("04-route") != std::string::npos ||
           run.lastError.find("Routing failed") != std::string::npos);
 
     // Exporting maps the generic netlist and records the mapped artifact.
-    const auto mapped = ice::mapImplementationRun(run, platform, root, root / "export" / "counter.v");
+    const auto mapped = openvlsi::mapImplementationRun(run, platform, root, root / "export" / "counter.v");
     CHECK(mapped.success);
     CHECK(std::filesystem::is_regular_file(root / run.directory / "synth" / "2_tech_map.v"));
     CHECK(std::filesystem::is_regular_file(root / "export" / "counter.v"));
-    const auto &synthArtifacts = run.stages.at(ice::ImplementationStage::synthesis).artifacts;
+    const auto &synthArtifacts = run.stages.at(openvlsi::ImplementationStage::synthesis).artifacts;
     const auto mappedArtifact = run.directory + "/synth/2_tech_map.v";
     CHECK(std::find(synthArtifacts.begin(), synthArtifacts.end(), mappedArtifact) != synthArtifacts.end());
     std::ifstream techmapScript(root / run.directory / "scripts" / "01-techmap.ys");
@@ -572,20 +577,23 @@ exit 0
     // and everything after it without resetting the whole run.
     auto updatedConfig = run.config;
     updatedConfig.utilization = 0.7;
-    ice::updateImplementationConfig(run, updatedConfig, ice::ImplementationStage::floorplan);
+    openvlsi::updateImplementationConfig(run, updatedConfig, openvlsi::ImplementationStage::floorplan);
     CHECK(run.config.utilization == 0.7);
-    CHECK(run.configHash == ice::implementationConfigHash(run.config));
-    CHECK(run.stages.at(ice::ImplementationStage::synthesis).status == ice::ImplementationStageStatus::succeeded);
-    CHECK(run.stages.at(ice::ImplementationStage::floorplan).status == ice::ImplementationStageStatus::pending);
-    CHECK(run.stages.at(ice::ImplementationStage::placement).status == ice::ImplementationStageStatus::pending);
-    CHECK(run.currentStage == ice::ImplementationStage::synthesis);
-    CHECK(run.status == ice::ImplementationStatus::pending);
+    CHECK(run.configHash == openvlsi::implementationConfigHash(run.config));
+    CHECK(run.stages.at(openvlsi::ImplementationStage::synthesis).status ==
+          openvlsi::ImplementationStageStatus::succeeded);
+    CHECK(run.stages.at(openvlsi::ImplementationStage::floorplan).status ==
+          openvlsi::ImplementationStageStatus::pending);
+    CHECK(run.stages.at(openvlsi::ImplementationStage::placement).status ==
+          openvlsi::ImplementationStageStatus::pending);
+    CHECK(run.currentStage == openvlsi::ImplementationStage::synthesis);
+    CHECK(run.status == openvlsi::ImplementationStatus::pending);
 
     std::filesystem::remove_all(root);
 }
 
 TEST_CASE("DEF import creates pins, instances, nets, and routes") {
-    const auto root = std::filesystem::temp_directory_path() / "ice-def-import-test";
+    const auto root = std::filesystem::temp_directory_path() / "openvlsi-def-import-test";
     std::filesystem::remove_all(root);
     std::filesystem::create_directories(root);
 
@@ -658,7 +666,7 @@ END NETS
 END DESIGN
 )";
 
-    ice::DefImportOptions options;
+    openvlsi::DefImportOptions options;
     options.techLef = techLef;
     options.cellLef = cellLef;
     options.pdk = "example.pdk";
@@ -667,10 +675,10 @@ END DESIGN
     options.layers["metal2"] = {36, 0};
     options.layers["via1"] = {35, 0};
 
-    ice::Project project;
+    openvlsi::Project project;
     project.identity = "def-import";
     project.name = "def-import";
-    const auto cellId = ice::LayoutInterchange::importDefIntoProject(project, def, options);
+    const auto cellId = openvlsi::LayoutInterchange::importDefIntoProject(project, def, options);
     const auto &cell = project.layoutCells.at(cellId);
     CHECK(cell.name == "top");
     CHECK(cell.pdk == "example.pdk");
@@ -694,11 +702,11 @@ END DESIGN
     CHECK(u1 != cell.instances.end());
     CHECK(u1->second.x == 1000);
     CHECK(u1->second.y == 2000);
-    CHECK(u1->second.orientation == ice::Orientation::r0);
+    CHECK(u1->second.orientation == openvlsi::Orientation::r0);
     const auto u2 = std::find_if(cell.instances.begin(), cell.instances.end(),
                                  [](const auto &entry) { return entry.second.name == "u2"; });
     CHECK(u2 != cell.instances.end());
-    CHECK(u2->second.orientation == ice::Orientation::r180);
+    CHECK(u2->second.orientation == openvlsi::Orientation::r180);
     const auto &master = project.layoutCells.at(u1->second.cell);
     CHECK(master.name == "INV");
     CHECK(master.ports.size() == 2);
@@ -722,19 +730,19 @@ END DESIGN
 }
 
 TEST_CASE("implementation import creates a native digital device") {
-    const auto root = std::filesystem::temp_directory_path() / "ice-implementation-reference-test";
+    const auto root = std::filesystem::temp_directory_path() / "openvlsi-implementation-reference-test";
     std::filesystem::remove_all(root);
     const auto runDirectory = root / "build" / "impl" / "counter-1";
     std::filesystem::create_directories(runDirectory / "final");
     std::filesystem::create_directories(runDirectory / "def");
     {
-        ice::Project source;
+        openvlsi::Project source;
         source.identity = "counter-source";
         source.name = "counter-source";
-        const auto layer = ice::addLayer(source, "metal1", 34);
-        const auto sourceCell = ice::createLayoutCell(source, "counter");
-        ice::addRectangle(source, sourceCell, layer, ice::Rect{0, 0, 1000, 1000});
-        ice::LayoutInterchange::exportGds(source, sourceCell, runDirectory / "final" / "6_final.gds");
+        const auto layer = openvlsi::addLayer(source, "metal1", 34);
+        const auto sourceCell = openvlsi::createLayoutCell(source, "counter");
+        openvlsi::addRectangle(source, sourceCell, layer, openvlsi::Rect{0, 0, 1000, 1000});
+        openvlsi::LayoutInterchange::exportGds(source, sourceCell, runDirectory / "final" / "6_final.gds");
     }
     {
         std::ofstream def(runDirectory / "def" / "6_final.def", std::ios::binary | std::ios::trunc);
@@ -749,25 +757,25 @@ TEST_CASE("implementation import creates a native digital device") {
                "END DESIGN\n";
     }
 
-    ice::Project project;
+    openvlsi::Project project;
     project.identity = "reference-test";
     project.name = "reference-test";
 
-    ice::PackageSpec package;
+    openvlsi::PackageSpec package;
     package.name = "example.pkg";
     package.version = "1.0.0";
-    package.pdk = ice::PackagePdk{};
+    package.pdk = openvlsi::PackagePdk{};
     package.pdk->id = "example.pdk";
-    package.pdk->layers.push_back(ice::PackageLayer{"Metal1", 34, 0});
+    package.pdk->layers.push_back(openvlsi::PackageLayer{"Metal1", 34, 0});
 
-    ice::ImplementationRun run;
+    openvlsi::ImplementationRun run;
     run.name = "counter";
     run.directory = "build/impl/counter-1";
     run.config.top = "counter";
     run.config.pdk = "example.pdk";
     run.config.stack = "";
 
-    const auto imported = ice::importImplementationLayout(project, run, package, root);
+    const auto imported = openvlsi::importImplementationLayout(project, run, package, root);
     CHECK(imported.layout != 0);
     CHECK(imported.referencePath.filename() == "6_final.gds");
     const auto &cell = project.layoutCells.at(imported.layout);
@@ -779,7 +787,7 @@ TEST_CASE("implementation import creates a native digital device") {
     CHECK(cell.instances.empty());
     CHECK(cell.ports.size() == 2);
     CHECK(cell.nets.size() == 2);
-    const auto portNamed = [&](const std::string &name) -> const ice::Port * {
+    const auto portNamed = [&](const std::string &name) -> const openvlsi::Port * {
         for (const auto &[_, port] : cell.ports) {
             if (port.name == name)
                 return &port;
@@ -791,8 +799,8 @@ TEST_CASE("implementation import creates a native digital device") {
     CHECK(clockPort != nullptr);
     CHECK(outputPort != nullptr);
     if (clockPort && outputPort) {
-        CHECK(clockPort->direction == ice::PortDirection::input);
-        CHECK(outputPort->direction == ice::PortDirection::output);
+        CHECK(clockPort->direction == openvlsi::PortDirection::input);
+        CHECK(outputPort->direction == openvlsi::PortDirection::output);
         CHECK(clockPort->net != 0);
         CHECK(outputPort->net != 0);
         CHECK(cell.nets.at(clockPort->net).name == "clk");
@@ -803,7 +811,7 @@ TEST_CASE("implementation import creates a native digital device") {
     CHECK(project.validate().empty());
 
     project.save(root);
-    auto loaded = ice::Project::load(root);
+    auto loaded = openvlsi::Project::load(root);
     const auto loadedCell = loaded.layoutCells.find(imported.layout);
     CHECK(loadedCell != loaded.layoutCells.end());
     if (loadedCell != loaded.layoutCells.end()) {
@@ -827,8 +835,9 @@ TEST_CASE("implementation import creates a native digital device") {
                             "row.add(pad)\n"
                             "row.add(block)\n"
                             "layout.add(row)\n";
-        const auto proceduralId = ice::createProceduralLayout(loaded, "digital_parent", ice::genericPdkId, script);
-        const auto generated = ice::regenerateProceduralLayout(loaded, proceduralId);
+        const auto proceduralId =
+            openvlsi::createProceduralLayout(loaded, "digital_parent", openvlsi::genericPdkId, script);
+        const auto generated = openvlsi::regenerateProceduralLayout(loaded, proceduralId);
         CHECK(generated.ok);
         if (generated.ok) {
             const auto &parent = loaded.layoutCells.at(loaded.proceduralLayouts.at(proceduralId).generatedCell);
@@ -849,14 +858,14 @@ TEST_CASE("implementation import creates a native digital device") {
             const auto parentGds = root / "digital-parent.gds";
             bool exported = true;
             try {
-                ice::LayoutInterchange::exportGds(loaded, parent.id, parentGds);
+                openvlsi::LayoutInterchange::exportGds(loaded, parent.id, parentGds);
             } catch (const std::exception &) {
                 exported = false;
             }
             CHECK(exported);
             CHECK(std::filesystem::is_regular_file(parentGds));
             if (exported) {
-                const auto hierarchical = ice::LayoutInterchange::importGds(parentGds);
+                const auto hierarchical = openvlsi::LayoutInterchange::importGds(parentGds);
                 REQUIRE(hierarchical.layoutCells.size() == 2);
                 const auto &top = hierarchical.layoutCells.begin()->second;
                 CHECK(top.instances.size() == 1);
@@ -877,13 +886,13 @@ TEST_CASE("implementation import creates a native digital device") {
             const auto flatGds = root / "digital-parent-flat.gds";
             bool flattenedExport = true;
             try {
-                ice::LayoutInterchange::exportFlattenedGds(loaded, parent.id, flatGds);
+                openvlsi::LayoutInterchange::exportFlattenedGds(loaded, parent.id, flatGds);
             } catch (const std::exception &) {
                 flattenedExport = false;
             }
             CHECK(flattenedExport);
             if (flattenedExport) {
-                const auto flattened = ice::LayoutInterchange::importGds(flatGds);
+                const auto flattened = openvlsi::LayoutInterchange::importGds(flatGds);
                 REQUIRE(flattened.layoutCells.size() == 1);
                 const auto &flatCell = flattened.layoutCells.begin()->second;
                 CHECK(flatCell.shapes.size() == 2);
@@ -897,7 +906,7 @@ TEST_CASE("implementation import creates a native digital device") {
 
             // Re-importing with replace must keep the same cell id so the
             // procedural instance continues to reference the refreshed device.
-            const auto replaced = ice::importImplementationLayout(loaded, run, package, root, "", true);
+            const auto replaced = openvlsi::importImplementationLayout(loaded, run, package, root, "", true);
             CHECK(replaced.layout == imported.layout);
             CHECK(loaded.layoutCells.at(replaced.layout).ports.size() == 2);
             CHECK(loaded.layoutCells.at(loaded.proceduralLayouts.at(proceduralId).generatedCell)
@@ -915,21 +924,21 @@ TEST_CASE("implementation import creates a native digital device") {
     }
     // A failed export only warns inside the final stage, so the reason must be
     // recorded for the later import to explain the missing stream.
-    ice::ImplementationPlatform platform;
+    openvlsi::ImplementationPlatform platform;
     platform.pdk = "example.pdk";
-    const auto exported = ice::exportImplementationGds(run, platform, root);
+    const auto exported = openvlsi::exportImplementationGds(run, platform, root);
     CHECK(!exported.success);
     CHECK(exported.error.find("does not provide standard-cell GDS decks") != std::string::npos);
     CHECK(std::filesystem::is_regular_file(runDirectory / "logs" / "06-gds.log"));
 
-    ice::Project missing;
+    openvlsi::Project missing;
     missing.identity = "reference-missing";
     missing.name = "reference-missing";
-    CHECK_THROWS_AS(ice::importImplementationLayout(missing, run, package, root), ice::ProjectError);
+    CHECK_THROWS_AS(openvlsi::importImplementationLayout(missing, run, package, root), openvlsi::ProjectError);
     bool reportedReason = false;
     try {
-        ice::importImplementationLayout(missing, run, package, root);
-    } catch (const ice::ProjectError &error) {
+        openvlsi::importImplementationLayout(missing, run, package, root);
+    } catch (const openvlsi::ProjectError &error) {
         reportedReason =
             std::string(error.what()).find("does not provide standard-cell GDS decks") != std::string::npos;
     }
@@ -953,7 +962,7 @@ TEST_CASE("DEF import is numeric-locale independent") {
     if (!std::setlocale(LC_NUMERIC, "es_CL.UTF-8"))
         return;
 
-    const auto root = std::filesystem::temp_directory_path() / "ice-def-locale-test";
+    const auto root = std::filesystem::temp_directory_path() / "openvlsi-def-locale-test";
     std::filesystem::remove_all(root);
     std::filesystem::create_directories(root);
     const auto techLef = root / "tech.lef";
@@ -968,17 +977,17 @@ TEST_CASE("DEF import is numeric-locale independent") {
                           "DIEAREA ( 0 0 ) ( 10500 10500 ) ;\nCOMPONENTS 1 ;\n"
                           "- u1 INV + PLACED ( 230 345 ) N ;\nEND COMPONENTS\nEND DESIGN\n";
 
-    ice::DefImportOptions options;
+    openvlsi::DefImportOptions options;
     options.techLef = techLef;
     options.cellLef = cellLef;
     options.pdk = "example.pdk";
     options.stack = "base";
     options.layers["metal1"] = {34, 0};
 
-    ice::Project project;
+    openvlsi::Project project;
     project.identity = "def-locale";
     project.name = "def-locale";
-    const auto cellId = ice::LayoutInterchange::importDefIntoProject(project, def, options);
+    const auto cellId = openvlsi::LayoutInterchange::importDefIntoProject(project, def, options);
     CHECK(cellId != 0);
     const auto &cell = project.layoutCells.at(cellId);
     CHECK(cell.instances.size() == 1);
@@ -989,7 +998,7 @@ TEST_CASE("DEF import is numeric-locale independent") {
 }
 
 TEST_CASE("DEF import scales DIEAREA by the DEF distance units") {
-    const auto root = std::filesystem::temp_directory_path() / "ice-def-die-units-test";
+    const auto root = std::filesystem::temp_directory_path() / "openvlsi-def-die-units-test";
     std::filesystem::remove_all(root);
     std::filesystem::create_directories(root);
     // GF180MCU DEF files use 2000 database units per micron. The die boundary
@@ -1000,15 +1009,15 @@ TEST_CASE("DEF import scales DIEAREA by the DEF distance units") {
                           "DIEAREA ( 0 0 ) ( 20000 20000 ) ;\nCOMPONENTS 0 ;\nEND COMPONENTS\n"
                           "END DESIGN\n";
 
-    ice::DefImportOptions options;
+    openvlsi::DefImportOptions options;
     options.pdk = "example.pdk";
     options.stack = "base";
     options.layers["metal1"] = {34, 0};
 
-    ice::Project project;
+    openvlsi::Project project;
     project.identity = "def-die-units";
     project.name = "def-die-units";
-    const auto cellId = ice::LayoutInterchange::importDefIntoProject(project, def, options);
+    const auto cellId = openvlsi::LayoutInterchange::importDefIntoProject(project, def, options);
     CHECK(cellId != 0);
     const auto &cell = project.layoutCells.at(cellId);
     const auto boundary = std::find_if(cell.shapes.begin(), cell.shapes.end(),
@@ -1025,13 +1034,13 @@ TEST_CASE("DEF import scales DIEAREA by the DEF distance units") {
 }
 
 TEST_CASE("text polygon shape groups survive serialization") {
-    ice::Project project;
+    openvlsi::Project project;
     project.identity = "text-polygon";
     project.name = "text-polygon";
-    const auto layer = ice::addLayer(project, "Metal1", 8);
-    const auto cell = ice::createLayoutCell(project, "top");
-    const auto first = ice::addPolygon(project, cell, layer, {{0, 0}, {100, 0}, {100, 100}, {0, 100}});
-    const auto second = ice::addPolygon(project, cell, layer, {{100, 0}, {200, 0}, {200, 100}, {100, 100}});
+    const auto layer = openvlsi::addLayer(project, "Metal1", 8);
+    const auto cell = openvlsi::createLayoutCell(project, "top");
+    const auto first = openvlsi::addPolygon(project, cell, layer, {{0, 0}, {100, 0}, {100, 100}, {0, 100}});
+    const auto second = openvlsi::addPolygon(project, cell, layer, {{100, 0}, {200, 0}, {200, 100}, {100, 100}});
     auto &cellData = project.layoutCells.at(cell);
     for (const auto id : {first, second}) {
         auto &shape = cellData.shapes.at(id);
@@ -1041,7 +1050,7 @@ TEST_CASE("text polygon shape groups survive serialization") {
         shape.textSource = "AB";
     }
 
-    const auto roundTrip = ice::Project::deserialize(project.serialize());
+    const auto roundTrip = openvlsi::Project::deserialize(project.serialize());
     const auto &restored = roundTrip.layoutCells.at(cell).shapes;
     CHECK(restored.at(first).textPolygon);
     CHECK(restored.at(first).textGroup == first);
@@ -1051,41 +1060,41 @@ TEST_CASE("text polygon shape groups survive serialization") {
 }
 
 TEST_CASE("project serialization and transactions are deterministic") {
-    ice::Project project;
+    openvlsi::Project project;
     project.identity = "demo";
     project.name = "demo";
     project.packageDependencies = {"example.pdk"};
     auto layerId = project.nextId();
-    project.layers.emplace(layerId, ice::Layer{layerId, "metal1", 1});
+    project.layers.emplace(layerId, openvlsi::Layer{layerId, "metal1", 1});
     auto schematicId = project.nextId();
-    ice::SchematicCell schematic;
+    openvlsi::SchematicCell schematic;
     schematic.id = schematicId;
     schematic.name = "top";
     schematic.pdk = "example.pdk";
     auto symbolId = project.nextId();
-    ice::Symbol symbol;
+    openvlsi::Symbol symbol;
     symbol.id = symbolId;
     symbol.name = "resistor";
-    symbol.label = ice::SymbolLabel{3, 9};
+    symbol.label = openvlsi::SymbolLabel{3, 9};
     auto pinId = project.nextId();
     symbol.pins.push_back({pinId, "A", 0, 0});
     schematic.symbols.emplace(symbolId, symbol);
     auto instanceId = project.nextId();
-    schematic.instances.emplace(instanceId, ice::SchematicInstance{instanceId, symbolId, "R1", 0, 0});
+    schematic.instances.emplace(instanceId, openvlsi::SchematicInstance{instanceId, symbolId, "R1", 0, 0});
     auto netId = project.nextId();
-    schematic.nets.emplace(netId, ice::Net{netId, "net1", {pinId}});
+    schematic.nets.emplace(netId, openvlsi::Net{netId, "net1", {pinId}});
     project.schematicCells.emplace(schematicId, schematic);
     auto cellId = project.nextId();
-    ice::LayoutCell cell;
+    openvlsi::LayoutCell cell;
     cell.id = cellId;
     cell.name = "top";
     cell.pdk = "example.pdk";
     auto shapeId = project.nextId();
-    cell.shapes.emplace(shapeId, ice::Shape{shapeId, layerId, std::nullopt, {0, 0, 100, 50}});
+    cell.shapes.emplace(shapeId, openvlsi::Shape{shapeId, layerId, std::nullopt, {0, 0, 100, 50}});
     project.layoutCells.emplace(cellId, cell);
     CHECK(project.validate().empty());
     auto serialized = project.serialize();
-    auto roundTrip = ice::Project::deserialize(serialized);
+    auto roundTrip = openvlsi::Project::deserialize(serialized);
     CHECK(roundTrip.serialize() == serialized);
     CHECK(roundTrip.schematicCells.at(schematicId).symbols.at(symbolId).label.has_value());
     CHECK(roundTrip.schematicCells.at(schematicId).symbols.at(symbolId).label->x == 3);
@@ -1096,10 +1105,10 @@ TEST_CASE("project serialization and transactions are deterministic") {
     invalid.layoutCells.at(cellId).shapes.at(shapeId).layer = 9999;
     CHECK(!invalid.validate().empty());
 
-    ice::ProjectSession session(roundTrip);
+    openvlsi::ProjectSession session(roundTrip);
     bool notified = false;
     session.subscribe([&] { notified = true; });
-    session.execute("rename", [](ice::Project &value) { value.name = "changed"; });
+    session.execute("rename", [](openvlsi::Project &value) { value.name = "changed"; });
     CHECK(session.dirty());
     CHECK(notified);
     CHECK(session.project().name == "changed");
@@ -1107,25 +1116,26 @@ TEST_CASE("project serialization and transactions are deterministic") {
     CHECK(session.project().name == "demo");
     CHECK(session.redo());
     CHECK(session.project().name == "changed");
-    CHECK_THROWS_AS(session.execute("invalid", [](ice::Project &value) { value.grid = 0; }), ice::ProjectError);
+    CHECK_THROWS_AS(session.execute("invalid", [](openvlsi::Project &value) { value.grid = 0; }),
+                    openvlsi::ProjectError);
     CHECK(session.project().grid == 1);
 }
 
 TEST_CASE("geometry operations are deterministic and queryable") {
-    ice::GeometryKernel kernel;
-    ice::MultiPolygon first = {{{0, 0}, {10, 0}, {10, 10}, {0, 10}}};
-    ice::MultiPolygon second = {{{5, 0}, {15, 0}, {15, 10}, {5, 10}}};
-    auto intersection = kernel.booleanOp(first, second, ice::BooleanOperation::intersection);
+    openvlsi::GeometryKernel kernel;
+    openvlsi::MultiPolygon first = {{{0, 0}, {10, 0}, {10, 10}, {0, 10}}};
+    openvlsi::MultiPolygon second = {{{5, 0}, {15, 0}, {15, 10}, {5, 10}}};
+    auto intersection = kernel.booleanOp(first, second, openvlsi::BooleanOperation::intersection);
     CHECK(intersection.size() == 1);
-    CHECK(ice::GeometryKernel::bounds(intersection.front()).width == 5);
+    CHECK(openvlsi::GeometryKernel::bounds(intersection.front()).width == 5);
     CHECK(polygonArea(intersection.front()) == 50.0L);
-    auto united = kernel.booleanOp(first, second, ice::BooleanOperation::union_);
+    auto united = kernel.booleanOp(first, second, openvlsi::BooleanOperation::union_);
     CHECK(united.size() == 1);
     CHECK(polygonArea(united.front()) == 150.0L);
-    auto difference = kernel.booleanOp(first, second, ice::BooleanOperation::difference);
+    auto difference = kernel.booleanOp(first, second, openvlsi::BooleanOperation::difference);
     CHECK(difference.size() == 1);
     CHECK(polygonArea(difference.front()) == 50.0L);
-    auto exclusive = kernel.booleanOp(first, second, ice::BooleanOperation::xor_);
+    auto exclusive = kernel.booleanOp(first, second, openvlsi::BooleanOperation::xor_);
     CHECK(exclusive.size() == 2);
     long double exclusiveArea = 0.0L;
     for (const auto &polygon : exclusive)
@@ -1134,20 +1144,20 @@ TEST_CASE("geometry operations are deterministic and queryable") {
     auto expanded = kernel.offset(first, 2);
     CHECK(!expanded.empty());
 
-    ice::SpatialIndex index;
+    openvlsi::SpatialIndex index;
     index.insert(10, {0, 0, 10, 10});
     index.insert(20, {20, 20, 5, 5});
-    CHECK(index.query({5, 5, 2, 2}) == std::vector<ice::ObjectId>{10});
+    CHECK(index.query({5, 5, 2, 2}) == std::vector<openvlsi::ObjectId>{10});
     CHECK(index.query({10, 10, 2, 2}).empty());
 
-    ice::ArraySpec array{2, 1, 20, 0};
-    auto transformed = ice::transformArray(first, ice::Transform{100, 50, ice::Orientation::r0}, array);
+    openvlsi::ArraySpec array{2, 1, 20, 0};
+    auto transformed = openvlsi::transformArray(first, openvlsi::Transform{100, 50, openvlsi::Orientation::r0}, array);
     CHECK(transformed.size() == 2);
     CHECK(transformed[1].front().x == 120);
 }
 
 TEST_CASE("selection, cross-probing, and grid snapping are stable") {
-    ice::Project project;
+    openvlsi::Project project;
     project.identity = "selection";
     project.name = "selection";
     project.grid = 10;
@@ -1159,38 +1169,39 @@ TEST_CASE("selection, cross-probing, and grid snapping are stable") {
     CHECK(project.snap(5) == 10);
     CHECK(project.snap(-5) == 0);
 
-    ice::SelectionModel selection;
+    openvlsi::SelectionModel selection;
     selection.select(42, {7, 8});
-    CHECK(selection.primary() == std::optional<ice::ObjectId>{42});
-    CHECK((selection.related() == std::vector<ice::ObjectId>{7, 8}));
+    CHECK(selection.primary() == std::optional<openvlsi::ObjectId>{42});
+    CHECK((selection.related() == std::vector<openvlsi::ObjectId>{7, 8}));
     selection.clear();
     CHECK(!selection.primary().has_value());
     CHECK(selection.related().empty());
 }
 
 TEST_CASE("projects save as split directory files") {
-    const auto root = std::filesystem::temp_directory_path() / "ice-split-project-test";
+    const auto root = std::filesystem::temp_directory_path() / "openvlsi-split-project-test";
     std::filesystem::remove_all(root);
 
-    ice::Project project;
+    openvlsi::Project project;
     project.identity = "split-project";
     project.name = "split-project";
     project.packageDependencies = {"example.pdk"};
-    const auto layer = ice::addLayer(project, "Metal1", 8);
-    const auto schematic = ice::createSchematicCell(project, "amp", "example.pdk");
-    const auto textSchematic = ice::createTextSchematicCell(project, "spice_top", "example.pdk", ".title spice_top\n");
-    const auto layout = ice::createLayoutCell(project, "top", "example.pdk");
-    ice::addRectangle(project, layout, layer, {0, 0, 1000, 500});
-    ice::SimulationItem simulation;
+    const auto layer = openvlsi::addLayer(project, "Metal1", 8);
+    const auto schematic = openvlsi::createSchematicCell(project, "amp", "example.pdk");
+    const auto textSchematic =
+        openvlsi::createTextSchematicCell(project, "spice_top", "example.pdk", ".title spice_top\n");
+    const auto layout = openvlsi::createLayoutCell(project, "top", "example.pdk");
+    openvlsi::addRectangle(project, layout, layer, {0, 0, 1000, 500});
+    openvlsi::SimulationItem simulation;
     simulation.id = project.nextId();
     simulation.name = "tran1";
     simulation.schematic = schematic;
     project.simulations.emplace(simulation.id, simulation);
     const auto report = project.nextId();
-    project.reports.emplace(report, ice::ProjectReport{report, "compare", "scripts/compare.py"});
+    project.reports.emplace(report, openvlsi::ProjectReport{report, "compare", "scripts/compare.py"});
 
     project.save(root);
-    CHECK(std::filesystem::is_regular_file(root / "project.icepro"));
+    CHECK(std::filesystem::is_regular_file(root / "project.ovpro"));
     CHECK(std::filesystem::is_directory(root / "sch"));
     CHECK(std::filesystem::is_directory(root / "lay"));
     CHECK(std::filesystem::is_directory(root / "sim"));
@@ -1212,7 +1223,7 @@ TEST_CASE("projects save as split directory files") {
     CHECK(agentsText.find("useful circuit metrics") != std::string::npos);
     CHECK(agentsText.find("array of simulations") != std::string::npos);
     CHECK(agentsText.find("normal simulation for simplicity") != std::string::npos);
-    CHECK(agentsText.find("ice_doctor") != std::string::npos);
+    CHECK(agentsText.find("openvlsi_doctor") != std::string::npos);
     CHECK(agentsText.find("schematic_add_net") != std::string::npos);
     CHECK(agentsText.find("available signals") != std::string::npos);
     CHECK(agentsText.find("Do not guess an absolute PDK") != std::string::npos);
@@ -1223,18 +1234,18 @@ TEST_CASE("projects save as split directory files") {
     CHECK(agentsText.find("behavioral or RC approximation") != std::string::npos);
     CHECK(agentsText.find("zero crossings") != std::string::npos);
 
-    std::ifstream projectStream(root / "project.icepro");
+    std::ifstream projectStream(root / "project.ovpro");
     const std::string projectJson((std::istreambuf_iterator<char>(projectStream)), {});
     CHECK(projectJson.find("schematic_cells") == std::string::npos);
     CHECK(projectJson.find("layout_cells") == std::string::npos);
     CHECK(projectJson.find("simulations") == std::string::npos);
     CHECK(projectJson.find("\"simulation_scripts\"") != std::string::npos);
-    std::ifstream simulationFile(root / "sim" / "tran1.icesim");
+    std::ifstream simulationFile(root / "sim" / "tran1.ovsim");
     const std::string simulationJson((std::istreambuf_iterator<char>(simulationFile)), {});
     CHECK(simulationJson.find("reports") == std::string::npos);
     CHECK(std::filesystem::is_directory(root / "scripts"));
 
-    const auto loaded = ice::Project::load(root / "project.icepro");
+    const auto loaded = openvlsi::Project::load(root / "project.ovpro");
     CHECK(loaded.name == project.name);
     CHECK(loaded.schematicCells.contains(schematic));
     CHECK(loaded.schematicCells.contains(textSchematic));
@@ -1253,24 +1264,24 @@ TEST_CASE("projects save as split directory files") {
 }
 
 TEST_CASE("single-cell saves do not overwrite renamed files") {
-    const auto root = std::filesystem::temp_directory_path() / "ice-single-cell-collision-test";
+    const auto root = std::filesystem::temp_directory_path() / "openvlsi-single-cell-collision-test";
     std::filesystem::remove_all(root);
 
-    ice::Project project;
+    openvlsi::Project project;
     project.identity = "single-cell-collision";
     project.name = "single-cell-collision";
-    const auto renamed = ice::createSchematicCell(project, "alpha", "example.pdk");
+    const auto renamed = openvlsi::createSchematicCell(project, "alpha", "example.pdk");
     project.save(root);
 
     const auto read = [](const std::filesystem::path &path) {
         std::ifstream stream(path);
         return std::string((std::istreambuf_iterator<char>(stream)), {});
     };
-    const auto oldPath = root / "sch" / "alpha.icesch";
+    const auto oldPath = root / "sch" / "alpha.ovsch";
     project.schematicCells.at(renamed).name = "renamed";
     CHECK(project.saveCellFile(renamed) == oldPath);
 
-    const auto replacement = ice::createSchematicCell(project, "alpha", "example.pdk");
+    const auto replacement = openvlsi::createSchematicCell(project, "alpha", "example.pdk");
     const auto replacementPath = project.saveCellFile(replacement);
     CHECK(replacementPath != oldPath);
     CHECK(std::filesystem::is_regular_file(replacementPath));
@@ -1280,30 +1291,30 @@ TEST_CASE("single-cell saves do not overwrite renamed files") {
 }
 
 TEST_CASE("project saves one cell file at a time") {
-    const auto root = std::filesystem::temp_directory_path() / "ice-single-cell-save-test";
+    const auto root = std::filesystem::temp_directory_path() / "openvlsi-single-cell-save-test";
     std::filesystem::remove_all(root);
 
-    ice::Project project;
+    openvlsi::Project project;
     project.identity = "single-cell-save";
     project.name = "single-cell-save";
-    const auto schematic = ice::createSchematicCell(project, "amp", "example.pdk");
-    const auto otherSchematic = ice::createSchematicCell(project, "power", "example.pdk");
-    const auto layout = ice::createLayoutCell(project, "top", "example.pdk");
-    const auto procedural = ice::createProceduralLayout(project, "scripted", "example.pdk");
+    const auto schematic = openvlsi::createSchematicCell(project, "amp", "example.pdk");
+    const auto otherSchematic = openvlsi::createSchematicCell(project, "power", "example.pdk");
+    const auto layout = openvlsi::createLayoutCell(project, "top", "example.pdk");
+    const auto procedural = openvlsi::createProceduralLayout(project, "scripted", "example.pdk");
     project.save(root);
 
     const auto read = [](const std::filesystem::path &path) {
         std::ifstream stream(path);
         return std::string((std::istreambuf_iterator<char>(stream)), {});
     };
-    const auto otherPath = root / "sch" / "power.icesch";
-    const auto layoutPath = root / "lay" / "top.icelay";
+    const auto otherPath = root / "sch" / "power.ovsch";
+    const auto layoutPath = root / "lay" / "top.ovlay";
     const auto otherBefore = read(otherPath);
     const auto layoutBefore = read(layoutPath);
 
     project.schematicCells.at(schematic).name = "amp2";
     const auto schematicPath = project.saveCellFile(schematic);
-    CHECK(schematicPath == root / "sch" / "amp.icesch");
+    CHECK(schematicPath == root / "sch" / "amp.ovsch");
     CHECK(read(schematicPath).find("amp2") != std::string::npos);
     CHECK(read(otherPath) == otherBefore);
     CHECK(read(layoutPath) == layoutBefore);
@@ -1313,7 +1324,7 @@ TEST_CASE("project saves one cell file at a time") {
     CHECK(savedLayout == layoutPath);
     CHECK(read(savedLayout).find("top2") != std::string::npos);
     CHECK(read(otherPath) == otherBefore);
-    CHECK(read(root / "sch" / "amp.icesch").find("amp2") != std::string::npos);
+    CHECK(read(root / "sch" / "amp.ovsch").find("amp2") != std::string::npos);
 
     project.proceduralLayouts.at(procedural).script = "layout.rectangle(0, 0, 10, 10)\n";
     const auto savedProcedural = project.saveCellFile(procedural);
@@ -1321,39 +1332,39 @@ TEST_CASE("project saves one cell file at a time") {
     CHECK(read(savedProcedural).find("procedural_layout") != std::string::npos);
     CHECK(read(otherPath) == otherBefore);
 
-    const auto singleCellLoaded = ice::Project::load(root);
+    const auto singleCellLoaded = openvlsi::Project::load(root);
     CHECK(singleCellLoaded.schematicCells.contains(schematic));
     CHECK(singleCellLoaded.layoutCells.contains(layout));
     CHECK(singleCellLoaded.proceduralLayouts.contains(procedural));
 
-    const auto lateSchematic = ice::createSchematicCell(project, "late", "example.pdk");
+    const auto lateSchematic = openvlsi::createSchematicCell(project, "late", "example.pdk");
     const auto latePath = project.saveCellFile(lateSchematic);
     CHECK(std::filesystem::is_regular_file(latePath));
-    const auto lateLoaded = ice::Project::load(root);
+    const auto lateLoaded = openvlsi::Project::load(root);
     CHECK(lateLoaded.schematicCells.contains(lateSchematic));
 
     // A single-file save must update the revision used by the next full save.
     project.save(root);
-    CHECK(std::filesystem::is_regular_file(root / "sch" / "amp2.icesch"));
-    CHECK(!std::filesystem::exists(root / "sch" / "amp.icesch"));
-    CHECK(std::filesystem::is_regular_file(root / "lay" / "top2.icelay"));
+    CHECK(std::filesystem::is_regular_file(root / "sch" / "amp2.ovsch"));
+    CHECK(!std::filesystem::exists(root / "sch" / "amp.ovsch"));
+    CHECK(std::filesystem::is_regular_file(root / "lay" / "top2.ovlay"));
     CHECK(project.schematicCells.contains(otherSchematic));
 
-    CHECK_THROWS_AS(project.saveCellFile(999999), ice::ProjectError);
+    CHECK_THROWS_AS(project.saveCellFile(999999), openvlsi::ProjectError);
     std::filesystem::remove_all(root);
 }
 
 TEST_CASE("schematic instance parameters survive serialization") {
-    ice::Project project;
+    openvlsi::Project project;
     project.identity = "params";
     project.name = "params";
-    const auto cellId = ice::createSchematicCell(project, "top");
-    const auto symbolId = ice::addSymbol(project, cellId, "resistor");
-    const auto instanceId = ice::addSchematicInstance(project, cellId, symbolId, "R1", 0, 0);
+    const auto cellId = openvlsi::createSchematicCell(project, "top");
+    const auto symbolId = openvlsi::addSymbol(project, cellId, "resistor");
+    const auto instanceId = openvlsi::addSchematicInstance(project, cellId, symbolId, "R1", 0, 0);
     project.schematicCells.at(cellId).instances.at(instanceId).parameters.push_back({project.nextId(), "r", "1k"});
     CHECK(project.validate().empty());
     const auto serialized = project.serialize();
-    const auto roundTrip = ice::Project::deserialize(serialized);
+    const auto roundTrip = openvlsi::Project::deserialize(serialized);
     CHECK(roundTrip.serialize() == serialized);
     const auto &restored = roundTrip.schematicCells.at(cellId).instances.at(instanceId).parameters;
     CHECK(restored.size() == 1);
@@ -1362,24 +1373,24 @@ TEST_CASE("schematic instance parameters survive serialization") {
 }
 
 TEST_CASE("schematic icons update user schematic blocks in one schematic") {
-    ice::Project project;
+    openvlsi::Project project;
     project.identity = "schematic-icons";
     project.name = "schematic-icons";
-    const auto top = ice::createSchematicCell(project, "top");
-    const auto child = ice::createSchematicCell(project, "schematic01");
-    const auto otherChild = ice::createSchematicCell(project, "schematic02");
-    const auto other = ice::createSchematicCell(project, "other");
-    const auto textCell = ice::createTextSchematicCell(project, "netlist");
+    const auto top = openvlsi::createSchematicCell(project, "top");
+    const auto child = openvlsi::createSchematicCell(project, "schematic01");
+    const auto otherChild = openvlsi::createSchematicCell(project, "schematic02");
+    const auto other = openvlsi::createSchematicCell(project, "other");
+    const auto textCell = openvlsi::createTextSchematicCell(project, "netlist");
 
-    const auto block = ice::addSymbol(project, top, "schematic01", {}, child);
-    const auto blockCopy = ice::addSymbol(project, top, "schematic01 2", {}, child);
-    const auto otherBlock = ice::addSymbol(project, top, "schematic02", {}, otherChild);
-    const auto textBlock = ice::addSymbol(project, top, "netlist", {}, textCell);
-    const auto capacitor = ice::addSymbol(project, top, "Capacitor");
-    const auto remoteBlock = ice::addSymbol(project, other, "schematic01", {}, child);
+    const auto block = openvlsi::addSymbol(project, top, "schematic01", {}, child);
+    const auto blockCopy = openvlsi::addSymbol(project, top, "schematic01 2", {}, child);
+    const auto otherBlock = openvlsi::addSymbol(project, top, "schematic02", {}, otherChild);
+    const auto textBlock = openvlsi::addSymbol(project, top, "netlist", {}, textCell);
+    const auto capacitor = openvlsi::addSymbol(project, top, "Capacitor");
+    const auto remoteBlock = openvlsi::addSymbol(project, other, "schematic01", {}, child);
 
     const auto icon = std::string("<svg viewBox='0 0 10 10'><path d='M0 0h10'/></svg>");
-    ice::setSchematicSymbolArtwork(project, top, block, icon);
+    openvlsi::setSchematicSymbolArtwork(project, top, block, icon);
     CHECK(project.schematicCells.at(top).symbols.at(block).artwork == icon);
     CHECK(project.schematicCells.at(top).symbols.at(blockCopy).artwork == icon);
     CHECK(project.schematicCells.at(top).symbols.at(otherBlock).artwork.empty());
@@ -1387,63 +1398,63 @@ TEST_CASE("schematic icons update user schematic blocks in one schematic") {
     CHECK(project.schematicCells.at(other).symbols.at(remoteBlock).artwork.empty());
 
     // Primitive devices and text-only cells cannot receive a custom icon.
-    CHECK_THROWS_AS(ice::setSchematicSymbolArtwork(project, top, capacitor, icon), ice::ProjectError);
-    CHECK_THROWS_AS(ice::setSchematicSymbolArtwork(project, top, textBlock, icon), ice::ProjectError);
+    CHECK_THROWS_AS(openvlsi::setSchematicSymbolArtwork(project, top, capacitor, icon), openvlsi::ProjectError);
+    CHECK_THROWS_AS(openvlsi::setSchematicSymbolArtwork(project, top, textBlock, icon), openvlsi::ProjectError);
 
     // Namespace URIs are not external references, including with single quotes.
     const auto quotedIcon = std::string("<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 10'/>");
-    ice::setSchematicSymbolArtwork(project, top, block, quotedIcon);
+    openvlsi::setSchematicSymbolArtwork(project, top, block, quotedIcon);
     CHECK(project.schematicCells.at(top).symbols.at(block).artwork == quotedIcon);
 
-    CHECK_THROWS_AS(ice::setSchematicSymbolArtwork(project, top, block, "<svg><script>x</script></svg>"),
-                    ice::ProjectError);
-    CHECK_THROWS_AS(ice::setSchematicSymbolArtwork(project, top, 999999, icon), ice::ProjectError);
+    CHECK_THROWS_AS(openvlsi::setSchematicSymbolArtwork(project, top, block, "<svg><script>x</script></svg>"),
+                    openvlsi::ProjectError);
+    CHECK_THROWS_AS(openvlsi::setSchematicSymbolArtwork(project, top, 999999, icon), openvlsi::ProjectError);
 }
 
 TEST_CASE("hierarchical symbols keep their source schematic") {
-    ice::Project project;
+    openvlsi::Project project;
     project.identity = "hierarchy";
     project.name = "hierarchy";
-    const auto childCellId = ice::createSchematicCell(project, "child");
-    const auto parentCellId = ice::createSchematicCell(project, "parent");
-    const auto symbolId = ice::addSymbol(project, parentCellId, "child", {}, childCellId);
-    const auto instanceId = ice::addSchematicInstance(project, parentCellId, symbolId, "child1", 0, 0);
+    const auto childCellId = openvlsi::createSchematicCell(project, "child");
+    const auto parentCellId = openvlsi::createSchematicCell(project, "parent");
+    const auto symbolId = openvlsi::addSymbol(project, parentCellId, "child", {}, childCellId);
+    const auto instanceId = openvlsi::addSchematicInstance(project, parentCellId, symbolId, "child1", 0, 0);
     CHECK(project.validate().empty());
-    const auto roundTrip = ice::Project::deserialize(project.serialize());
+    const auto roundTrip = openvlsi::Project::deserialize(project.serialize());
     CHECK(roundTrip.schematicCells.at(parentCellId).symbols.at(symbolId).sourceCell == childCellId);
     CHECK(roundTrip.schematicCells.at(parentCellId).instances.contains(instanceId));
 }
 
 TEST_CASE("schematic and layout names are unique") {
-    ice::Project project;
+    openvlsi::Project project;
     project.identity = "unique-names";
     project.name = "unique-names";
 
-    const auto schematicId = ice::createSchematicCell(project, "top");
-    CHECK_THROWS_AS(ice::createSchematicCell(project, "top"), ice::ProjectError);
-    CHECK_THROWS_AS(ice::createTextSchematicCell(project, "top"), ice::ProjectError);
-    const auto textId = ice::createTextSchematicCell(project, "spice_top");
+    const auto schematicId = openvlsi::createSchematicCell(project, "top");
+    CHECK_THROWS_AS(openvlsi::createSchematicCell(project, "top"), openvlsi::ProjectError);
+    CHECK_THROWS_AS(openvlsi::createTextSchematicCell(project, "top"), openvlsi::ProjectError);
+    const auto textId = openvlsi::createTextSchematicCell(project, "spice_top");
     CHECK(textId != 0);
-    CHECK_THROWS_AS(ice::createTextSchematicCell(project, "spice_top"), ice::ProjectError);
+    CHECK_THROWS_AS(openvlsi::createTextSchematicCell(project, "spice_top"), openvlsi::ProjectError);
     CHECK(project.schematicCells.at(schematicId).name == "top");
 
-    const auto layoutId = ice::createLayoutCell(project, "layout_top");
-    CHECK_THROWS_AS(ice::createLayoutCell(project, "layout_top"), ice::ProjectError);
-    const auto proceduralId = ice::createProceduralLayout(project, "procedural_top");
-    CHECK_THROWS_AS(ice::createProceduralLayout(project, "procedural_top"), ice::ProjectError);
-    CHECK_THROWS_AS(ice::createLayoutCell(project, "procedural_top"), ice::ProjectError);
-    CHECK_THROWS_AS(ice::createProceduralLayout(project, "layout_top"), ice::ProjectError);
+    const auto layoutId = openvlsi::createLayoutCell(project, "layout_top");
+    CHECK_THROWS_AS(openvlsi::createLayoutCell(project, "layout_top"), openvlsi::ProjectError);
+    const auto proceduralId = openvlsi::createProceduralLayout(project, "procedural_top");
+    CHECK_THROWS_AS(openvlsi::createProceduralLayout(project, "procedural_top"), openvlsi::ProjectError);
+    CHECK_THROWS_AS(openvlsi::createLayoutCell(project, "procedural_top"), openvlsi::ProjectError);
+    CHECK_THROWS_AS(openvlsi::createProceduralLayout(project, "layout_top"), openvlsi::ProjectError);
     CHECK(project.layoutCells.at(layoutId).name == "layout_top");
     CHECK(project.proceduralLayouts.at(proceduralId).name == "procedural_top");
     CHECK(project.validate().empty());
 }
 
 TEST_CASE("text SPICE schematics survive serialization") {
-    ice::Project project;
+    openvlsi::Project project;
     project.identity = "spice-text";
     project.name = "spice-text";
     const auto cellId =
-        ice::createTextSchematicCell(project, "amp", "ihp.sg13g2", "* SPICE schematic: amp\n.title amp\n.end\n");
+        openvlsi::createTextSchematicCell(project, "amp", "ihp.sg13g2", "* SPICE schematic: amp\n.title amp\n.end\n");
     const auto &cell = project.schematicCells.at(cellId);
     CHECK(cell.textSchematic);
     CHECK(cell.spiceText.find(".title") != std::string::npos);
@@ -1451,36 +1462,36 @@ TEST_CASE("text SPICE schematics survive serialization") {
 
     project.schematicCells.at(cellId).spiceText =
         "* text circuit\nV1 in 0 1\nR1 in out 1k\n.tran 1u 1m\n.ac dec 10 1 1meg\n.end\n";
-    const auto netlist = ice::buildSimulationNetlist(project, cellId);
+    const auto netlist = openvlsi::buildSimulationNetlist(project, cellId);
     const std::vector<std::string> expectedNetlist = {"* text circuit", "V1 in 0 1", "R1 in out 1k"};
     CHECK(netlist == expectedNetlist);
 
     const auto serialized = project.serialize();
-    const auto roundTrip = ice::Project::deserialize(serialized);
+    const auto roundTrip = openvlsi::Project::deserialize(serialized);
     CHECK(roundTrip.serialize() == serialized);
     CHECK(roundTrip.schematicCells.at(cellId).textSchematic);
     CHECK(roundTrip.schematicCells.at(cellId).spiceText == cell.spiceText);
 }
 
 TEST_CASE("SystemVerilog schematics survive serialization") {
-    ice::Project project;
+    openvlsi::Project project;
     project.identity = "systemverilog";
     project.name = "systemverilog";
     const std::string source = "module counter(input logic clk, output logic q);\n"
                                "    always_ff @(posedge clk) q <= ~q;\n"
                                "endmodule\n";
-    const auto cellId = ice::createSystemVerilogCell(project, "counter", "ihp.sg13g2", source);
+    const auto cellId = openvlsi::createSystemVerilogCell(project, "counter", "ihp.sg13g2", source);
     const auto &cell = project.schematicCells.at(cellId);
     CHECK(cell.systemVerilogSchematic);
     CHECK(!cell.textSchematic);
     CHECK(cell.isTextSource());
     CHECK(cell.sourceText() == source);
     CHECK(project.validate().empty());
-    CHECK_THROWS_AS(ice::createSystemVerilogCell(project, "counter"), ice::ProjectError);
-    CHECK_THROWS_AS(ice::buildSimulationNetlist(project, cellId), ice::ProjectError);
+    CHECK_THROWS_AS(openvlsi::createSystemVerilogCell(project, "counter"), openvlsi::ProjectError);
+    CHECK_THROWS_AS(openvlsi::buildSimulationNetlist(project, cellId), openvlsi::ProjectError);
 
     const auto serialized = project.serialize();
-    const auto roundTrip = ice::Project::deserialize(serialized);
+    const auto roundTrip = openvlsi::Project::deserialize(serialized);
     CHECK(roundTrip.serialize() == serialized);
     CHECK(roundTrip.schematicCells.at(cellId).systemVerilogSchematic);
     CHECK(roundTrip.schematicCells.at(cellId).systemVerilogText == source);
@@ -1488,27 +1499,28 @@ TEST_CASE("SystemVerilog schematics survive serialization") {
 }
 
 TEST_CASE("a cell cannot be both SPICE text and SystemVerilog") {
-    ice::Project project;
+    openvlsi::Project project;
     project.identity = "mixed-source";
     project.name = "mixed-source";
-    const auto cellId = ice::createTextSchematicCell(project, "mixed", ice::genericPdkId, ".title mixed\n.end\n");
+    const auto cellId =
+        openvlsi::createTextSchematicCell(project, "mixed", openvlsi::genericPdkId, ".title mixed\n.end\n");
     project.schematicCells.at(cellId).systemVerilogSchematic = true;
     const auto diagnostics = project.validate();
     CHECK(std::any_of(diagnostics.begin(), diagnostics.end(),
-                      [](const ice::Diagnostic &diagnostic) { return diagnostic.code == "schematic.source"; }));
+                      [](const openvlsi::Diagnostic &diagnostic) { return diagnostic.code == "schematic.source"; }));
 }
 
 TEST_CASE("symbol default parameters are seeded without duplicates") {
-    ice::Project project;
+    openvlsi::Project project;
     project.identity = "defaults";
     project.name = "defaults";
-    const auto cellId = ice::createSchematicCell(project, "top");
-    const auto symbolId = ice::addSymbol(project, cellId, "Voltage Source");
-    const auto instanceId = ice::addSchematicInstance(project, cellId, symbolId, "V1", 0, 0);
+    const auto cellId = openvlsi::createSchematicCell(project, "top");
+    const auto symbolId = openvlsi::addSymbol(project, cellId, "Voltage Source");
+    const auto instanceId = openvlsi::addSchematicInstance(project, cellId, symbolId, "V1", 0, 0);
     auto &instance = project.schematicCells.at(cellId).instances.at(instanceId);
 
-    const std::vector<ice::Parameter> defaults = {{0, "voltage", "1"}, {0, "gain", "2"}};
-    CHECK(ice::seedDefaultParameters(project, instance, defaults) == 2);
+    const std::vector<openvlsi::Parameter> defaults = {{0, "voltage", "1"}, {0, "gain", "2"}};
+    CHECK(openvlsi::seedDefaultParameters(project, instance, defaults) == 2);
     CHECK(instance.parameters.size() == 2);
     CHECK(instance.parameters[0].id != 0);
     CHECK(instance.parameters[1].id != 0);
@@ -1516,12 +1528,12 @@ TEST_CASE("symbol default parameters are seeded without duplicates") {
     CHECK(instance.parameters[0].name == "voltage");
     CHECK(instance.parameters[0].value == "1");
     // Re-seeding keeps existing values and does not duplicate names.
-    CHECK(ice::seedDefaultParameters(project, instance, defaults) == 0);
+    CHECK(openvlsi::seedDefaultParameters(project, instance, defaults) == 0);
     CHECK(instance.parameters.size() == 2);
 }
 
 TEST_CASE("project ids stay unique when allocated before insertion") {
-    ice::Project project;
+    openvlsi::Project project;
     project.identity = "ids";
     project.name = "ids";
     const auto first = project.nextId();
@@ -1530,17 +1542,17 @@ TEST_CASE("project ids stay unique when allocated before insertion") {
 }
 
 TEST_CASE("repeated symbol instances get distinct symbol and pin ids") {
-    ice::Project project;
+    openvlsi::Project project;
     project.identity = "symbols";
     project.name = "symbols";
-    const auto cellId = ice::createSchematicCell(project, "top");
-    const auto symbolId = ice::addSymbol(project, cellId, "Voltage Source");
+    const auto cellId = openvlsi::createSchematicCell(project, "top");
+    const auto symbolId = openvlsi::addSymbol(project, cellId, "Voltage Source");
     auto &symbol = project.schematicCells.at(cellId).symbols.at(symbolId);
-    symbol.pins.push_back({project.nextId(), "+", 0, 32, ice::PinDirection::up});
-    symbol.pins.push_back({project.nextId(), "-", 0, -32, ice::PinDirection::down});
+    symbol.pins.push_back({project.nextId(), "+", 0, 32, openvlsi::PinDirection::up});
+    symbol.pins.push_back({project.nextId(), "-", 0, -32, openvlsi::PinDirection::down});
 
-    ice::addSchematicInstance(project, cellId, symbolId, "V1", 0, 0);
-    const auto second = ice::addSchematicInstance(project, cellId, symbolId, "V2", 0, 100);
+    openvlsi::addSchematicInstance(project, cellId, symbolId, "V1", 0, 0);
+    const auto second = openvlsi::addSchematicInstance(project, cellId, symbolId, "V2", 0, 100);
 
     const auto &placed = project.schematicCells.at(cellId);
     const auto &copy = placed.symbols.at(placed.instances.at(second).symbol);
@@ -1553,20 +1565,20 @@ TEST_CASE("repeated symbol instances get distinct symbol and pin ids") {
 }
 
 TEST_CASE("simulation graph axis limits are optional and survive serialization") {
-    ice::Project project;
+    openvlsi::Project project;
     project.identity = "graphs";
     project.name = "graphs";
     const auto simId = project.nextId();
-    ice::SimulationItem sim;
+    openvlsi::SimulationItem sim;
     sim.id = simId;
     sim.name = "tran";
     sim.use_initial_conditions = true;
     sim.captureSignals = "v(out), v(in)";
-    ice::SimulationGraph automatic;
+    openvlsi::SimulationGraph automatic;
     automatic.id = project.nextId();
     automatic.name = "auto";
     automatic.ySignals = {"v(out)"};
-    ice::SimulationGraph limited;
+    openvlsi::SimulationGraph limited;
     limited.id = project.nextId();
     limited.name = "limited";
     limited.xAxis = "v(in)";
@@ -1579,7 +1591,7 @@ TEST_CASE("simulation graph axis limits are optional and survive serialization")
     project.simulations.emplace(simId, sim);
 
     const auto serialized = project.serialize();
-    const auto roundTrip = ice::Project::deserialize(serialized);
+    const auto roundTrip = openvlsi::Project::deserialize(serialized);
     CHECK(roundTrip.simulations.at(simId).use_initial_conditions);
     CHECK(roundTrip.simulations.at(simId).captureSignals == "v(out), v(in)");
     const auto &graphs = roundTrip.simulations.at(simId).graphs;
@@ -1600,13 +1612,13 @@ TEST_CASE("simulation graph axis limits are optional and survive serialization")
 }
 
 TEST_CASE("geometry transforms match Qt rotation convention") {
-    const ice::Point point{10, 0};
-    CHECK((ice::Transform{0, 0, ice::Orientation::r0}.apply(point) == ice::Point{10, 0}));
-    CHECK((ice::Transform{0, 0, ice::Orientation::r90}.apply(point) == ice::Point{0, 10}));
-    CHECK((ice::Transform{0, 0, ice::Orientation::r180}.apply(point) == ice::Point{-10, 0}));
-    CHECK((ice::Transform{0, 0, ice::Orientation::r270}.apply(point) == ice::Point{0, -10}));
-    CHECK((ice::Transform{0, 0, ice::Orientation::m45}.apply(point) == ice::Point{0, 10}));
-    CHECK((ice::Transform{0, 0, ice::Orientation::m135}.apply(point) == ice::Point{0, -10}));
+    const openvlsi::Point point{10, 0};
+    CHECK((openvlsi::Transform{0, 0, openvlsi::Orientation::r0}.apply(point) == openvlsi::Point{10, 0}));
+    CHECK((openvlsi::Transform{0, 0, openvlsi::Orientation::r90}.apply(point) == openvlsi::Point{0, 10}));
+    CHECK((openvlsi::Transform{0, 0, openvlsi::Orientation::r180}.apply(point) == openvlsi::Point{-10, 0}));
+    CHECK((openvlsi::Transform{0, 0, openvlsi::Orientation::r270}.apply(point) == openvlsi::Point{0, -10}));
+    CHECK((openvlsi::Transform{0, 0, openvlsi::Orientation::m45}.apply(point) == openvlsi::Point{0, 10}));
+    CHECK((openvlsi::Transform{0, 0, openvlsi::Orientation::m135}.apply(point) == openvlsi::Point{0, -10}));
 }
 
 TEST_CASE("ngspice simulation is numeric-locale independent") {
@@ -1624,15 +1636,15 @@ TEST_CASE("ngspice simulation is numeric-locale independent") {
     if (!std::setlocale(LC_NUMERIC, "es_CL.UTF-8"))
         return;
 
-    ice::SimulationRequest request;
+    openvlsi::SimulationRequest request;
     request.analysis = "transient";
     request.step = 0.1e-6;
     request.stop = 2e-6;
     request.netlist = {"* locale RC", "V1 1 0 1", "R1 1 2 1.5k", "C1 2 0 0.5u"};
     request.probeSignals = {"2"};
-    ice::SimulationRunner runner;
+    openvlsi::SimulationRunner runner;
     const auto result = runner.run(request, std::chrono::seconds(5));
-    CHECK(result.state == ice::JobState::succeeded);
+    CHECK(result.state == openvlsi::JobState::succeeded);
     CHECK(result.traces.size() == 1);
     if (!result.traces.empty()) {
         CHECK(!result.time.empty());
@@ -1642,46 +1654,46 @@ TEST_CASE("ngspice simulation is numeric-locale independent") {
 }
 
 TEST_CASE("ngspice simulation reports missing netlists explicitly") {
-    ice::SimulationRequest request;
-    ice::SimulationRunner runner;
+    openvlsi::SimulationRequest request;
+    openvlsi::SimulationRunner runner;
     auto result = runner.run(request, std::chrono::seconds(1));
-    CHECK(result.state == ice::JobState::failed);
+    CHECK(result.state == openvlsi::JobState::failed);
     CHECK(result.error.find("netlist") != std::string::npos);
 
-    ice::SimulationRequest unsupported = request;
+    openvlsi::SimulationRequest unsupported = request;
     unsupported.netlist = {"* test", ".end"};
     unsupported.analysis = "unsupported-analysis";
     auto rejected = runner.run(unsupported, std::chrono::seconds(1));
-    CHECK(rejected.state == ice::JobState::failed);
+    CHECK(rejected.state == openvlsi::JobState::failed);
     CHECK(rejected.error.find("unsupported") != std::string::npos);
     CHECK(!rejected.input_fingerprint.empty());
 }
 
 TEST_CASE("ngspice initialization errors include simulator diagnostics") {
-    ice::SimulationRequest request;
+    openvlsi::SimulationRequest request;
     request.analysis = "transient";
     request.step = 1e-9;
     request.stop = 10e-9;
-    request.netlist = {"* missing model include", ".include \"/tmp/ice-does-not-exist-model-12345.lib\"", "V1 in 0 1",
-                       "R1 in out 1k", "C1 out 0 1p"};
-    ice::SimulationRunner runner;
+    request.netlist = {"* missing model include", ".include \"/tmp/openvlsi-does-not-exist-model-12345.lib\"",
+                       "V1 in 0 1", "R1 in out 1k", "C1 out 0 1p"};
+    openvlsi::SimulationRunner runner;
     const auto result = runner.run(request, std::chrono::seconds(5));
-    CHECK(result.state == ice::JobState::failed);
+    CHECK(result.state == openvlsi::JobState::failed);
     CHECK(result.error.find("include") != std::string::npos ||
-          result.error.find("ice-does-not-exist") != std::string::npos);
+          result.error.find("openvlsi-does-not-exist") != std::string::npos);
 }
 
 TEST_CASE("ngspice fetches the vectors named by the request signals") {
-    ice::SimulationRequest request;
+    openvlsi::SimulationRequest request;
     request.analysis = "transient";
     request.step = 1e-9;
     request.stop = 200e-9;
     request.netlist = {"* RC transient", "V1 N14 N16 DC 0 PULSE(0 1 1n 1n 1n 100n 200n)", "Resistor N14 N15 1k",
                        "Capacitor N15 N16 1n"};
     request.probeSignals = {"N15"};
-    ice::SimulationRunner runner;
+    openvlsi::SimulationRunner runner;
     auto result = runner.run(request, std::chrono::seconds(5));
-    CHECK(result.state == ice::JobState::succeeded);
+    CHECK(result.state == openvlsi::JobState::succeeded);
     CHECK(!result.time.empty());
     CHECK(result.traces.size() == 1);
     if (!result.traces.empty()) {
@@ -1692,43 +1704,43 @@ TEST_CASE("ngspice fetches the vectors named by the request signals") {
 }
 
 TEST_CASE("ngspice adapter supplies a title line for raw netlists") {
-    ice::SimulationRequest request;
+    openvlsi::SimulationRequest request;
     request.analysis = "transient";
     request.step = 1e-9;
     request.stop = 200e-9;
     request.netlist = {"V1 out 0 PULSE(0 1 1n 1n 1n 100n 200n)", "R1 out 0 1k"};
     request.probeSignals = {"out"};
-    ice::SimulationRunner runner;
+    openvlsi::SimulationRunner runner;
     const auto result = runner.run(request, std::chrono::seconds(5));
-    CHECK(result.state == ice::JobState::succeeded);
+    CHECK(result.state == openvlsi::JobState::succeeded);
     CHECK(result.traces.size() == 1);
     if (!result.traces.empty())
         CHECK(*std::max_element(result.traces.front().values.begin(), result.traces.front().values.end()) > 0.5);
 }
 
 TEST_CASE("a run with no resolvable signal names fails with a clear error") {
-    ice::SimulationRequest request;
+    openvlsi::SimulationRequest request;
     request.analysis = "transient";
     request.step = 1e-9;
     request.stop = 200e-9;
     request.netlist = {"* RC transient", "V1 N14 N16 DC 0 PULSE(0 1 1n 1n 1n 100n 200n)", "Resistor N14 N15 1k",
                        "Capacitor N15 N16 1n"};
     request.probeSignals = {"nope"};
-    ice::SimulationRunner runner;
+    openvlsi::SimulationRunner runner;
     auto result = runner.run(request, std::chrono::seconds(5));
-    CHECK(result.state == ice::JobState::failed);
+    CHECK(result.state == openvlsi::JobState::failed);
     CHECK(result.error.find("nope") != std::string::npos);
 }
 
 TEST_CASE("schematic netlist maps symbols, nets, and values to SPICE") {
-    ice::Project project;
+    openvlsi::Project project;
     project.identity = "net";
     project.name = "net";
-    const auto cellId = ice::createSchematicCell(project, "top");
+    const auto cellId = openvlsi::createSchematicCell(project, "top");
     auto &cell = project.schematicCells.at(cellId);
 
     auto makeSymbol = [&](const std::string &name, std::vector<std::string> pinNames) {
-        const auto symbolId = ice::addSymbol(project, cellId, name);
+        const auto symbolId = openvlsi::addSymbol(project, cellId, name);
         auto &symbol = cell.symbols.at(symbolId);
         for (const auto &pinName : pinNames) {
             const auto pinId = project.nextId();
@@ -1736,7 +1748,7 @@ TEST_CASE("schematic netlist maps symbols, nets, and values to SPICE") {
         }
         return symbolId;
     };
-    auto pinIdOf = [&](ice::ObjectId symbolId, std::size_t index) {
+    auto pinIdOf = [&](openvlsi::ObjectId symbolId, std::size_t index) {
         return cell.symbols.at(symbolId).pins.at(index).id;
     };
 
@@ -1745,29 +1757,29 @@ TEST_CASE("schematic netlist maps symbols, nets, and values to SPICE") {
     const auto groundId = makeSymbol("Ground", {"GND"});
     const auto weirdId = makeSymbol("Mystery Widget", {"a", "b"});
 
-    const auto source = ice::addSchematicInstance(project, cellId, sourceId, "V1", 0, 0);
-    const auto resistor = ice::addSchematicInstance(project, cellId, resistorId, "R1", 0, 0);
-    ice::addSchematicInstance(project, cellId, groundId, "GND1", 0, 0);
-    ice::addSchematicInstance(project, cellId, weirdId, "X1", 0, 0);
+    const auto source = openvlsi::addSchematicInstance(project, cellId, sourceId, "V1", 0, 0);
+    const auto resistor = openvlsi::addSchematicInstance(project, cellId, resistorId, "R1", 0, 0);
+    openvlsi::addSchematicInstance(project, cellId, groundId, "GND1", 0, 0);
+    openvlsi::addSchematicInstance(project, cellId, weirdId, "X1", 0, 0);
     cell.instances.at(source).parameters.push_back({project.nextId(), "value", "PULSE(0 1 1n 1n 1n 100n 200n)"});
     cell.instances.at(resistor).parameters.push_back({project.nextId(), "resistance", "2k"});
 
     const auto inductorId = makeSymbol("Inductor", {"1", "2"});
-    const auto inductor = ice::addSchematicInstance(project, cellId, inductorId, "L1", 0, 0);
+    const auto inductor = openvlsi::addSchematicInstance(project, cellId, inductorId, "L1", 0, 0);
     cell.instances.at(inductor).parameters.push_back({project.nextId(), "inductance", "3u"});
 
     // V1: + -> out, - -> 0 ; R1: 1 -> out, 2 -> 0 ; X1: a -> out, b -> 0.
     const auto netId = project.nextId();
     cell.nets.emplace(netId,
-                      ice::Net{netId, "out", {pinIdOf(sourceId, 0), pinIdOf(resistorId, 0), pinIdOf(weirdId, 0)}});
+                      openvlsi::Net{netId, "out", {pinIdOf(sourceId, 0), pinIdOf(resistorId, 0), pinIdOf(weirdId, 0)}});
     const auto groundNetId = project.nextId();
-    cell.nets.emplace(groundNetId, ice::Net{groundNetId,
-                                            "",
-                                            {pinIdOf(sourceId, 1), pinIdOf(resistorId, 1), pinIdOf(groundId, 0),
-                                             pinIdOf(weirdId, 1)}});
+    cell.nets.emplace(groundNetId, openvlsi::Net{groundNetId,
+                                                 "",
+                                                 {pinIdOf(sourceId, 1), pinIdOf(resistorId, 1), pinIdOf(groundId, 0),
+                                                  pinIdOf(weirdId, 1)}});
 
     std::vector<std::string> notes;
-    const auto netlist = ice::buildSchematicNetlist(project, cellId, &notes);
+    const auto netlist = openvlsi::buildSchematicNetlist(project, cellId, &notes);
     const auto joined = [&] {
         std::string text;
         for (const auto &line : netlist)
@@ -1794,35 +1806,35 @@ TEST_CASE("schematic netlist maps symbols, nets, and values to SPICE") {
 }
 
 TEST_CASE("schematic netlist emits transistor, diode, and subcircuit devices") {
-    ice::Project project;
+    openvlsi::Project project;
     project.identity = "active-netlist";
     project.name = "active-netlist";
-    const auto cellId = ice::createSchematicCell(project, "top");
+    const auto cellId = openvlsi::createSchematicCell(project, "top");
     auto &cell = project.schematicCells.at(cellId);
 
     const auto makeSymbol = [&](const std::string &name, std::initializer_list<const char *> pins) {
-        const auto symbolId = ice::addSymbol(project, cellId, name);
+        const auto symbolId = openvlsi::addSymbol(project, cellId, name);
         for (const auto *pinName : pins)
             cell.symbols.at(symbolId).pins.push_back({project.nextId(), pinName, 0, 0});
         return symbolId;
     };
-    const auto pinId = [&](ice::ObjectId symbolId, const std::string &name) {
+    const auto pinId = [&](openvlsi::ObjectId symbolId, const std::string &name) {
         for (const auto &pin : cell.symbols.at(symbolId).pins)
             if (pin.name == name)
                 return pin.id;
-        return ice::ObjectId{0};
+        return openvlsi::ObjectId{0};
     };
-    const auto makeNet = [&](const std::string &name, ice::ObjectId pin) {
+    const auto makeNet = [&](const std::string &name, openvlsi::ObjectId pin) {
         const auto netId = project.nextId();
-        cell.nets.emplace(netId, ice::Net{netId, name, {pin}});
+        cell.nets.emplace(netId, openvlsi::Net{netId, name, {pin}});
         return netId;
     };
-    const auto parameter = [&](ice::ObjectId instanceId, const std::string &name, const std::string &value) {
+    const auto parameter = [&](openvlsi::ObjectId instanceId, const std::string &name, const std::string &value) {
         cell.instances.at(instanceId).parameters.push_back({project.nextId(), name, value});
     };
 
     const auto nmosSymbol = makeSymbol("IHP NMOS 1.2V", {"G", "D", "S", "B"});
-    const auto nmos = ice::addSchematicInstance(project, cellId, nmosSymbol, "M1", 0, 0);
+    const auto nmos = openvlsi::addSchematicInstance(project, cellId, nmosSymbol, "M1", 0, 0);
     makeNet("d", pinId(nmosSymbol, "D"));
     makeNet("g", pinId(nmosSymbol, "G"));
     makeNet("s", pinId(nmosSymbol, "S"));
@@ -1833,7 +1845,7 @@ TEST_CASE("schematic netlist emits transistor, diode, and subcircuit devices") {
     parameter(nmos, "m", "1");
 
     const auto bjtSymbol = makeSymbol("IHP NPN HBT", {"B", "C", "E"});
-    const auto bjt = ice::addSchematicInstance(project, cellId, bjtSymbol, "Q1", 0, 0);
+    const auto bjt = openvlsi::addSchematicInstance(project, cellId, bjtSymbol, "Q1", 0, 0);
     makeNet("c", pinId(bjtSymbol, "C"));
     makeNet("base", pinId(bjtSymbol, "B"));
     makeNet("e", pinId(bjtSymbol, "E"));
@@ -1841,20 +1853,20 @@ TEST_CASE("schematic netlist emits transistor, diode, and subcircuit devices") {
     parameter(bjt, "m", "2");
 
     const auto diodeSymbol = makeSymbol("SKY130 Diode 5.5V", {"A", "K"});
-    const auto diode = ice::addSchematicInstance(project, cellId, diodeSymbol, "D1", 0, 0);
+    const auto diode = openvlsi::addSchematicInstance(project, cellId, diodeSymbol, "D1", 0, 0);
     makeNet("anode", pinId(diodeSymbol, "A"));
     makeNet("cathode", pinId(diodeSymbol, "K"));
     parameter(diode, "model", "sky130_fd_pr__diode_pw2nd_05v5");
 
     const auto opampSymbol = makeSymbol("Op Amp", {"+", "-", "OUT"});
-    const auto opamp = ice::addSchematicInstance(project, cellId, opampSymbol, "X1", 0, 0);
+    const auto opamp = openvlsi::addSchematicInstance(project, cellId, opampSymbol, "X1", 0, 0);
     makeNet("plus", pinId(opampSymbol, "+"));
     makeNet("minus", pinId(opampSymbol, "-"));
     makeNet("out", pinId(opampSymbol, "OUT"));
     parameter(opamp, "model", "OPAMP");
 
     const auto genericSymbol = makeSymbol("NMOS", {"G", "D", "S", "B"});
-    const auto generic = ice::addSchematicInstance(project, cellId, genericSymbol, "M2", 0, 0);
+    const auto generic = openvlsi::addSchematicInstance(project, cellId, genericSymbol, "M2", 0, 0);
     CHECK(generic != 0);
     makeNet("d2", pinId(genericSymbol, "D"));
     makeNet("g2", pinId(genericSymbol, "G"));
@@ -1862,7 +1874,7 @@ TEST_CASE("schematic netlist emits transistor, diode, and subcircuit devices") {
     makeNet("b2", pinId(genericSymbol, "B"));
 
     std::vector<std::string> notes;
-    const auto netlist = ice::buildSchematicNetlist(project, cellId, &notes);
+    const auto netlist = openvlsi::buildSchematicNetlist(project, cellId, &notes);
     std::string joined;
     for (const auto &line : netlist)
         joined += line + "\n";
@@ -1880,34 +1892,34 @@ TEST_CASE("schematic netlist emits transistor, diode, and subcircuit devices") {
 }
 
 TEST_CASE("PDK transistor netlist uses subcircuit calls") {
-    ice::Project project;
+    openvlsi::Project project;
     project.identity = "pdk-active-netlist";
     project.name = "pdk-active-netlist";
-    const auto cellId = ice::createSchematicCell(project, "top", "ihp-sg13g2");
+    const auto cellId = openvlsi::createSchematicCell(project, "top", "ihp-sg13g2");
     auto &cell = project.schematicCells.at(cellId);
 
     const auto makeSymbol = [&](const std::string &name, std::initializer_list<const char *> pins) {
-        const auto symbolId = ice::addSymbol(project, cellId, name);
+        const auto symbolId = openvlsi::addSymbol(project, cellId, name);
         for (const auto *pinName : pins)
             cell.symbols.at(symbolId).pins.push_back({project.nextId(), pinName, 0, 0});
         return symbolId;
     };
-    const auto pinId = [&](ice::ObjectId symbolId, const std::string &name) {
+    const auto pinId = [&](openvlsi::ObjectId symbolId, const std::string &name) {
         for (const auto &pin : cell.symbols.at(symbolId).pins)
             if (pin.name == name)
                 return pin.id;
-        return ice::ObjectId{0};
+        return openvlsi::ObjectId{0};
     };
-    const auto makeNet = [&](const std::string &name, ice::ObjectId pin) {
+    const auto makeNet = [&](const std::string &name, openvlsi::ObjectId pin) {
         const auto netId = project.nextId();
-        cell.nets.emplace(netId, ice::Net{netId, name, {pin}});
+        cell.nets.emplace(netId, openvlsi::Net{netId, name, {pin}});
     };
-    const auto parameter = [&](ice::ObjectId instanceId, const std::string &name, const std::string &value) {
+    const auto parameter = [&](openvlsi::ObjectId instanceId, const std::string &name, const std::string &value) {
         cell.instances.at(instanceId).parameters.push_back({project.nextId(), name, value});
     };
 
     const auto nmosSymbol = makeSymbol("IHP NMOS 1.2V", {"G", "D", "S", "B"});
-    const auto nmos = ice::addSchematicInstance(project, cellId, nmosSymbol, "M1", 0, 0);
+    const auto nmos = openvlsi::addSchematicInstance(project, cellId, nmosSymbol, "M1", 0, 0);
     makeNet("d", pinId(nmosSymbol, "D"));
     makeNet("g", pinId(nmosSymbol, "G"));
     makeNet("s", pinId(nmosSymbol, "S"));
@@ -1917,13 +1929,13 @@ TEST_CASE("PDK transistor netlist uses subcircuit calls") {
     parameter(nmos, "l", "0.13u");
 
     const auto bjtSymbol = makeSymbol("IHP NPN HBT", {"B", "C", "E"});
-    const auto bjt = ice::addSchematicInstance(project, cellId, bjtSymbol, "Q1", 0, 0);
+    const auto bjt = openvlsi::addSchematicInstance(project, cellId, bjtSymbol, "Q1", 0, 0);
     makeNet("c", pinId(bjtSymbol, "C"));
     makeNet("base", pinId(bjtSymbol, "B"));
     makeNet("e", pinId(bjtSymbol, "E"));
     parameter(bjt, "model", "npn13G2");
 
-    const auto netlist = ice::buildSchematicNetlist(project, cellId);
+    const auto netlist = openvlsi::buildSchematicNetlist(project, cellId);
     std::string joined;
     for (const auto &line : netlist)
         joined += line + "\n";
@@ -1934,28 +1946,28 @@ TEST_CASE("PDK transistor netlist uses subcircuit calls") {
     CHECK(joined.find("XQ1 c base e") != std::string::npos);
     // npn13G2 is declared as ".subckt npn13G2 c b e bn" when the IHP package is
     // installed, so the declared bulk node is emitted and grounded.
-    if (const auto nodes = ice::pdkSubcircuitNodes("ihp-sg13g2", "npn13G2")) {
+    if (const auto nodes = openvlsi::pdkSubcircuitNodes("ihp-sg13g2", "npn13G2")) {
         CHECK(nodes->size() == 4);
         CHECK(joined.find("XQ1 c base e 0 npn13G2") != std::string::npos);
     }
 }
 
 TEST_CASE("PDK bipolar subcircuits keep a declared substrate node") {
-    ice::Project project;
+    openvlsi::Project project;
     project.identity = "bjt-substrate";
     project.name = "bjt-substrate";
-    const auto cellId = ice::createSchematicCell(project, "top", "sky130A");
+    const auto cellId = openvlsi::createSchematicCell(project, "top", "sky130A");
     auto &cell = project.schematicCells.at(cellId);
 
     const auto addBjt = [&](const std::string &name, const std::string &symbolName,
                             std::initializer_list<const char *> pins) {
-        const auto symbolId = ice::addSymbol(project, cellId, symbolName);
+        const auto symbolId = openvlsi::addSymbol(project, cellId, symbolName);
         for (const auto *pinName : pins)
             cell.symbols.at(symbolId).pins.push_back({project.nextId(), pinName, 0, 0});
-        const auto instanceId = ice::addSchematicInstance(project, cellId, symbolId, name, 0, 0);
+        const auto instanceId = openvlsi::addSchematicInstance(project, cellId, symbolId, name, 0, 0);
         for (const auto &pin : cell.symbols.at(symbolId).pins) {
             const auto netId = project.nextId();
-            cell.nets.emplace(netId, ice::Net{netId, name + "_" + pin.name, {pin.id}});
+            cell.nets.emplace(netId, openvlsi::Net{netId, name + "_" + pin.name, {pin.id}});
         }
         cell.instances.at(instanceId).parameters.push_back({project.nextId(), "model", "sky130_bjt_model"});
     };
@@ -1963,7 +1975,7 @@ TEST_CASE("PDK bipolar subcircuits keep a declared substrate node") {
     addBjt("Q1", "SKY130 NPN 5.5V", {"B", "C", "E", "S"});
     addBjt("Q2", "SKY130 PNP 5.5V", {"B", "C", "E"});
 
-    const auto netlist = ice::buildSchematicNetlist(project, cellId);
+    const auto netlist = openvlsi::buildSchematicNetlist(project, cellId);
     std::string joined;
     for (const auto &line : netlist)
         joined += line + "\n";
@@ -1972,19 +1984,19 @@ TEST_CASE("PDK bipolar subcircuits keep a declared substrate node") {
 }
 
 TEST_CASE("MOS geometry follows the PDK scale option") {
-    ice::Project project;
+    openvlsi::Project project;
     project.identity = "mos-scale";
     project.name = "mos-scale";
-    const auto cellId = ice::createSchematicCell(project, "top", "sky130A");
+    const auto cellId = openvlsi::createSchematicCell(project, "top", "sky130A");
     auto &cell = project.schematicCells.at(cellId);
 
-    const auto symbolId = ice::addSymbol(project, cellId, "SKY130 NMOS 1.8V");
+    const auto symbolId = openvlsi::addSymbol(project, cellId, "SKY130 NMOS 1.8V");
     for (const auto *pinName : {"D", "G", "S", "B"})
         cell.symbols.at(symbolId).pins.push_back({project.nextId(), pinName, 0, 0});
-    const auto instanceId = ice::addSchematicInstance(project, cellId, symbolId, "M1", 0, 0);
+    const auto instanceId = openvlsi::addSchematicInstance(project, cellId, symbolId, "M1", 0, 0);
     for (const auto &pin : cell.symbols.at(symbolId).pins) {
         const auto netId = project.nextId();
-        cell.nets.emplace(netId, ice::Net{netId, "n_" + pin.name, {pin.id}});
+        cell.nets.emplace(netId, openvlsi::Net{netId, "n_" + pin.name, {pin.id}});
     }
     cell.instances.at(instanceId).parameters.push_back({project.nextId(), "model", "sky130_fd_pr__nfet_01v8"});
     cell.instances.at(instanceId).parameters.push_back({project.nextId(), "w", "10u"});
@@ -1997,7 +2009,8 @@ TEST_CASE("MOS geometry follows the PDK scale option") {
         return joined;
     };
     const auto netlist = [&](double scale) {
-        return join(ice::buildSchematicNetlist(project, cellId, nullptr, ice::SchematicNetlistMode::analog, scale));
+        return join(
+            openvlsi::buildSchematicNetlist(project, cellId, nullptr, openvlsi::SchematicNetlistMode::analog, scale));
     };
     // Without a scale option the value is emitted verbatim.
     CHECK(netlist(1.0).find("W=10u L=0.5u") != std::string::npos);
@@ -2013,42 +2026,42 @@ TEST_CASE("MOS geometry follows the PDK scale option") {
 }
 
 TEST_CASE("numbered port symbols still netlist as ports") {
-    ice::Project project;
+    openvlsi::Project project;
     project.identity = "numbered-ports";
     project.name = "numbered-ports";
-    const auto cellId = ice::createSchematicCell(project, "top", "generic");
+    const auto cellId = openvlsi::createSchematicCell(project, "top", "generic");
     auto &cell = project.schematicCells.at(cellId);
 
-    const auto inputId = ice::addSymbol(project, cellId, "Input");
+    const auto inputId = openvlsi::addSymbol(project, cellId, "Input");
     cell.symbols.at(inputId).pins.push_back({project.nextId(), "IN", 0, 0});
-    const auto secondId = ice::addSymbol(project, cellId, "Input 2");
+    const auto secondId = openvlsi::addSymbol(project, cellId, "Input 2");
     cell.symbols.at(secondId).pins.push_back({project.nextId(), "IN", 0, 0});
-    const auto supplyPort = ice::addSchematicInstance(project, cellId, inputId, "VDD", 0, 0);
-    const auto groundPort = ice::addSchematicInstance(project, cellId, secondId, "VSS", 0, 0);
+    const auto supplyPort = openvlsi::addSchematicInstance(project, cellId, inputId, "VDD", 0, 0);
+    const auto groundPort = openvlsi::addSchematicInstance(project, cellId, secondId, "VSS", 0, 0);
     CHECK(supplyPort != 0);
     CHECK(groundPort != 0);
-    const auto pinOf = [&](ice::ObjectId symbolId) { return cell.symbols.at(symbolId).pins.front().id; };
+    const auto pinOf = [&](openvlsi::ObjectId symbolId) { return cell.symbols.at(symbolId).pins.front().id; };
     CHECK(cell.symbols.at(inputId).pins.front().id != cell.symbols.at(secondId).pins.front().id);
-    ice::addNet(project, cellId, "VDD", {pinOf(inputId), pinOf(secondId)});
+    openvlsi::addNet(project, cellId, "VDD", {pinOf(inputId), pinOf(secondId)});
 
     std::vector<std::string> notes;
-    const auto netlist = ice::buildSchematicNetlist(project, cellId, &notes);
+    const auto netlist = openvlsi::buildSchematicNetlist(project, cellId, &notes);
     for (const auto &note : notes)
         CHECK(note.find("unsupported symbol") == std::string::npos);
 }
 
 TEST_CASE("placing a symbol twice gives each instance its own pins") {
-    ice::Project project;
+    openvlsi::Project project;
     project.identity = "symbol-clone";
     project.name = "symbol-clone";
-    const auto cellId = ice::createSchematicCell(project, "top", "generic");
+    const auto cellId = openvlsi::createSchematicCell(project, "top", "generic");
     auto &cell = project.schematicCells.at(cellId);
 
-    const auto symbolId = ice::addSymbol(project, cellId, "Resistor");
+    const auto symbolId = openvlsi::addSymbol(project, cellId, "Resistor");
     cell.symbols.at(symbolId).pins.push_back({project.nextId(), "1", 0, 0});
     cell.symbols.at(symbolId).pins.push_back({project.nextId(), "2", 0, 0});
-    const auto first = ice::addSchematicInstance(project, cellId, symbolId, "R1", 0, 0);
-    const auto second = ice::addSchematicInstance(project, cellId, symbolId, "R2", 0, 100);
+    const auto first = openvlsi::addSchematicInstance(project, cellId, symbolId, "R1", 0, 0);
+    const auto second = openvlsi::addSchematicInstance(project, cellId, symbolId, "R2", 0, 100);
     const auto firstSymbol = cell.instances.at(first).symbol;
     const auto secondSymbol = cell.instances.at(second).symbol;
     CHECK(firstSymbol != secondSymbol);
@@ -2057,50 +2070,50 @@ TEST_CASE("placing a symbol twice gives each instance its own pins") {
 }
 
 TEST_CASE("hierarchical schematic instances become subcircuits") {
-    ice::Project project;
+    openvlsi::Project project;
     project.identity = "hierarchy";
     project.name = "hierarchy";
 
-    const auto addSymbol = [&](ice::ObjectId cellId, const std::string &name,
+    const auto addSymbol = [&](openvlsi::ObjectId cellId, const std::string &name,
                                std::initializer_list<const char *> pins) {
-        const auto symbolId = ice::addSymbol(project, cellId, name);
+        const auto symbolId = openvlsi::addSymbol(project, cellId, name);
         auto &symbol = project.schematicCells.at(cellId).symbols.at(symbolId);
         for (const auto *pinName : pins)
             symbol.pins.push_back({project.nextId(), pinName, 0, 0});
         return symbolId;
     };
-    const auto pinIdOf = [&](ice::ObjectId cellId, ice::ObjectId symbolId, std::size_t index) {
+    const auto pinIdOf = [&](openvlsi::ObjectId cellId, openvlsi::ObjectId symbolId, std::size_t index) {
         return project.schematicCells.at(cellId).symbols.at(symbolId).pins.at(index).id;
     };
 
-    const auto childId = ice::createSchematicCell(project, "filter");
+    const auto childId = openvlsi::createSchematicCell(project, "filter");
     const auto inputId = addSymbol(childId, "Input", {"A"});
     const auto outputId = addSymbol(childId, "Output", {"Y"});
     const auto resistorId = addSymbol(childId, "Resistor", {"1", "2"});
-    const auto childInput = ice::addSchematicInstance(project, childId, inputId, "A", 0, 0);
-    const auto childOutput = ice::addSchematicInstance(project, childId, outputId, "Y", 0, 0);
-    const auto childResistor = ice::addSchematicInstance(project, childId, resistorId, "R1", 0, 0);
+    const auto childInput = openvlsi::addSchematicInstance(project, childId, inputId, "A", 0, 0);
+    const auto childOutput = openvlsi::addSchematicInstance(project, childId, outputId, "Y", 0, 0);
+    const auto childResistor = openvlsi::addSchematicInstance(project, childId, resistorId, "R1", 0, 0);
     project.schematicCells.at(childId)
         .instances.at(childResistor)
         .parameters.push_back({project.nextId(), "resistance", "2k"});
-    ice::addNet(project, childId, "", {pinIdOf(childId, inputId, 0), pinIdOf(childId, resistorId, 0)});
-    ice::addNet(project, childId, "", {pinIdOf(childId, outputId, 0), pinIdOf(childId, resistorId, 1)});
+    openvlsi::addNet(project, childId, "", {pinIdOf(childId, inputId, 0), pinIdOf(childId, resistorId, 0)});
+    openvlsi::addNet(project, childId, "", {pinIdOf(childId, outputId, 0), pinIdOf(childId, resistorId, 1)});
     CHECK(childInput != 0);
     CHECK(childOutput != 0);
 
-    const auto parentId = ice::createSchematicCell(project, "top");
+    const auto parentId = openvlsi::createSchematicCell(project, "top");
     const auto blockId = addSymbol(parentId, "filter", {"A", "Y"});
     project.schematicCells.at(parentId).symbols.at(blockId).sourceCell = childId;
     const auto sourceId = addSymbol(parentId, "Voltage Source", {"+", "-"});
-    const auto block = ice::addSchematicInstance(project, parentId, blockId, "X1", 0, 0);
-    const auto source = ice::addSchematicInstance(project, parentId, sourceId, "V1", 0, 0);
+    const auto block = openvlsi::addSchematicInstance(project, parentId, blockId, "X1", 0, 0);
+    const auto source = openvlsi::addSchematicInstance(project, parentId, sourceId, "V1", 0, 0);
     project.schematicCells.at(parentId).instances.at(source).parameters.push_back({project.nextId(), "value", "1"});
-    ice::addNet(project, parentId, "in", {pinIdOf(parentId, blockId, 0), pinIdOf(parentId, sourceId, 0)});
-    ice::addNet(project, parentId, "out", {pinIdOf(parentId, blockId, 1), pinIdOf(parentId, sourceId, 1)});
+    openvlsi::addNet(project, parentId, "in", {pinIdOf(parentId, blockId, 0), pinIdOf(parentId, sourceId, 0)});
+    openvlsi::addNet(project, parentId, "out", {pinIdOf(parentId, blockId, 1), pinIdOf(parentId, sourceId, 1)});
     CHECK(block != 0);
 
     std::vector<std::string> notes;
-    const auto netlist = ice::buildSchematicNetlist(project, parentId, &notes);
+    const auto netlist = openvlsi::buildSchematicNetlist(project, parentId, &notes);
     std::string joined;
     for (const auto &line : netlist)
         joined += line + "\n";
@@ -2114,46 +2127,47 @@ TEST_CASE("hierarchical schematic instances become subcircuits") {
 }
 
 TEST_CASE("schematic cell parameters flow into subcircuit params and instance overrides") {
-    ice::Project project;
+    openvlsi::Project project;
     project.identity = "hierarchy-params";
     project.name = "hierarchy-params";
 
-    const auto addSymbol = [&](ice::ObjectId cellId, const std::string &name,
+    const auto addSymbol = [&](openvlsi::ObjectId cellId, const std::string &name,
                                std::initializer_list<const char *> pins) {
-        const auto symbolId = ice::addSymbol(project, cellId, name);
+        const auto symbolId = openvlsi::addSymbol(project, cellId, name);
         auto &symbol = project.schematicCells.at(cellId).symbols.at(symbolId);
         for (const auto *pinName : pins)
             symbol.pins.push_back({project.nextId(), pinName, 0, 0});
         return symbolId;
     };
-    const auto pinIdOf = [&](ice::ObjectId cellId, ice::ObjectId symbolId, std::size_t index) {
+    const auto pinIdOf = [&](openvlsi::ObjectId cellId, openvlsi::ObjectId symbolId, std::size_t index) {
         return project.schematicCells.at(cellId).symbols.at(symbolId).pins.at(index).id;
     };
 
-    const auto childId = ice::createSchematicCell(project, "divider");
+    const auto childId = openvlsi::createSchematicCell(project, "divider");
     const auto inputId = addSymbol(childId, "Input", {"A"});
     const auto outputId = addSymbol(childId, "Output", {"Y"});
     const auto resistorId = addSymbol(childId, "Resistor", {"1", "2"});
     const auto capacitorId = addSymbol(childId, "Capacitor", {"1", "2"});
-    ice::addSchematicInstance(project, childId, inputId, "A", 0, 0);
-    ice::addSchematicInstance(project, childId, outputId, "Y", 0, 0);
-    const auto childResistor = ice::addSchematicInstance(project, childId, resistorId, "R1", 0, 0);
-    const auto childCapacitor = ice::addSchematicInstance(project, childId, capacitorId, "C1", 0, 0);
-    ice::setSchematicParameter(project, childId, childResistor, "resistance", "{R}");
-    ice::setSchematicParameter(project, childId, childCapacitor, "capacitance", "{C}");
-    ice::setSchematicCellParameter(project, childId, "R", "1k");
-    ice::setSchematicCellParameter(project, childId, "C", "1n");
-    ice::addNet(project, childId, "",
-                {pinIdOf(childId, inputId, 0), pinIdOf(childId, resistorId, 0), pinIdOf(childId, capacitorId, 1)});
-    ice::addNet(project, childId, "",
-                {pinIdOf(childId, resistorId, 1), pinIdOf(childId, capacitorId, 0), pinIdOf(childId, outputId, 0)});
+    openvlsi::addSchematicInstance(project, childId, inputId, "A", 0, 0);
+    openvlsi::addSchematicInstance(project, childId, outputId, "Y", 0, 0);
+    const auto childResistor = openvlsi::addSchematicInstance(project, childId, resistorId, "R1", 0, 0);
+    const auto childCapacitor = openvlsi::addSchematicInstance(project, childId, capacitorId, "C1", 0, 0);
+    openvlsi::setSchematicParameter(project, childId, childResistor, "resistance", "{R}");
+    openvlsi::setSchematicParameter(project, childId, childCapacitor, "capacitance", "{C}");
+    openvlsi::setSchematicCellParameter(project, childId, "R", "1k");
+    openvlsi::setSchematicCellParameter(project, childId, "C", "1n");
+    openvlsi::addNet(project, childId, "",
+                     {pinIdOf(childId, inputId, 0), pinIdOf(childId, resistorId, 0), pinIdOf(childId, capacitorId, 1)});
+    openvlsi::addNet(
+        project, childId, "",
+        {pinIdOf(childId, resistorId, 1), pinIdOf(childId, capacitorId, 0), pinIdOf(childId, outputId, 0)});
 
-    const auto parentId = ice::createSchematicCell(project, "top");
+    const auto parentId = openvlsi::createSchematicCell(project, "top");
     const auto blockId = addSymbol(parentId, "divider", {"A", "Y"});
     project.schematicCells.at(parentId).symbols.at(blockId).sourceCell = childId;
     const auto sourceId = addSymbol(parentId, "Voltage Source", {"+", "-"});
-    const auto block = ice::addSchematicInstance(project, parentId, blockId, "X1", 0, 0);
-    const auto source = ice::addSchematicInstance(project, parentId, sourceId, "V1", 0, 0);
+    const auto block = openvlsi::addSchematicInstance(project, parentId, blockId, "X1", 0, 0);
+    const auto source = openvlsi::addSchematicInstance(project, parentId, sourceId, "V1", 0, 0);
     REQUIRE(project.schematicCells.at(parentId).instances.at(block).parameters.size() == 2);
     CHECK(project.schematicCells.at(parentId).instances.at(block).parameters.front().name == "R");
     const auto instanceParameter = [&](const char *name) {
@@ -2164,24 +2178,24 @@ TEST_CASE("schematic cell parameters flow into subcircuit params and instance ov
     };
     // Unmodified seeded values follow later cell-default changes; explicit
     // overrides are preserved.
-    ice::setSchematicCellParameter(project, childId, "R", "3k");
+    openvlsi::setSchematicCellParameter(project, childId, "R", "3k");
     CHECK(instanceParameter("R") == "3k");
-    ice::setSchematicCellParameter(project, childId, "R", "1k");
+    openvlsi::setSchematicCellParameter(project, childId, "R", "1k");
     CHECK(instanceParameter("R") == "1k");
-    ice::setSchematicParameter(project, parentId, source, "value", "{VDD}");
+    openvlsi::setSchematicParameter(project, parentId, source, "value", "{VDD}");
     // The block starts with the child defaults; R is then overridden and C is
     // passed through unchanged.
-    ice::setSchematicParameter(project, parentId, block, "r", "2k");
-    ice::setSchematicCellParameter(project, childId, "R", "5k");
+    openvlsi::setSchematicParameter(project, parentId, block, "r", "2k");
+    openvlsi::setSchematicCellParameter(project, childId, "R", "5k");
     CHECK(instanceParameter("R") == "2k");
-    ice::setSchematicCellParameter(project, childId, "R", "1k");
+    openvlsi::setSchematicCellParameter(project, childId, "R", "1k");
     CHECK(instanceParameter("R") == "2k");
-    ice::setSchematicCellParameter(project, parentId, "VDD", "1.8");
-    ice::addNet(project, parentId, "in", {pinIdOf(parentId, blockId, 0), pinIdOf(parentId, sourceId, 0)});
-    ice::addNet(project, parentId, "out", {pinIdOf(parentId, blockId, 1), pinIdOf(parentId, sourceId, 1)});
+    openvlsi::setSchematicCellParameter(project, parentId, "VDD", "1.8");
+    openvlsi::addNet(project, parentId, "in", {pinIdOf(parentId, blockId, 0), pinIdOf(parentId, sourceId, 0)});
+    openvlsi::addNet(project, parentId, "out", {pinIdOf(parentId, blockId, 1), pinIdOf(parentId, sourceId, 1)});
 
     std::vector<std::string> notes;
-    const auto netlist = ice::buildSchematicNetlist(project, parentId, &notes);
+    const auto netlist = openvlsi::buildSchematicNetlist(project, parentId, &notes);
     std::string joined;
     for (const auto &line : netlist)
         joined += line + "\n";
@@ -2196,9 +2210,9 @@ TEST_CASE("schematic cell parameters flow into subcircuit params and instance ov
 
     // Extra parameters that a child does not declare are reported instead of
     // being silently emitted as invalid subcircuit arguments.
-    ice::setSchematicParameter(project, parentId, block, "bogus", "1");
+    openvlsi::setSchematicParameter(project, parentId, block, "bogus", "1");
     notes.clear();
-    const auto rejected = ice::buildSchematicNetlist(project, parentId, &notes);
+    const auto rejected = openvlsi::buildSchematicNetlist(project, parentId, &notes);
     joined.clear();
     for (const auto &line : rejected)
         joined += line + "\n";
@@ -2207,53 +2221,53 @@ TEST_CASE("schematic cell parameters flow into subcircuit params and instance ov
         return note.find("not declared by schematic") != std::string::npos;
     }));
 
-    CHECK(ice::removeSchematicCellParameter(project, childId, "C"));
-    CHECK(!ice::removeSchematicCellParameter(project, childId, "C"));
+    CHECK(openvlsi::removeSchematicCellParameter(project, childId, "C"));
+    CHECK(!openvlsi::removeSchematicCellParameter(project, childId, "C"));
 }
 
 TEST_CASE("Pin symbols define bidirectional schematic ports") {
-    ice::Project project;
+    openvlsi::Project project;
     project.identity = "pin-port";
     project.name = "pin-port";
 
-    const auto addSymbol = [&](ice::ObjectId cellId, const std::string &name,
+    const auto addSymbol = [&](openvlsi::ObjectId cellId, const std::string &name,
                                std::initializer_list<const char *> pins) {
-        const auto symbolId = ice::addSymbol(project, cellId, name);
+        const auto symbolId = openvlsi::addSymbol(project, cellId, name);
         auto &symbol = project.schematicCells.at(cellId).symbols.at(symbolId);
         for (const auto *pinName : pins)
             symbol.pins.push_back({project.nextId(), pinName, 0, 0});
         return symbolId;
     };
-    const auto pinIdOf = [&](ice::ObjectId cellId, ice::ObjectId symbolId, std::size_t index) {
+    const auto pinIdOf = [&](openvlsi::ObjectId cellId, openvlsi::ObjectId symbolId, std::size_t index) {
         return project.schematicCells.at(cellId).symbols.at(symbolId).pins.at(index).id;
     };
 
-    CHECK(ice::schematicPortKindForSymbol("Pin") == ice::SchematicPortKind::inout);
-    CHECK(ice::schematicPortKindForSymbol("Pin 2") == ice::SchematicPortKind::inout);
-    CHECK(ice::schematicPortKindForSymbol("Inout") == ice::SchematicPortKind::inout);
-    CHECK(ice::schematicPortKindForSymbol("Resistor") == ice::SchematicPortKind::none);
+    CHECK(openvlsi::schematicPortKindForSymbol("Pin") == openvlsi::SchematicPortKind::inout);
+    CHECK(openvlsi::schematicPortKindForSymbol("Pin 2") == openvlsi::SchematicPortKind::inout);
+    CHECK(openvlsi::schematicPortKindForSymbol("Inout") == openvlsi::SchematicPortKind::inout);
+    CHECK(openvlsi::schematicPortKindForSymbol("Resistor") == openvlsi::SchematicPortKind::none);
 
-    const auto cellId = ice::createSchematicCell(project, "pin_block");
+    const auto cellId = openvlsi::createSchematicCell(project, "pin_block");
     const auto pinSymbol = addSymbol(cellId, "Pin", {"PIN"});
     const auto resistorSymbol = addSymbol(cellId, "Resistor", {"1", "2"});
-    const auto pin = ice::addSchematicInstance(project, cellId, pinSymbol, "P1", 0, 0);
-    const auto resistor = ice::addSchematicInstance(project, cellId, resistorSymbol, "R1", 0, 0);
-    ice::setSchematicParameter(project, cellId, resistor, "resistance", "1k");
-    ice::addNet(
+    const auto pin = openvlsi::addSchematicInstance(project, cellId, pinSymbol, "P1", 0, 0);
+    const auto resistor = openvlsi::addSchematicInstance(project, cellId, resistorSymbol, "R1", 0, 0);
+    openvlsi::setSchematicParameter(project, cellId, resistor, "resistance", "1k");
+    openvlsi::addNet(
         project, cellId, "io",
         {pinIdOf(cellId, pinSymbol, 0), pinIdOf(cellId, resistorSymbol, 0), pinIdOf(cellId, resistorSymbol, 1)});
     CHECK(pin != 0);
 
-    const auto ports = ice::schematicPortInstances(project.schematicCells.at(cellId));
+    const auto ports = openvlsi::schematicPortInstances(project.schematicCells.at(cellId));
     REQUIRE(ports.size() == 1);
     CHECK(ports.front()->name == "P1");
-    const auto hierarchyPins = ice::hierarchicalSymbolPins(project.schematicCells.at(cellId));
+    const auto hierarchyPins = openvlsi::hierarchicalSymbolPins(project.schematicCells.at(cellId));
     REQUIRE(hierarchyPins.size() == 1);
     CHECK(hierarchyPins.front().name == "P1");
-    CHECK(hierarchyPins.front().direction == ice::PinDirection::left);
+    CHECK(hierarchyPins.front().direction == openvlsi::PinDirection::left);
 
     std::vector<std::string> notes;
-    const auto netlist = ice::buildSchematicNetlist(project, cellId, &notes);
+    const auto netlist = openvlsi::buildSchematicNetlist(project, cellId, &notes);
     std::string joined;
     for (const auto &line : netlist)
         joined += line + "\n";
@@ -2261,14 +2275,14 @@ TEST_CASE("Pin symbols define bidirectional schematic ports") {
     CHECK(joined.find("unsupported") == std::string::npos);
     CHECK(notes.empty());
 
-    const auto parentId = ice::createSchematicCell(project, "top");
-    const auto blockSymbol = ice::addHierarchicalSymbol(project, parentId, cellId);
+    const auto parentId = openvlsi::createSchematicCell(project, "top");
+    const auto blockSymbol = openvlsi::addHierarchicalSymbol(project, parentId, cellId);
     const auto &block = project.schematicCells.at(parentId).symbols.at(blockSymbol);
     CHECK(!block.artwork.empty());
     CHECK(block.artwork.find("<svg") != std::string::npos);
     CHECK(block.artwork.find("pin_block") != std::string::npos);
-    ice::addSchematicInstance(project, parentId, blockSymbol, "X1", 0, 0);
-    const auto parentNetlist = ice::buildSchematicNetlist(project, parentId);
+    openvlsi::addSchematicInstance(project, parentId, blockSymbol, "X1", 0, 0);
+    const auto parentNetlist = openvlsi::buildSchematicNetlist(project, parentId);
     joined.clear();
     for (const auto &line : parentNetlist)
         joined += line + "\n";
@@ -2278,49 +2292,49 @@ TEST_CASE("Pin symbols define bidirectional schematic ports") {
 }
 
 TEST_CASE("hierarchical instances connect by port name, not symbol pin order") {
-    ice::Project project;
+    openvlsi::Project project;
     project.identity = "hierarchy-order";
     project.name = "hierarchy-order";
 
-    const auto addSymbol = [&](ice::ObjectId cellId, const std::string &name,
+    const auto addSymbol = [&](openvlsi::ObjectId cellId, const std::string &name,
                                std::initializer_list<const char *> pins) {
-        const auto symbolId = ice::addSymbol(project, cellId, name);
+        const auto symbolId = openvlsi::addSymbol(project, cellId, name);
         auto &symbol = project.schematicCells.at(cellId).symbols.at(symbolId);
         for (const auto *pinName : pins)
             symbol.pins.push_back({project.nextId(), pinName, 0, 0});
         return symbolId;
     };
-    const auto pinIdOf = [&](ice::ObjectId cellId, ice::ObjectId symbolId, std::size_t index) {
+    const auto pinIdOf = [&](openvlsi::ObjectId cellId, openvlsi::ObjectId symbolId, std::size_t index) {
         return project.schematicCells.at(cellId).symbols.at(symbolId).pins.at(index).id;
     };
 
     // Child ports in subcircuit order: A (y=100) then B (y=0).
-    const auto childId = ice::createSchematicCell(project, "block");
+    const auto childId = openvlsi::createSchematicCell(project, "block");
     const auto inputA = addSymbol(childId, "Input", {"IN"});
     const auto inputB = addSymbol(childId, "Input 2", {"IN"});
     const auto resistorId = addSymbol(childId, "Resistor", {"1", "2"});
-    ice::addSchematicInstance(project, childId, inputA, "A", 0, 100);
-    ice::addSchematicInstance(project, childId, inputB, "B", 0, 0);
-    const auto childResistor = ice::addSchematicInstance(project, childId, resistorId, "R1", 0, 0);
+    openvlsi::addSchematicInstance(project, childId, inputA, "A", 0, 100);
+    openvlsi::addSchematicInstance(project, childId, inputB, "B", 0, 0);
+    const auto childResistor = openvlsi::addSchematicInstance(project, childId, resistorId, "R1", 0, 0);
     project.schematicCells.at(childId)
         .instances.at(childResistor)
         .parameters.push_back({project.nextId(), "resistance", "1k"});
-    ice::addNet(project, childId, "", {pinIdOf(childId, inputA, 0), pinIdOf(childId, resistorId, 0)});
-    ice::addNet(project, childId, "", {pinIdOf(childId, inputB, 0), pinIdOf(childId, resistorId, 1)});
+    openvlsi::addNet(project, childId, "", {pinIdOf(childId, inputA, 0), pinIdOf(childId, resistorId, 0)});
+    openvlsi::addNet(project, childId, "", {pinIdOf(childId, inputB, 0), pinIdOf(childId, resistorId, 1)});
 
     // The parent symbol declares its pins in the opposite order (B, A).
-    const auto parentId = ice::createSchematicCell(project, "top");
+    const auto parentId = openvlsi::createSchematicCell(project, "top");
     const auto blockId = addSymbol(parentId, "block", {"B", "A"});
     project.schematicCells.at(parentId).symbols.at(blockId).sourceCell = childId;
     const auto sourceId = addSymbol(parentId, "Voltage Source", {"+", "-"});
-    ice::addSchematicInstance(project, parentId, blockId, "X1", 0, 0);
-    const auto source = ice::addSchematicInstance(project, parentId, sourceId, "V1", 0, 0);
+    openvlsi::addSchematicInstance(project, parentId, blockId, "X1", 0, 0);
+    const auto source = openvlsi::addSchematicInstance(project, parentId, sourceId, "V1", 0, 0);
     project.schematicCells.at(parentId).instances.at(source).parameters.push_back({project.nextId(), "voltage", "1"});
-    ice::addNet(project, parentId, "na", {pinIdOf(parentId, blockId, 1), pinIdOf(parentId, sourceId, 0)});
-    ice::addNet(project, parentId, "nb", {pinIdOf(parentId, blockId, 0), pinIdOf(parentId, sourceId, 1)});
+    openvlsi::addNet(project, parentId, "na", {pinIdOf(parentId, blockId, 1), pinIdOf(parentId, sourceId, 0)});
+    openvlsi::addNet(project, parentId, "nb", {pinIdOf(parentId, blockId, 0), pinIdOf(parentId, sourceId, 1)});
 
     std::vector<std::string> notes;
-    const auto netlist = ice::buildSchematicNetlist(project, parentId, &notes);
+    const auto netlist = openvlsi::buildSchematicNetlist(project, parentId, &notes);
     std::string joined;
     for (const auto &line : netlist)
         joined += line + "\n";
@@ -2334,68 +2348,68 @@ TEST_CASE("hierarchical instances connect by port name, not symbol pin order") {
 }
 
 TEST_CASE("hierarchical symbol pins follow the subcircuit port order") {
-    ice::Project project;
+    openvlsi::Project project;
     project.identity = "hierarchy-pins";
     project.name = "hierarchy-pins";
 
-    const auto addSymbol = [&](ice::ObjectId cellId, const std::string &name,
+    const auto addSymbol = [&](openvlsi::ObjectId cellId, const std::string &name,
                                std::initializer_list<const char *> pins) {
-        const auto symbolId = ice::addSymbol(project, cellId, name);
+        const auto symbolId = openvlsi::addSymbol(project, cellId, name);
         auto &symbol = project.schematicCells.at(cellId).symbols.at(symbolId);
         for (const auto *pinName : pins)
             symbol.pins.push_back({project.nextId(), pinName, 0, 0});
         return symbolId;
     };
-    const auto childId = ice::createSchematicCell(project, "cell");
+    const auto childId = openvlsi::createSchematicCell(project, "cell");
     const auto inputB = addSymbol(childId, "Input", {"IN"});
     const auto inputA = addSymbol(childId, "Input 2", {"IN"});
     const auto outputId = addSymbol(childId, "Output", {"OUT"});
-    ice::addSchematicInstance(project, childId, inputB, "B", 0, 0);
-    ice::addSchematicInstance(project, childId, inputA, "A", 0, 100);
-    ice::addSchematicInstance(project, childId, outputId, "Y", 0, 50);
+    openvlsi::addSchematicInstance(project, childId, inputB, "B", 0, 0);
+    openvlsi::addSchematicInstance(project, childId, inputA, "A", 0, 100);
+    openvlsi::addSchematicInstance(project, childId, outputId, "Y", 0, 50);
 
-    const auto pins = ice::hierarchicalSymbolPins(project.schematicCells.at(childId));
+    const auto pins = openvlsi::hierarchicalSymbolPins(project.schematicCells.at(childId));
     CHECK(pins.size() == 3);
     if (pins.size() != 3)
         return;
     CHECK(pins[0].name == "A");
     CHECK(pins[1].name == "B");
     CHECK(pins[2].name == "Y");
-    CHECK(pins[0].direction == ice::PinDirection::left);
-    CHECK(pins[1].direction == ice::PinDirection::left);
-    CHECK(pins[2].direction == ice::PinDirection::right);
+    CHECK(pins[0].direction == openvlsi::PinDirection::left);
+    CHECK(pins[1].direction == openvlsi::PinDirection::left);
+    CHECK(pins[2].direction == openvlsi::PinDirection::right);
     CHECK(pins[0].x < pins[2].x);
 }
 
 TEST_CASE("layout ports require a layer") {
-    ice::Project project;
+    openvlsi::Project project;
     project.identity = "port-layer";
     project.name = "port-layer";
-    const auto layout = ice::createLayoutCell(project, "top");
-    CHECK_THROWS_AS(ice::addPort(project, layout, "VIN", 0, ice::Rect{0, 0, 400, 400}, ice::PortDirection::input,
-                                 ice::PortSide::left),
-                    ice::ProjectError);
+    const auto layout = openvlsi::createLayoutCell(project, "top");
+    CHECK_THROWS_AS(openvlsi::addPort(project, layout, "VIN", 0, openvlsi::Rect{0, 0, 400, 400},
+                                      openvlsi::PortDirection::input, openvlsi::PortSide::left),
+                    openvlsi::ProjectError);
 }
 
 TEST_CASE("layout ports and nets round-trip with required metadata") {
-    ice::Project project;
+    openvlsi::Project project;
     project.identity = "pins";
     project.name = "pins";
-    const auto layer = ice::addLayer(project, "Metal1", 8);
-    const auto layout = ice::createLayoutCell(project, "top");
-    const auto net = ice::createLayoutNet(project, layout, "VIN");
-    const auto port = ice::addPort(project, layout, "VIN", layer, {0, 0, 400, 400}, ice::PortDirection::input,
-                                   ice::PortSide::left, net, "VIN");
+    const auto layer = openvlsi::addLayer(project, "Metal1", 8);
+    const auto layout = openvlsi::createLayoutCell(project, "top");
+    const auto net = openvlsi::createLayoutNet(project, layout, "VIN");
+    const auto port = openvlsi::addPort(project, layout, "VIN", layer, {0, 0, 400, 400}, openvlsi::PortDirection::input,
+                                        openvlsi::PortSide::left, net, "VIN");
     CHECK(project.validate().empty());
 
     const auto &stored = project.layoutCells.at(layout).ports.at(port);
     CHECK(stored.layer == layer);
     CHECK(stored.name == "VIN");
-    CHECK(stored.direction == ice::PortDirection::input);
-    CHECK(stored.side == ice::PortSide::left);
+    CHECK(stored.direction == openvlsi::PortDirection::input);
+    CHECK(stored.side == openvlsi::PortSide::left);
     CHECK(stored.net == net);
     CHECK(stored.label == "VIN");
-    CHECK_THROWS_AS(ice::addPort(project, layout, "vin", layer, {0, 0, 100, 100}), ice::ProjectError);
+    CHECK_THROWS_AS(openvlsi::addPort(project, layout, "vin", layer, {0, 0, 100, 100}), openvlsi::ProjectError);
 
     const auto serialized = project.serialize();
     auto oldSchema = serialized;
@@ -2403,37 +2417,37 @@ TEST_CASE("layout ports and nets round-trip with required metadata") {
     CHECK(version != std::string::npos);
     if (version != std::string::npos)
         oldSchema.replace(version, std::string("\"schema_version\": 2").size(), "\"schema_version\": 1");
-    CHECK_THROWS_AS(ice::Project::deserialize(oldSchema), ice::ProjectError);
-    const auto roundTrip = ice::Project::deserialize(serialized);
+    CHECK_THROWS_AS(openvlsi::Project::deserialize(oldSchema), openvlsi::ProjectError);
+    const auto roundTrip = openvlsi::Project::deserialize(serialized);
     const auto &roundTripPort = roundTrip.layoutCells.at(layout).ports.at(port);
     CHECK(roundTripPort.layer == layer);
     CHECK(roundTripPort.name == "VIN");
-    CHECK(roundTripPort.direction == ice::PortDirection::input);
-    CHECK(roundTripPort.side == ice::PortSide::left);
+    CHECK(roundTripPort.direction == openvlsi::PortDirection::input);
+    CHECK(roundTripPort.side == openvlsi::PortSide::left);
     CHECK(roundTripPort.net == net);
     CHECK(roundTrip.layoutCells.at(layout).nets.at(net).name == "VIN");
 
-    ice::movePort(project, layout, port, 100, 200);
+    openvlsi::movePort(project, layout, port, 100, 200);
     CHECK(project.layoutCells.at(layout).ports.at(port).rectangle.x == 100);
-    ice::resizePort(project, layout, port, {100, 200, 800, 600});
+    openvlsi::resizePort(project, layout, port, {100, 200, 800, 600});
     CHECK(project.layoutCells.at(layout).ports.at(port).rectangle.width == 800);
-    ice::assignPortNet(project, layout, port, 0);
+    openvlsi::assignPortNet(project, layout, port, 0);
     CHECK(project.layoutCells.at(layout).ports.at(port).net == 0);
-    ice::assignPortNet(project, layout, port, net);
+    openvlsi::assignPortNet(project, layout, port, net);
     CHECK(project.layoutCells.at(layout).ports.at(port).net == net);
-    ice::removePort(project, layout, port);
+    openvlsi::removePort(project, layout, port);
     CHECK(project.layoutCells.at(layout).ports.empty());
 }
 
 TEST_CASE("waveform and current source symbols generate SPICE source expressions") {
-    ice::Project project;
+    openvlsi::Project project;
     project.identity = "sources";
     project.name = "sources";
-    const auto cellId = ice::createSchematicCell(project, "top");
+    const auto cellId = openvlsi::createSchematicCell(project, "top");
     auto &cell = project.schematicCells.at(cellId);
 
     auto addSource = [&](const std::string &name) {
-        const auto symbolId = ice::addSymbol(project, cellId, name);
+        const auto symbolId = openvlsi::addSymbol(project, cellId, name);
         auto &symbol = cell.symbols.at(symbolId);
         for (const auto *pinName : {"+", "-"}) {
             const auto pinId = project.nextId();
@@ -2441,10 +2455,10 @@ TEST_CASE("waveform and current source symbols generate SPICE source expressions
         }
         return symbolId;
     };
-    auto pinIdOf = [&](ice::ObjectId symbolId, std::size_t index) {
+    auto pinIdOf = [&](openvlsi::ObjectId symbolId, std::size_t index) {
         return cell.symbols.at(symbolId).pins.at(index).id;
     };
-    auto setParameters = [&](ice::ObjectId instanceId,
+    auto setParameters = [&](openvlsi::ObjectId instanceId,
                              std::initializer_list<std::pair<std::string, std::string>> values) {
         for (const auto &[name, value] : values)
             cell.instances.at(instanceId).parameters.push_back({project.nextId(), name, value});
@@ -2457,12 +2471,12 @@ TEST_CASE("waveform and current source symbols generate SPICE source expressions
     const auto sineDefaultsId = addSource("Sine Voltage Source");
     const auto groundId = addSource("Ground");
 
-    ice::addSchematicInstance(project, cellId, groundId, "GND1", 0, 0);
-    const auto pulse = ice::addSchematicInstance(project, cellId, pulseId, "V1", 0, 0);
-    const auto sine = ice::addSchematicInstance(project, cellId, sineId, "V2", 0, 0);
-    const auto current = ice::addSchematicInstance(project, cellId, currentId, "I1", 0, 0);
-    ice::addSchematicInstance(project, cellId, pulseDefaultsId, "V3", 0, 0);
-    ice::addSchematicInstance(project, cellId, sineDefaultsId, "V4", 0, 0);
+    openvlsi::addSchematicInstance(project, cellId, groundId, "GND1", 0, 0);
+    const auto pulse = openvlsi::addSchematicInstance(project, cellId, pulseId, "V1", 0, 0);
+    const auto sine = openvlsi::addSchematicInstance(project, cellId, sineId, "V2", 0, 0);
+    const auto current = openvlsi::addSchematicInstance(project, cellId, currentId, "I1", 0, 0);
+    openvlsi::addSchematicInstance(project, cellId, pulseDefaultsId, "V3", 0, 0);
+    openvlsi::addSchematicInstance(project, cellId, sineDefaultsId, "V4", 0, 0);
     setParameters(pulse, {{"initial_voltage", "-1"},
                           {"pulsed_voltage", "2.5"},
                           {"delay_time", "1u"},
@@ -2480,18 +2494,18 @@ TEST_CASE("waveform and current source symbols generate SPICE source expressions
     setParameters(current, {{"current", "7m"}});
 
     const auto outNet = project.nextId();
-    cell.nets.emplace(outNet, ice::Net{outNet,
-                                       "out",
-                                       {pinIdOf(pulseId, 0), pinIdOf(sineId, 0), pinIdOf(currentId, 0),
-                                        pinIdOf(pulseDefaultsId, 0), pinIdOf(sineDefaultsId, 0)}});
+    cell.nets.emplace(outNet, openvlsi::Net{outNet,
+                                            "out",
+                                            {pinIdOf(pulseId, 0), pinIdOf(sineId, 0), pinIdOf(currentId, 0),
+                                             pinIdOf(pulseDefaultsId, 0), pinIdOf(sineDefaultsId, 0)}});
     const auto groundNet = project.nextId();
     cell.nets.emplace(groundNet,
-                      ice::Net{groundNet,
-                               "",
-                               {pinIdOf(pulseId, 1), pinIdOf(sineId, 1), pinIdOf(currentId, 1),
-                                pinIdOf(pulseDefaultsId, 1), pinIdOf(sineDefaultsId, 1), pinIdOf(groundId, 0)}});
+                      openvlsi::Net{groundNet,
+                                    "",
+                                    {pinIdOf(pulseId, 1), pinIdOf(sineId, 1), pinIdOf(currentId, 1),
+                                     pinIdOf(pulseDefaultsId, 1), pinIdOf(sineDefaultsId, 1), pinIdOf(groundId, 0)}});
 
-    const auto netlist = ice::buildSchematicNetlist(project, cellId);
+    const auto netlist = openvlsi::buildSchematicNetlist(project, cellId);
     const auto joined = [&] {
         std::string text;
         for (const auto &line : netlist)
@@ -2504,18 +2518,18 @@ TEST_CASE("waveform and current source symbols generate SPICE source expressions
     // Missing parameters fall back to the symbol's documented defaults.
     CHECK(joined.find("V3 out 0 PULSE(0 1 0 1u 1u 0.5 1 0)") != std::string::npos);
     CHECK(joined.find("V4 out 0 SIN(0 1 1 0 0 0)") != std::string::npos);
-    CHECK(ice::spiceElementForSymbol("Current Source") == 'I');
-    CHECK(ice::spiceElementForSymbol("Pulse Voltage Source") == 'V');
-    CHECK(ice::spiceElementForSymbol("Sine Voltage Source") == 'V');
-    CHECK(ice::spiceElementForSymbol("IHP NMOS 1.2V") == 'M');
-    CHECK(ice::spiceElementForSymbol("SKY130 PMOS 1.8V") == 'M');
-    CHECK(ice::spiceElementForSymbol("IHP NPN HBT") == 'Q');
-    CHECK(ice::spiceElementForSymbol("Op Amp") == 'X');
+    CHECK(openvlsi::spiceElementForSymbol("Current Source") == 'I');
+    CHECK(openvlsi::spiceElementForSymbol("Pulse Voltage Source") == 'V');
+    CHECK(openvlsi::spiceElementForSymbol("Sine Voltage Source") == 'V');
+    CHECK(openvlsi::spiceElementForSymbol("IHP NMOS 1.2V") == 'M');
+    CHECK(openvlsi::spiceElementForSymbol("SKY130 PMOS 1.8V") == 'M');
+    CHECK(openvlsi::spiceElementForSymbol("IHP NPN HBT") == 'Q');
+    CHECK(openvlsi::spiceElementForSymbol("Op Amp") == 'X');
 }
 
 TEST_CASE("generated source expressions are accepted by ngspice") {
     auto run = [](const std::vector<std::string> &netlist, const std::string &probe) {
-        ice::SimulationRequest request;
+        openvlsi::SimulationRequest request;
         request.analysis = "transient";
         request.step = 0.01;
         request.stop = 2.0;
@@ -2524,12 +2538,12 @@ TEST_CASE("generated source expressions are accepted by ngspice") {
         request.netlist = {"* source expression test"};
         request.netlist.insert(request.netlist.end(), netlist.begin(), netlist.end());
         request.probeSignals = {probe};
-        ice::SimulationRunner runner;
+        openvlsi::SimulationRunner runner;
         return runner.run(request, std::chrono::seconds(5));
     };
 
     const auto pulse = run({"V1 out 0 DC 0 PULSE(0 1 0 1u 1u 0.5 1)", "R1 out 0 1k"}, "out");
-    CHECK(pulse.state == ice::JobState::succeeded);
+    CHECK(pulse.state == openvlsi::JobState::succeeded);
     CHECK(pulse.traces.size() == 1);
     if (!pulse.traces.empty()) {
         const auto &values = pulse.traces.front().values;
@@ -2538,7 +2552,7 @@ TEST_CASE("generated source expressions are accepted by ngspice") {
     }
 
     const auto sine = run({"V1 out 0 SIN(0 1 1 0 0 0)", "R1 out 0 1k"}, "out");
-    CHECK(sine.state == ice::JobState::succeeded);
+    CHECK(sine.state == openvlsi::JobState::succeeded);
     CHECK(sine.traces.size() == 1);
     if (!sine.traces.empty()) {
         const auto &values = sine.traces.front().values;
@@ -2548,7 +2562,7 @@ TEST_CASE("generated source expressions are accepted by ngspice") {
     }
 
     const auto current = run({"I1 0 out 1m", "R1 out 0 1k"}, "out");
-    CHECK(current.state == ice::JobState::succeeded);
+    CHECK(current.state == openvlsi::JobState::succeeded);
     CHECK(current.traces.size() == 1);
 
     // Cell parameters are emitted as subcircuit `params:` defaults, `{name}`
@@ -2557,7 +2571,7 @@ TEST_CASE("generated source expressions are accepted by ngspice") {
         run({".param VDD=1.8", ".subckt divider A Y params: R=1k C=1n", "R1 A Y {R}", "C1 Y A {C}", ".ends divider",
              "V1 in 0 {VDD}", "X1 in out divider R=2k", "R2 out 0 1k"},
             "out");
-    CHECK(parameterized.state == ice::JobState::succeeded);
+    CHECK(parameterized.state == openvlsi::JobState::succeeded);
     CHECK(parameterized.traces.size() == 1);
     if (!parameterized.traces.empty() && !parameterized.traces.front().values.empty()) {
         const auto settled = parameterized.traces.front().values.back();
@@ -2566,7 +2580,7 @@ TEST_CASE("generated source expressions are accepted by ngspice") {
 }
 
 TEST_CASE("package manifests and lockfiles are reproducible") {
-    auto repositoryRoot = std::filesystem::temp_directory_path() / "ice-package-test";
+    auto repositoryRoot = std::filesystem::temp_directory_path() / "openvlsi-package-test";
     std::filesystem::remove_all(repositoryRoot);
     std::filesystem::create_directories(repositoryRoot / "example-lib");
     std::filesystem::create_directories(repositoryRoot / "example-pdk" / "technology");
@@ -2591,11 +2605,11 @@ TEST_CASE("package manifests and lockfiles are reproducible") {
         << "[package]\nname = \"example.lib\"\nversion = \"1.0.0\"\n\n[dependencies]\n\"example.pdk\" = "
            "\">=1.0.0\"\n\n[provides]\nmodels = true\nsymbols = true\n";
     auto packageRoot = repositoryRoot / "example-lib";
-    auto package = ice::PackageManager::readManifest(packageRoot);
+    auto package = openvlsi::PackageManager::readManifest(packageRoot);
     CHECK(package.name == "example.lib");
     CHECK(package.dependencies.at("example.pdk") == ">=1.0.0");
-    CHECK((ice::PackageManager::capabilities(package) == std::vector<std::string>{"models", "symbols"}));
-    const auto pdk = ice::PackageManager::readManifest(repositoryRoot / "example-pdk");
+    CHECK((openvlsi::PackageManager::capabilities(package) == std::vector<std::string>{"models", "symbols"}));
+    const auto pdk = openvlsi::PackageManager::readManifest(repositoryRoot / "example-pdk");
     CHECK(pdk.pdk.has_value());
     if (pdk.pdk) {
         CHECK(pdk.pdk->displayName == "Example PDK");
@@ -2614,9 +2628,9 @@ TEST_CASE("package manifests and lockfiles are reproducible") {
             CHECK(pdk.pdk->stacks.front().displayName == "Base stack");
             CHECK(pdk.pdk->stacks.front().layers.size() == 2);
         }
-        CHECK(ice::resolvePdkStack(*pdk.pdk, "") == "base");
-        CHECK(ice::resolvePdkStack(*pdk.pdk, "base") == "base");
-        CHECK_THROWS_AS(ice::resolvePdkStack(*pdk.pdk, "missing"), ice::ProjectError);
+        CHECK(openvlsi::resolvePdkStack(*pdk.pdk, "") == "base");
+        CHECK(openvlsi::resolvePdkStack(*pdk.pdk, "base") == "base");
+        CHECK_THROWS_AS(openvlsi::resolvePdkStack(*pdk.pdk, "missing"), openvlsi::ProjectError);
         CHECK(pdk.pdk->implementation.has_value());
         if (pdk.pdk->implementation) {
             const auto &implementation = *pdk.pdk->implementation;
@@ -2645,25 +2659,25 @@ TEST_CASE("package manifests and lockfiles are reproducible") {
             CHECK(pdk.pdk->layerStyles.front().visible == 1);
         }
     }
-    auto lock = ice::PackageManager::resolve({repositoryRoot}, {{"example.lib", "*"}}, "0.1.0");
+    auto lock = openvlsi::PackageManager::resolve({repositoryRoot}, {{"example.lib", "*"}}, "0.1.0");
     CHECK(lock.packages.size() == 2);
-    auto serialized = ice::serializeLockfile(lock);
-    CHECK(serialized == ice::serializeLockfile(lock));
+    auto serialized = openvlsi::serializeLockfile(lock);
+    CHECK(serialized == openvlsi::serializeLockfile(lock));
     CHECK(serialized.find("content_hash = \"sha256:") != std::string::npos);
     CHECK(serialized.find("pdk_id = \"example.pdk\"") != std::string::npos);
-    const auto parsed = ice::PackageManager::readLockfile([&] {
-        const auto path = repositoryRoot / "ice.lock";
-        ice::PackageManager::writeLockfile(path, lock);
+    const auto parsed = openvlsi::PackageManager::readLockfile([&] {
+        const auto path = repositoryRoot / "openvlsi.lock";
+        openvlsi::PackageManager::writeLockfile(path, lock);
         return path;
     }());
     CHECK(parsed.packages.size() == 2);
     CHECK(std::any_of(parsed.packages.begin(), parsed.packages.end(),
-                      [](const ice::LockedPackage &package) { return package.pdkId == "example.pdk"; }));
+                      [](const openvlsi::LockedPackage &package) { return package.pdkId == "example.pdk"; }));
     std::filesystem::remove_all(repositoryRoot);
 }
 
 TEST_CASE("package indexes discover submodules and logos") {
-    const auto root = std::filesystem::temp_directory_path() / "ice-package-index-test";
+    const auto root = std::filesystem::temp_directory_path() / "openvlsi-package-index-test";
     std::filesystem::remove_all(root);
     const auto packageRoot = root / "packages" / "example.lib";
     std::filesystem::create_directories(packageRoot / ".github");
@@ -2680,7 +2694,7 @@ TEST_CASE("package indexes discover submodules and logos") {
                                                    "symbols = true\n";
     std::ofstream(packageRoot / ".github" / "logo.png") << "not a real image, only presence is tested";
 
-    const auto entries = ice::PackageManager::scanPackageIndex(root);
+    const auto entries = openvlsi::PackageManager::scanPackageIndex(root);
     CHECK(entries.size() == 1);
     if (entries.size() == 1) {
         CHECK(entries.front().spec.name == "example.lib");
@@ -2688,30 +2702,30 @@ TEST_CASE("package indexes discover submodules and logos") {
         CHECK(entries.front().repositoryRevision == "dev");
         CHECK(entries.front().logo == packageRoot / ".github" / "logo.png");
     }
-    CHECK(ice::PackageManager::packageLogo(packageRoot) == packageRoot / ".github" / "logo.png");
+    CHECK(openvlsi::PackageManager::packageLogo(packageRoot) == packageRoot / ".github" / "logo.png");
     std::filesystem::remove_all(root);
 }
 
 TEST_CASE("installed packages can be uninstalled") {
-    const auto root = std::filesystem::temp_directory_path() / "ice-package-uninstall-test";
+    const auto root = std::filesystem::temp_directory_path() / "openvlsi-package-uninstall-test";
     std::filesystem::remove_all(root);
     std::filesystem::create_directories(root / "example.pkg");
     std::ofstream(root / "example.pkg" / "package.toml") << "[package]\nname = \"example.pkg\"\nversion = \"1.0.0\"\n";
     CHECK(std::filesystem::exists(root / "example.pkg"));
-    ice::PackageManager::uninstallPackage(root, "example.pkg");
+    openvlsi::PackageManager::uninstallPackage(root, "example.pkg");
     CHECK(!std::filesystem::exists(root / "example.pkg"));
-    CHECK_THROWS_AS(ice::PackageManager::uninstallPackage(root, "missing.pkg"), ice::ProjectError);
-    CHECK_THROWS_AS(ice::PackageManager::uninstallPackage(root, "../escape"), ice::ProjectError);
+    CHECK_THROWS_AS(openvlsi::PackageManager::uninstallPackage(root, "missing.pkg"), openvlsi::ProjectError);
+    CHECK_THROWS_AS(openvlsi::PackageManager::uninstallPackage(root, "../escape"), openvlsi::ProjectError);
     std::filesystem::remove_all(root);
 }
 
 TEST_CASE("schematics carry PDKs and projects carry package dependencies") {
-    ice::Project project;
+    openvlsi::Project project;
     project.identity = "pdk-project";
     project.name = "pdk-project";
-    const auto generic = ice::createSchematicCell(project, "generic_top");
-    const auto packaged = ice::createSchematicCell(project, "ihp_top", "ihp.sg13g2");
-    CHECK(project.schematicCells.at(generic).pdk == ice::genericPdkId);
+    const auto generic = openvlsi::createSchematicCell(project, "generic_top");
+    const auto packaged = openvlsi::createSchematicCell(project, "ihp_top", "ihp.sg13g2");
+    CHECK(project.schematicCells.at(generic).pdk == openvlsi::genericPdkId);
     CHECK(project.schematicCells.at(packaged).pdk == "ihp.sg13g2");
     project.packageDependencies = {"ihp.sg13g2"};
     project.trustedPackages = {"ihp.sg13g2"};
@@ -2719,11 +2733,11 @@ TEST_CASE("schematics carry PDKs and projects carry package dependencies") {
     CHECK(project.trustsPackage("ihp.sg13g2"));
     CHECK(!project.trustsPackage("sky130"));
 
-    const auto roundTrip = ice::Project::deserialize(project.serialize());
+    const auto roundTrip = openvlsi::Project::deserialize(project.serialize());
     CHECK(roundTrip.packageDependencies == std::vector<std::string>{"ihp.sg13g2"});
     CHECK(roundTrip.trustedPackages == std::vector<std::string>{"ihp.sg13g2"});
     CHECK(roundTrip.trustsPackage("ihp.sg13g2"));
-    CHECK(roundTrip.schematicCells.at(generic).pdk == ice::genericPdkId);
+    CHECK(roundTrip.schematicCells.at(generic).pdk == openvlsi::genericPdkId);
     CHECK(roundTrip.schematicCells.at(packaged).pdk == "ihp.sg13g2");
 
     auto duplicated = project;
@@ -2735,12 +2749,12 @@ TEST_CASE("schematics carry PDKs and projects carry package dependencies") {
     duplicated = project;
     duplicated.trustedPackages.push_back("../escape");
     CHECK(!duplicated.validate().empty());
-    CHECK_THROWS_AS(ice::createSchematicCell(project, "empty_pdk", ""), ice::ProjectError);
-    CHECK_THROWS_AS(ice::createSchematicCell(project, "bad_pdk", "../escape"), ice::ProjectError);
+    CHECK_THROWS_AS(openvlsi::createSchematicCell(project, "empty_pdk", ""), openvlsi::ProjectError);
+    CHECK_THROWS_AS(openvlsi::createSchematicCell(project, "bad_pdk", "../escape"), openvlsi::ProjectError);
 }
 
 TEST_CASE("file symbol library loads and validates") {
-    const auto root = std::filesystem::temp_directory_path() / "ice-symbols-test";
+    const auto root = std::filesystem::temp_directory_path() / "openvlsi-symbols-test";
     std::filesystem::remove_all(root);
     std::filesystem::create_directories(root);
     std::ofstream(root / "resistor.svg") << "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 32 8\">"
@@ -2750,7 +2764,7 @@ TEST_CASE("file symbol library loads and validates") {
            "label_x = 0\nlabel_y = 12\n"
            "\n[[pin]]\nname = \"1\"\nx = -16\ny = 0\ndirection = \"inout\"\n"
            "\n[[pin]]\nname = \"2\"\nx = 16\ny = 0\ndirection = \"inout\"\n";
-    const auto symbols = ice::SymbolLibrary::load(root);
+    const auto symbols = openvlsi::SymbolLibrary::load(root);
     CHECK(symbols.size() == 1);
     CHECK(symbols.front().name == "Resistor");
     CHECK(symbols.front().category == "Passive");
@@ -2759,28 +2773,28 @@ TEST_CASE("file symbol library loads and validates") {
     CHECK(symbols.front().label->x == 0);
     CHECK(symbols.front().label->y == 12);
     CHECK(symbols.front().pins.size() == 2);
-    CHECK(symbols.front().pins.front().direction == ice::PinDirection::left);
-    CHECK(symbols.front().pins.back().direction == ice::PinDirection::right);
+    CHECK(symbols.front().pins.front().direction == openvlsi::PinDirection::left);
+    CHECK(symbols.front().pins.back().direction == openvlsi::PinDirection::right);
 
     const auto missing = root / "missing";
     std::filesystem::create_directories(missing);
     std::ofstream(missing / "broken.toml") << "[symbol]\nname = \"Broken\"\nartwork = \"absent.svg\"\n"
                                               "\n[[pin]]\nname = \"1\"\nx = 0\ny = 0\ndirection = \"inout\"\n";
-    CHECK_THROWS_AS(ice::SymbolLibrary::load(missing), ice::ProjectError);
+    CHECK_THROWS_AS(openvlsi::SymbolLibrary::load(missing), openvlsi::ProjectError);
 
     const auto scripted = root / "scripted";
     std::filesystem::create_directories(scripted);
     std::ofstream(scripted / "evil.svg") << "<svg><script>alert(1)</script></svg>";
     std::ofstream(scripted / "evil.toml") << "[symbol]\nname = \"Evil\"\nartwork = \"evil.svg\"\n"
                                              "\n[[pin]]\nname = \"1\"\nx = 0\ny = 0\ndirection = \"inout\"\n";
-    CHECK_THROWS_AS(ice::SymbolLibrary::load(scripted), ice::ProjectError);
+    CHECK_THROWS_AS(openvlsi::SymbolLibrary::load(scripted), openvlsi::ProjectError);
 
     const auto fractional = root / "fractional";
     std::filesystem::create_directories(fractional);
     std::ofstream(fractional / "resistor.svg") << "<svg viewBox=\"0 0 32 8\"></svg>";
     std::ofstream(fractional / "resistor.toml") << "[symbol]\nname = \"Resistor\"\nartwork = \"resistor.svg\"\n"
                                                    "\n[[pin]]\nname = \"1\"\nx = -16.5\ny = 0\ndirection = \"inout\"\n";
-    CHECK_THROWS_AS(ice::SymbolLibrary::load(fractional), ice::ProjectError);
+    CHECK_THROWS_AS(openvlsi::SymbolLibrary::load(fractional), openvlsi::ProjectError);
 
     const auto duplicated = root / "duplicated";
     std::filesystem::create_directories(duplicated);
@@ -2788,7 +2802,7 @@ TEST_CASE("file symbol library loads and validates") {
     std::ofstream(duplicated / "resistor.toml") << "[symbol]\nname = \"Resistor\"\nartwork = \"resistor.svg\"\n"
                                                    "\n[[pin]]\nname = \"1\"\nx = -16\ny = 0\ndirection = \"inout\"\n"
                                                    "\n[[pin]]\nname = \"1\"\nx = 16\ny = 0\ndirection = \"inout\"\n";
-    CHECK_THROWS_AS(ice::SymbolLibrary::load(duplicated), ice::ProjectError);
+    CHECK_THROWS_AS(openvlsi::SymbolLibrary::load(duplicated), openvlsi::ProjectError);
 
     const auto nameless = root / "nameless";
     std::filesystem::create_directories(nameless);
@@ -2798,12 +2812,12 @@ TEST_CASE("file symbol library loads and validates") {
            "\n[[pin]]\nname = \"1\"\nx = -16\ny = 0\ndirection = \"inout\"\n"
            "\n[[pin]]\nname = \"2\"\nx = 16\ny = 0\ndirection = \"inout\"\n"
            "\n[[parameter]]\nname = \"\"\nvalue = \"1k\"\n";
-    CHECK_THROWS_AS(ice::SymbolLibrary::load(nameless), ice::ProjectError);
+    CHECK_THROWS_AS(openvlsi::SymbolLibrary::load(nameless), openvlsi::ProjectError);
     std::filesystem::remove_all(root);
 }
 
 TEST_CASE("symbols can reference built-in generic artwork") {
-    const auto root = std::filesystem::temp_directory_path() / "ice-generic-artwork-test";
+    const auto root = std::filesystem::temp_directory_path() / "openvlsi-generic-artwork-test";
     std::filesystem::remove_all(root);
     const auto builtin = root / "builtin";
     const auto package = root / "package";
@@ -2815,20 +2829,20 @@ TEST_CASE("symbols can reference built-in generic artwork") {
     std::ofstream(package / "referenced.toml") << "[symbol]\nname = \"Referenced\"\nartwork = \"generic:shared.svg\"\n"
                                                   "\n[[pin]]\nname = \"1\"\nx = -5\ny = 0\ndirection = \"inout\"\n"
                                                   "\n[[pin]]\nname = \"2\"\nx = 5\ny = 0\ndirection = \"inout\"\n";
-    const auto symbols = ice::SymbolLibrary::load(package, builtin);
+    const auto symbols = openvlsi::SymbolLibrary::load(package, builtin);
     CHECK(symbols.size() == 1);
     CHECK(symbols.front().svg.find("M0 0h10") != std::string::npos);
-    CHECK_THROWS_AS(ice::SymbolLibrary::load(package), ice::ProjectError);
+    CHECK_THROWS_AS(openvlsi::SymbolLibrary::load(package), openvlsi::ProjectError);
 
     std::ofstream(traversal / "escape.toml") << "[symbol]\nname = \"Escape\"\nartwork = \"generic:../shared.svg\"\n"
                                                 "\n[[pin]]\nname = \"1\"\nx = 0\ny = 0\ndirection = \"inout\"\n";
-    CHECK_THROWS_AS(ice::SymbolLibrary::load(traversal, builtin), ice::ProjectError);
+    CHECK_THROWS_AS(openvlsi::SymbolLibrary::load(traversal, builtin), openvlsi::ProjectError);
     std::filesystem::remove_all(root);
 }
 
 TEST_CASE("shipped file symbol library loads") {
-    const auto libraryRoot = std::filesystem::path(ICE_SOURCE_DIR) / "symbols";
-    const auto symbols = ice::SymbolLibrary::load(libraryRoot);
+    const auto libraryRoot = std::filesystem::path(OPENVLSI_SOURCE_DIR) / "symbols";
+    const auto symbols = openvlsi::SymbolLibrary::load(libraryRoot);
     CHECK(symbols.size() == 14);
     std::map<std::string, std::size_t> pinCounts;
     std::map<std::string, std::map<std::string, std::string>> defaults;
@@ -2860,7 +2874,7 @@ TEST_CASE("shipped file symbol library loads") {
     REQUIRE(!pinSymbol->pins.empty());
     CHECK(pinSymbol->pins.front().x == 0);
     CHECK(pinSymbol->pins.front().y == 0);
-    CHECK(pinSymbol->pins.front().direction == ice::PinDirection::right);
+    CHECK(pinSymbol->pins.front().direction == openvlsi::PinDirection::right);
     // Passive and source symbols seed their editable default parameters.
     CHECK(defaults["Resistor"]["resistance"] == "1k");
     CHECK(defaults["Capacitor"]["capacitance"] == "1n");
@@ -2880,7 +2894,7 @@ TEST_CASE("shipped file symbol library loads") {
 }
 
 TEST_CASE("package layout device libraries load") {
-    const auto repositoryRoot = std::filesystem::path(ICE_SOURCE_DIR).parent_path();
+    const auto repositoryRoot = std::filesystem::path(OPENVLSI_SOURCE_DIR).parent_path();
     struct PackageLibrary {
         const char *directory;
         const char *name;
@@ -2892,15 +2906,15 @@ TEST_CASE("package layout device libraries load") {
         int purposeDatatype;
     };
     const std::vector<PackageLibrary> packages = {
-        {"ice-pkg-ihp-sg13g2", "IHP SG13G2", "ihp-sg13g2", "IHP ", "nmos", 8, 0, 2},
-        {"ice-pkg-sky130", "SkyWater SKY130", "sky130A", "SKY130 ", "nfet", 68, 20, 16},
-        {"ice-pkg-gf180mcu", "GlobalFoundries GF180MCU", "gf180mcuA", "GF180 ", "nmos", 34, 0, 4},
+        {"openvlsi-pkg-ihp-sg13g2", "IHP SG13G2", "ihp-sg13g2", "IHP ", "nmos", 8, 0, 2},
+        {"openvlsi-pkg-sky130", "SkyWater SKY130", "sky130A", "SKY130 ", "nfet", 68, 20, 16},
+        {"openvlsi-pkg-gf180mcu", "GlobalFoundries GF180MCU", "gf180mcuA", "GF180 ", "nmos", 34, 0, 4},
     };
     for (const auto &package : packages) {
         const auto path = repositoryRoot / package.directory / "layout" / "devices" / "index.json";
         if (!std::filesystem::is_regular_file(path))
             continue;
-        const auto library = ice::LayoutDeviceLibrary::load(path);
+        const auto library = openvlsi::LayoutDeviceLibrary::load(path);
         CHECK(library.name == package.name);
         CHECK(library.pdk == package.pdk);
         CHECK(library.cellPrefix == package.prefix);
@@ -2911,7 +2925,7 @@ TEST_CASE("package layout device libraries load") {
         };
         CHECK(hasStream(package.drawingLayer, package.drawingDatatype));
         CHECK(hasStream(package.drawingLayer, package.purposeDatatype));
-        const auto manifest = ice::PackageManager::readManifest(repositoryRoot / package.directory);
+        const auto manifest = openvlsi::PackageManager::readManifest(repositoryRoot / package.directory);
         CHECK(manifest.pdk.has_value());
         if (manifest.pdk) {
             CHECK(manifest.pdk->manufacturingGrid == 5);
@@ -2921,7 +2935,7 @@ TEST_CASE("package layout device libraries load") {
                 });
             CHECK(drawing != manifest.pdk->layers.end());
         }
-        const auto findCell = [&](const std::string &name) -> const ice::LayoutDeviceCell * {
+        const auto findCell = [&](const std::string &name) -> const openvlsi::LayoutDeviceCell * {
             for (const auto &cell : library.cells)
                 if (cell.name == name)
                     return &cell;
@@ -2941,7 +2955,7 @@ TEST_CASE("package layout device libraries load") {
                 CHECK(cell.bounds.valid());
             }
         }
-        if (std::string(package.directory) == "ice-pkg-ihp-sg13g2") {
+        if (std::string(package.directory) == "openvlsi-pkg-ihp-sg13g2") {
             const auto *fixed = findCell("nmoscl_2");
             CHECK(fixed != nullptr);
             if (fixed) {
@@ -2954,11 +2968,11 @@ TEST_CASE("package layout device libraries load") {
 }
 
 TEST_CASE("package IHP geometry library loads") {
-    const auto repositoryRoot = std::filesystem::path(ICE_SOURCE_DIR).parent_path();
-    const auto libraryPath = repositoryRoot / "ice-pkg-ihp-sg13g2" / "layout" / "devices" / "ihp.sg13g2.json";
+    const auto repositoryRoot = std::filesystem::path(OPENVLSI_SOURCE_DIR).parent_path();
+    const auto libraryPath = repositoryRoot / "openvlsi-pkg-ihp-sg13g2" / "layout" / "devices" / "ihp.sg13g2.json";
     if (!std::filesystem::is_regular_file(libraryPath))
         return;
-    const auto library = ice::LayoutDeviceLibrary::load(libraryPath);
+    const auto library = openvlsi::LayoutDeviceLibrary::load(libraryPath);
     CHECK(library.name == "IHP SG13G2");
     CHECK(library.pdk == "ihp-sg13g2");
     CHECK(library.cells.size() >= 100);
@@ -2967,7 +2981,7 @@ TEST_CASE("package IHP geometry library loads") {
         if (!cell.parameters.empty())
             CHECK(cell.generator.has_value());
     }
-    const auto findCell = [&](const std::string &name) -> const ice::LayoutDeviceCell * {
+    const auto findCell = [&](const std::string &name) -> const openvlsi::LayoutDeviceCell * {
         for (const auto &cell : library.cells)
             if (cell.name == name)
                 return &cell;
@@ -2981,7 +2995,7 @@ TEST_CASE("package IHP geometry library loads") {
         CHECK(nmos->ports.size() == 3);
         const auto hasPort = [&](const std::string &name) {
             return std::any_of(nmos->ports.begin(), nmos->ports.end(),
-                               [&](const ice::LayoutDevicePort &port) { return port.name == name; });
+                               [&](const openvlsi::LayoutDevicePort &port) { return port.name == name; });
         };
         CHECK(hasPort("S"));
         CHECK(hasPort("G"));
@@ -3012,7 +3026,7 @@ TEST_CASE("package IHP geometry library loads") {
 }
 
 TEST_CASE("generated layout device geometry parses") {
-    const auto geometry = ice::parseLayoutDeviceGeometry(
+    const auto geometry = openvlsi::parseLayoutDeviceGeometry(
         R"({"bounds":[0,-1,10,20],"shapes":[{"layer":1,"datatype":2,"points":[[0,-1],[10,-1],[10,20],[0,20]]}],)"
         R"("ports":[{"name":"G","layer":1,"datatype":0,"rectangle":{"x":0,"y":0,"width":2,"height":3},)"
         R"("direction":"input","side":"left","label":"G"}]})");
@@ -3026,27 +3040,27 @@ TEST_CASE("generated layout device geometry parses") {
     CHECK(geometry.shapes.front().polygon.size() == 4);
     CHECK(geometry.ports.size() == 1);
     CHECK(geometry.ports.front().name == "G");
-    CHECK(geometry.ports.front().direction == ice::PortDirection::input);
-    CHECK(geometry.ports.front().side == ice::PortSide::left);
+    CHECK(geometry.ports.front().direction == openvlsi::PortDirection::input);
+    CHECK(geometry.ports.front().side == openvlsi::PortSide::left);
     CHECK(geometry.ports.front().rectangle.width == 2);
-    CHECK_THROWS_AS(ice::parseLayoutDeviceGeometry(R"({"bounds":[0,0,0,0],"shapes":[]})"), ice::ProjectError);
+    CHECK_THROWS_AS(openvlsi::parseLayoutDeviceGeometry(R"({"bounds":[0,0,0,0],"shapes":[]})"), openvlsi::ProjectError);
 }
 
 TEST_CASE("layout instances survive serialization") {
-    ice::Project project;
+    openvlsi::Project project;
     project.identity = "layout-instances";
     project.name = "layout-instances";
-    const auto childId = ice::createLayoutCell(project, "device", "ihp.sg13g2");
-    const auto parentId = ice::createLayoutCell(project, "top", "ihp.sg13g2");
+    const auto childId = openvlsi::createLayoutCell(project, "device", "ihp.sg13g2");
+    const auto parentId = openvlsi::createLayoutCell(project, "top", "ihp.sg13g2");
     project.layoutCells.at(childId).library = true;
     project.layoutCells.at(childId).device = "nmos";
     const auto instanceId = project.nextId();
     project.layoutCells.at(parentId).instances.emplace(
-        instanceId, ice::LayoutInstance{instanceId, childId, "device_1", 120, -80, ice::Orientation::r0});
+        instanceId, openvlsi::LayoutInstance{instanceId, childId, "device_1", 120, -80, openvlsi::Orientation::r0});
     const auto widthId = project.nextId();
     project.layoutCells.at(childId).parameters.push_back({widthId, "width", "0.15"});
     CHECK(project.validate().empty());
-    auto roundTrip = ice::Project::deserialize(project.serialize());
+    auto roundTrip = openvlsi::Project::deserialize(project.serialize());
     CHECK(roundTrip.layoutCells.at(childId).library);
     CHECK(roundTrip.layoutCells.at(childId).device == "nmos");
     CHECK(!roundTrip.layoutCells.at(parentId).library);
@@ -3063,11 +3077,11 @@ TEST_CASE("layout instances survive serialization") {
 }
 
 TEST_CASE("procedural layouts own a generated static layout") {
-    ice::Project project;
+    openvlsi::Project project;
     project.identity = "procedural";
     project.name = "procedural";
-    const auto proceduralId = ice::createProceduralLayout(project, "generated_top", ice::genericPdkId,
-                                                          "layout.layer(\"Metal1\").rectangle(0, 0, 100, 100)\n");
+    const auto proceduralId = openvlsi::createProceduralLayout(project, "generated_top", openvlsi::genericPdkId,
+                                                               "layout.layer(\"Metal1\").rectangle(0, 0, 100, 100)\n");
     const auto &procedural = project.proceduralLayouts.at(proceduralId);
     CHECK(procedural.name == "generated_top");
     CHECK(procedural.script.find("Metal1") != std::string::npos);
@@ -3078,24 +3092,24 @@ TEST_CASE("procedural layouts own a generated static layout") {
     CHECK(project.validate().empty());
 
     const auto serialized = project.serialize();
-    auto roundTrip = ice::Project::deserialize(serialized);
+    auto roundTrip = openvlsi::Project::deserialize(serialized);
     CHECK(roundTrip.serialize() == serialized);
     CHECK(roundTrip.proceduralLayouts.at(proceduralId).generatedCell == procedural.generatedCell);
     CHECK(roundTrip.layoutCells.at(procedural.generatedCell).generatedBy == proceduralId);
     CHECK(roundTrip.nextId() > proceduralId);
 
-    CHECK_THROWS_AS(ice::createProceduralLayout(project, "generated_top"), ice::ProjectError);
-    const auto secondId = ice::createProceduralLayout(project, "generated_second");
+    CHECK_THROWS_AS(openvlsi::createProceduralLayout(project, "generated_top"), openvlsi::ProjectError);
+    const auto secondId = openvlsi::createProceduralLayout(project, "generated_second");
     CHECK(project.proceduralLayouts.at(secondId).name == "generated_second");
     CHECK(project.proceduralLayouts.at(secondId).generatedCell != procedural.generatedCell);
     CHECK(project.validate().empty());
 }
 
 TEST_CASE("procedural layout runner generates richer geometry") {
-    ice::Project project;
+    openvlsi::Project project;
     project.identity = "procedural-runner";
     project.name = "procedural-runner";
-    ice::createLayoutCell(project, "unit", ice::genericPdkId);
+    openvlsi::createLayoutCell(project, "unit", openvlsi::genericPdkId);
     const auto script = R"PY(
 metal1 = layout.layer("Metal1", 1, 0)
 label = layout.layer("Metal1.label", 34, 10)
@@ -3112,16 +3126,17 @@ layout.via("Via1", layout.um(1), layout.um(1), size=layout.um(0.2))
 layout.array("unit", (2, 1), (layout.um(5), 0), x=layout.um(6), y=0, name="array")
 layout.port("VDD", "Metal1", layout.um(0), layout.um(0), layout.um(1), layout.um(1), net="VDD")
 )PY";
-    const auto proceduralId = ice::createProceduralLayout(project, "generated_top", ice::genericPdkId, script);
+    const auto proceduralId =
+        openvlsi::createProceduralLayout(project, "generated_top", openvlsi::genericPdkId, script);
     const auto &procedural = project.proceduralLayouts.at(proceduralId);
     CHECK(project.layoutCells.at(procedural.generatedCell).readOnly);
-    CHECK(ice::proceduralLayoutNeedsRegeneration(procedural));
+    CHECK(openvlsi::proceduralLayoutNeedsRegeneration(procedural));
 
-    auto run = ice::regenerateProceduralLayout(project, proceduralId);
+    auto run = openvlsi::regenerateProceduralLayout(project, proceduralId);
     CHECK(run.ok);
-    CHECK(ice::proceduralScriptHash(procedural.script) == run.scriptHash);
+    CHECK(openvlsi::proceduralScriptHash(procedural.script) == run.scriptHash);
     CHECK(!project.proceduralLayouts.at(proceduralId).generatedScriptHash.empty());
-    CHECK(!ice::proceduralLayoutNeedsRegeneration(project.proceduralLayouts.at(proceduralId)));
+    CHECK(!openvlsi::proceduralLayoutNeedsRegeneration(project.proceduralLayouts.at(proceduralId)));
 
     const auto &generated = project.layoutCells.at(procedural.generatedCell);
     CHECK(generated.readOnly);
@@ -3152,9 +3167,9 @@ layout.port("VDD", "Metal1", layout.um(0), layout.um(0), layout.um(1), layout.um
                       [](const auto &entry) { return entry.second.isText(); }));
     CHECK(project.validate().empty());
 
-    const auto nestedId = ice::createProceduralLayout(project, "nested_top", ice::genericPdkId,
-                                                      "layout.instance(\"generated_top\", 0, 0, name=\"I1\")\n");
-    const auto nestedRun = ice::regenerateProceduralLayout(project, nestedId);
+    const auto nestedId = openvlsi::createProceduralLayout(project, "nested_top", openvlsi::genericPdkId,
+                                                           "layout.instance(\"generated_top\", 0, 0, name=\"I1\")\n");
+    const auto nestedRun = openvlsi::regenerateProceduralLayout(project, nestedId);
     CHECK(nestedRun.ok);
     if (nestedRun.ok) {
         const auto &nested = project.layoutCells.at(project.proceduralLayouts.at(nestedId).generatedCell);
@@ -3164,30 +3179,30 @@ layout.port("VDD", "Metal1", layout.um(0), layout.um(0), layout.um(1), layout.um
     }
 
     project.proceduralLayouts.at(proceduralId).script += "\nmetal1.rectangle(0, 0, 100, 100)\n";
-    CHECK(ice::proceduralLayoutNeedsRegeneration(project.proceduralLayouts.at(proceduralId)));
-    run = ice::regenerateProceduralLayout(project, proceduralId);
+    CHECK(openvlsi::proceduralLayoutNeedsRegeneration(project.proceduralLayouts.at(proceduralId)));
+    run = openvlsi::regenerateProceduralLayout(project, proceduralId);
     CHECK(run.ok);
     CHECK(project.layoutCells.at(procedural.generatedCell).shapes.size() == 6);
-    CHECK(!ice::proceduralLayoutNeedsRegeneration(project.proceduralLayouts.at(proceduralId)));
+    CHECK(!openvlsi::proceduralLayoutNeedsRegeneration(project.proceduralLayouts.at(proceduralId)));
 
     const auto shapeCount = project.layoutCells.at(procedural.generatedCell).shapes.size();
     project.proceduralLayouts.at(proceduralId).script = "raise RuntimeError('boom')\n";
-    run = ice::regenerateProceduralLayout(project, proceduralId);
+    run = openvlsi::regenerateProceduralLayout(project, proceduralId);
     CHECK(!run.ok);
     CHECK(run.error.find("boom") != std::string::npos);
     CHECK(project.layoutCells.at(procedural.generatedCell).shapes.size() == shapeCount);
-    CHECK(ice::proceduralLayoutNeedsRegeneration(project.proceduralLayouts.at(proceduralId)));
+    CHECK(openvlsi::proceduralLayoutNeedsRegeneration(project.proceduralLayouts.at(proceduralId)));
 }
 
 TEST_CASE("procedural layout parameters drive regeneration") {
-    ice::Project project;
+    openvlsi::Project project;
     project.identity = "procedural-parameters";
     project.name = "procedural-parameters";
-    const auto proceduralId = ice::createProceduralLayout(project, "parameter_top", ice::genericPdkId,
-                                                          "width = layout.um(layout.parameter(\"width\", \"2\"))\n"
-                                                          "metal = layout.layer(\"Metal1\", 1, 0)\n"
-                                                          "metal.rectangle(0, 0, width, 1000)\n");
-    auto run = ice::regenerateProceduralLayout(project, proceduralId);
+    const auto proceduralId = openvlsi::createProceduralLayout(project, "parameter_top", openvlsi::genericPdkId,
+                                                               "width = layout.um(layout.parameter(\"width\", \"2\"))\n"
+                                                               "metal = layout.layer(\"Metal1\", 1, 0)\n"
+                                                               "metal.rectangle(0, 0, width, 1000)\n");
+    auto run = openvlsi::regenerateProceduralLayout(project, proceduralId);
     CHECK(run.ok);
     const auto &procedural = project.proceduralLayouts.at(proceduralId);
     CHECK(procedural.parameters.size() == 1);
@@ -3196,17 +3211,17 @@ TEST_CASE("procedural layout parameters drive regeneration") {
         CHECK(procedural.parameters.front().value == "2");
     }
     CHECK(!procedural.generatedParameterHash.empty());
-    CHECK(!ice::proceduralLayoutNeedsRegeneration(procedural));
+    CHECK(!openvlsi::proceduralLayoutNeedsRegeneration(procedural));
     auto &generated = project.layoutCells.at(procedural.generatedCell);
     CHECK(generated.shapes.size() == 1);
     if (!generated.shapes.empty())
         CHECK(generated.shapes.begin()->second.rectangle.width == 2000);
 
     project.proceduralLayouts.at(proceduralId).parameters.front().value = "3";
-    CHECK(ice::proceduralLayoutNeedsRegeneration(project.proceduralLayouts.at(proceduralId)));
-    run = ice::regenerateProceduralLayout(project, proceduralId);
+    CHECK(openvlsi::proceduralLayoutNeedsRegeneration(project.proceduralLayouts.at(proceduralId)));
+    run = openvlsi::regenerateProceduralLayout(project, proceduralId);
     CHECK(run.ok);
-    CHECK(!ice::proceduralLayoutNeedsRegeneration(project.proceduralLayouts.at(proceduralId)));
+    CHECK(!openvlsi::proceduralLayoutNeedsRegeneration(project.proceduralLayouts.at(proceduralId)));
     generated = project.layoutCells.at(project.proceduralLayouts.at(proceduralId).generatedCell);
     CHECK(generated.shapes.size() == 1);
     if (!generated.shapes.empty())
@@ -3214,7 +3229,7 @@ TEST_CASE("procedural layout parameters drive regeneration") {
 }
 
 TEST_CASE("procedural layout composition and built-in generators") {
-    ice::Project project;
+    openvlsi::Project project;
     project.identity = "procedural-composition";
     project.name = "procedural-composition";
     const auto script = R"PY(
@@ -3234,14 +3249,15 @@ layout.finish_placement()
 layout.review(require_plan=True)
 layout.report(print_report=True)
 )PY";
-    const auto proceduralId = ice::createProceduralLayout(project, "composition_top", ice::genericPdkId, script);
-    const auto run = ice::regenerateProceduralLayout(project, proceduralId);
+    const auto proceduralId =
+        openvlsi::createProceduralLayout(project, "composition_top", openvlsi::genericPdkId, script);
+    const auto run = openvlsi::regenerateProceduralLayout(project, proceduralId);
     CHECK(run.ok);
     CHECK(run.log.find("utilization") != std::string::npos);
     CHECK(run.layoutQuality.find("utilization") != std::string::npos);
     CHECK(run.layoutPlan.find("\"passed\":true") != std::string::npos);
     CHECK(run.layoutReview.find("\"passed\":true") != std::string::npos);
-    const auto roundTrip = ice::Project::deserialize(project.serialize());
+    const auto roundTrip = openvlsi::Project::deserialize(project.serialize());
     CHECK(roundTrip.proceduralLayouts.at(proceduralId).generatedLayoutQuality.find("utilization") != std::string::npos);
     const auto &generated = project.layoutCells.at(project.proceduralLayouts.at(proceduralId).generatedCell);
     CHECK(generated.shapes.size() == 6);
@@ -3264,7 +3280,7 @@ layout.report(print_report=True)
 }
 
 TEST_CASE("procedural layout boolean operations and holes") {
-    ice::Project project;
+    openvlsi::Project project;
     project.identity = "procedural-boolean";
     project.name = "procedural-boolean";
     const auto script = R"PY(
@@ -3278,13 +3294,13 @@ metal.polygon(
     name="ring",
 )
 )PY";
-    const auto proceduralId = ice::createProceduralLayout(project, "boolean_top", ice::genericPdkId, script);
-    const auto run = ice::regenerateProceduralLayout(project, proceduralId);
+    const auto proceduralId = openvlsi::createProceduralLayout(project, "boolean_top", openvlsi::genericPdkId, script);
+    const auto run = openvlsi::regenerateProceduralLayout(project, proceduralId);
     CHECK(run.ok);
     const auto &generated = project.layoutCells.at(project.proceduralLayouts.at(proceduralId).generatedCell);
     CHECK(!generated.shapes.empty());
-    const auto area = [](const std::vector<ice::LayoutPoint> &points) {
-        ice::Polygon polygon;
+    const auto area = [](const std::vector<openvlsi::LayoutPoint> &points) {
+        openvlsi::Polygon polygon;
         polygon.reserve(points.size());
         for (const auto &point : points)
             polygon.push_back({point.x, point.y});
@@ -3305,8 +3321,8 @@ metal.polygon(
 }
 
 TEST_CASE("geometry even-odd fill splits holes into fillable polygons") {
-    ice::GeometryKernel kernel;
-    const ice::MultiPolygon contours = {
+    openvlsi::GeometryKernel kernel;
+    const openvlsi::MultiPolygon contours = {
         {{0, 0}, {100, 0}, {100, 100}, {0, 100}},
         {{25, 25}, {75, 25}, {75, 75}, {25, 75}},
     };
@@ -3314,22 +3330,23 @@ TEST_CASE("geometry even-odd fill splits holes into fillable polygons") {
     CHECK(filled.size() > 1);
     long double area = 0.0L;
     for (const auto &polygon : filled) {
-        CHECK(ice::GeometryKernel::valid(polygon));
+        CHECK(openvlsi::GeometryKernel::valid(polygon));
         area += std::abs(polygonArea(polygon));
     }
     CHECK(area == 7500.0L);
 }
 
 TEST_CASE("layout shape boolean operations replace their operands") {
-    ice::Project project;
+    openvlsi::Project project;
     project.identity = "boolean-demo";
     project.name = "boolean-demo";
     const auto layerId = project.nextId();
-    project.layers.emplace(layerId, ice::Layer{layerId, "metal1", 1});
-    const auto cellId = ice::createLayoutCell(project, "top");
-    const auto first = ice::addRectangle(project, cellId, layerId, {0, 0, 100, 100});
-    const auto second = ice::addRectangle(project, cellId, layerId, {50, 0, 100, 100});
-    const auto unionIds = ice::booleanLayoutShapes(project, cellId, {first, second}, ice::BooleanOperation::union_);
+    project.layers.emplace(layerId, openvlsi::Layer{layerId, "metal1", 1});
+    const auto cellId = openvlsi::createLayoutCell(project, "top");
+    const auto first = openvlsi::addRectangle(project, cellId, layerId, {0, 0, 100, 100});
+    const auto second = openvlsi::addRectangle(project, cellId, layerId, {50, 0, 100, 100});
+    const auto unionIds =
+        openvlsi::booleanLayoutShapes(project, cellId, {first, second}, openvlsi::BooleanOperation::union_);
     const auto &cell = project.layoutCells.at(cellId);
     CHECK(unionIds.size() == 1);
     CHECK(cell.shapes.size() == 1);
@@ -3342,17 +3359,17 @@ TEST_CASE("layout shape boolean operations replace their operands") {
     CHECK(united.rectangle.height == 100);
     CHECK(project.validate().empty());
 
-    const auto outer = ice::addRectangle(project, cellId, layerId, {0, 0, 100, 100});
-    const auto inner = ice::addRectangle(project, cellId, layerId, {25, 25, 50, 50});
+    const auto outer = openvlsi::addRectangle(project, cellId, layerId, {0, 0, 100, 100});
+    const auto inner = openvlsi::addRectangle(project, cellId, layerId, {25, 25, 50, 50});
     const auto differenceIds =
-        ice::booleanLayoutShapes(project, cellId, {outer, inner}, ice::BooleanOperation::difference);
+        openvlsi::booleanLayoutShapes(project, cellId, {outer, inner}, openvlsi::BooleanOperation::difference);
     CHECK(differenceIds.size() > 1);
     const auto &differenceCell = project.layoutCells.at(cellId);
     long double area = 0.0L;
     for (const auto id : differenceIds) {
         const auto &shape = differenceCell.shapes.at(id);
         CHECK(!shape.polygon.empty());
-        ice::Polygon polygon;
+        openvlsi::Polygon polygon;
         polygon.reserve(shape.polygon.size());
         for (const auto &point : shape.polygon)
             polygon.push_back({point.x, point.y});
@@ -3364,111 +3381,112 @@ TEST_CASE("layout shape boolean operations replace their operands") {
 }
 
 TEST_CASE("layout shape boolean operations reject mixed layers and empty results") {
-    ice::Project project;
+    openvlsi::Project project;
     const auto firstLayer = project.nextId();
-    project.layers.emplace(firstLayer, ice::Layer{firstLayer, "metal1", 1});
+    project.layers.emplace(firstLayer, openvlsi::Layer{firstLayer, "metal1", 1});
     const auto secondLayer = project.nextId();
-    project.layers.emplace(secondLayer, ice::Layer{secondLayer, "metal2", 2});
-    const auto cellId = ice::createLayoutCell(project, "top");
-    const auto first = ice::addRectangle(project, cellId, firstLayer, {0, 0, 100, 100});
-    const auto second = ice::addRectangle(project, cellId, secondLayer, {50, 0, 100, 100});
-    CHECK_THROWS_AS(ice::booleanLayoutShapes(project, cellId, {first, second}, ice::BooleanOperation::union_),
-                    ice::ProjectError);
+    project.layers.emplace(secondLayer, openvlsi::Layer{secondLayer, "metal2", 2});
+    const auto cellId = openvlsi::createLayoutCell(project, "top");
+    const auto first = openvlsi::addRectangle(project, cellId, firstLayer, {0, 0, 100, 100});
+    const auto second = openvlsi::addRectangle(project, cellId, secondLayer, {50, 0, 100, 100});
+    CHECK_THROWS_AS(openvlsi::booleanLayoutShapes(project, cellId, {first, second}, openvlsi::BooleanOperation::union_),
+                    openvlsi::ProjectError);
     CHECK(project.layoutCells.at(cellId).shapes.size() == 2);
 
-    const auto third = ice::addRectangle(project, cellId, secondLayer, {500, 500, 10, 10});
-    CHECK_THROWS_AS(ice::booleanLayoutShapes(project, cellId, {second, third}, ice::BooleanOperation::intersection),
-                    ice::ProjectError);
+    const auto third = openvlsi::addRectangle(project, cellId, secondLayer, {500, 500, 10, 10});
+    CHECK_THROWS_AS(
+        openvlsi::booleanLayoutShapes(project, cellId, {second, third}, openvlsi::BooleanOperation::intersection),
+        openvlsi::ProjectError);
     CHECK(project.layoutCells.at(cellId).shapes.size() == 3);
 }
 
 TEST_CASE("project inventory detects missing sidecars") {
-    const auto root = std::filesystem::temp_directory_path() / "ice-project-inventory-test";
+    const auto root = std::filesystem::temp_directory_path() / "openvlsi-project-inventory-test";
     std::filesystem::remove_all(root);
-    ice::Project project;
+    openvlsi::Project project;
     project.identity = "inventory-demo";
     project.name = "inventory-demo";
-    ice::createSchematicCell(project, "alpha");
-    ice::createSchematicCell(project, "beta");
+    openvlsi::createSchematicCell(project, "alpha");
+    openvlsi::createSchematicCell(project, "beta");
     project.save(root);
 
-    const auto alpha = root / "sch" / "alpha.icesch";
-    const auto beta = root / "sch" / "beta.icesch";
+    const auto alpha = root / "sch" / "alpha.ovsch";
+    const auto beta = root / "sch" / "beta.ovsch";
     REQUIRE(std::filesystem::is_regular_file(alpha));
     REQUIRE(std::filesystem::is_regular_file(beta));
     std::filesystem::remove(beta);
 
-    CHECK_THROWS_AS(ice::Project::load(root), ice::ProjectError);
-    ice::ProjectLoadReport report;
-    const auto recovered = ice::Project::load(root, ice::ProjectLoadOptions{true}, &report);
+    CHECK_THROWS_AS(openvlsi::Project::load(root), openvlsi::ProjectError);
+    openvlsi::ProjectLoadReport report;
+    const auto recovered = openvlsi::Project::load(root, openvlsi::ProjectLoadOptions{true}, &report);
     CHECK(recovered.schematicCells.size() == 1);
     CHECK(!report.warnings.empty());
     std::filesystem::remove_all(root);
 }
 
 TEST_CASE("project loading rejects duplicate sidecar ids") {
-    const auto root = std::filesystem::temp_directory_path() / "ice-project-duplicate-id-test";
+    const auto root = std::filesystem::temp_directory_path() / "openvlsi-project-duplicate-id-test";
     std::filesystem::remove_all(root);
-    ice::Project project;
+    openvlsi::Project project;
     project.identity = "duplicate-demo";
     project.name = "duplicate-demo";
-    ice::createSchematicCell(project, "alpha");
+    openvlsi::createSchematicCell(project, "alpha");
     project.save(root);
 
-    const auto alpha = root / "sch" / "alpha.icesch";
+    const auto alpha = root / "sch" / "alpha.ovsch";
     REQUIRE(std::filesystem::is_regular_file(alpha));
-    std::filesystem::copy_file(alpha, root / "sch" / "copy.icesch");
+    std::filesystem::copy_file(alpha, root / "sch" / "copy.ovsch");
     {
-        std::ifstream input(root / "project.icepro");
+        std::ifstream input(root / "project.ovpro");
         nlohmann::json metadata;
         input >> metadata;
         input.close();
         metadata.erase("inventory");
-        std::ofstream output(root / "project.icepro");
+        std::ofstream output(root / "project.ovpro");
         output << metadata.dump(2) << "\n";
     }
-    CHECK_THROWS_AS(ice::Project::load(root), ice::ProjectError);
+    CHECK_THROWS_AS(openvlsi::Project::load(root), openvlsi::ProjectError);
     std::filesystem::remove_all(root);
 }
 
 TEST_CASE("project validation rejects duplicate schematic instance names") {
-    ice::Project project;
+    openvlsi::Project project;
     project.identity = "duplicate-instance";
     project.name = "duplicate-instance";
-    const auto cell = ice::createSchematicCell(project, "top");
-    const auto symbol = ice::addSymbol(project, cell, "resistor");
+    const auto cell = openvlsi::createSchematicCell(project, "top");
+    const auto symbol = openvlsi::addSymbol(project, cell, "resistor");
     project.schematicCells.at(cell).symbols.at(symbol).pins.push_back({project.nextId(), "A", 0, 0});
     project.schematicCells.at(cell).symbols.at(symbol).pins.push_back({project.nextId(), "B", 0, 0});
-    ice::addSchematicInstance(project, cell, symbol, "R1", 0, 0);
-    ice::addSchematicInstance(project, cell, symbol, "R1", 0, 0);
+    openvlsi::addSchematicInstance(project, cell, symbol, "R1", 0, 0);
+    openvlsi::addSchematicInstance(project, cell, symbol, "R1", 0, 0);
     CHECK(!project.validate().empty());
 }
 
 TEST_CASE("project loading can quarantine invalid sidecar files") {
-    const auto root = std::filesystem::temp_directory_path() / "ice-project-recovery-test";
+    const auto root = std::filesystem::temp_directory_path() / "openvlsi-project-recovery-test";
     std::filesystem::remove_all(root);
-    ice::Project project;
+    openvlsi::Project project;
     project.identity = "recovery-demo";
     project.name = "recovery-demo";
-    ice::addLayer(project, "Metal1", 1);
-    ice::createSchematicCell(project, "good");
+    openvlsi::addLayer(project, "Metal1", 1);
+    openvlsi::createSchematicCell(project, "good");
     project.save(root);
 
-    const auto badFile = root / "sch" / "bad.icesch";
+    const auto badFile = root / "sch" / "bad.ovsch";
     std::ofstream(badFile) << R"({"type":"text","pdk":"generic","text":"* hand-written"})";
 
     bool strictFailed = false;
     try {
-        (void)ice::Project::load(root);
-    } catch (const ice::ProjectError &error) {
+        (void)openvlsi::Project::load(root);
+    } catch (const openvlsi::ProjectError &error) {
         strictFailed = true;
-        CHECK(std::string(error.what()).find("bad.icesch") != std::string::npos);
+        CHECK(std::string(error.what()).find("bad.ovsch") != std::string::npos);
         CHECK(std::string(error.what()).find("project-repair") != std::string::npos);
     }
     CHECK(strictFailed);
 
-    ice::ProjectLoadReport report;
-    const auto recovered = ice::Project::load(root, ice::ProjectLoadOptions{true}, &report);
+    openvlsi::ProjectLoadReport report;
+    const auto recovered = openvlsi::Project::load(root, openvlsi::ProjectLoadOptions{true}, &report);
     CHECK(recovered.schematicCells.size() == 1);
     CHECK(recovered.schematicCells.begin()->second.name == "good");
     CHECK(report.quarantinedFiles.size() == 1);
@@ -3476,14 +3494,14 @@ TEST_CASE("project loading can quarantine invalid sidecar files") {
     CHECK(!std::filesystem::exists(badFile));
     CHECK(!report.warnings.empty());
 
-    const auto loadedAgain = ice::Project::load(root);
+    const auto loadedAgain = openvlsi::Project::load(root);
     CHECK(loadedAgain.schematicCells.size() == 1);
     std::filesystem::remove_all(root);
 }
 
 TEST_CASE("build info exposes a feature fingerprint") {
-    const auto info = ice::buildInfo();
-    CHECK(info.version == ice::version());
+    const auto info = openvlsi::buildInfo();
+    CHECK(info.version == openvlsi::version());
     CHECK(!info.commit.empty());
     CHECK(!info.buildTime.empty());
     CHECK(std::find(info.features.begin(), info.features.end(), "project_repair") != info.features.end());
@@ -3495,9 +3513,9 @@ TEST_CASE("build info exposes a feature fingerprint") {
 }
 
 TEST_CASE("generated AGENTS guidance is created once and preserved") {
-    const auto root = std::filesystem::temp_directory_path() / "ice-agents-guidance-test";
+    const auto root = std::filesystem::temp_directory_path() / "openvlsi-agents-guidance-test";
     std::filesystem::remove_all(root);
-    ice::Project project;
+    openvlsi::Project project;
     project.identity = "agents-guidance";
     project.name = "agents-guidance";
     project.save(root);
@@ -3508,7 +3526,7 @@ TEST_CASE("generated AGENTS guidance is created once and preserved") {
         return std::string((std::istreambuf_iterator<char>(input)), {});
     };
     const auto first = read();
-    CHECK(first.find("ICE generated guidance: begin -->") != std::string::npos);
+    CHECK(first.find("OpenVLSI generated guidance: begin -->") != std::string::npos);
     CHECK(first.find("simulation_measure") != std::string::npos);
     CHECK(first.find("pdk_info") != std::string::npos);
     CHECK(first.find("ask the user which installed PDK to use") != std::string::npos);
@@ -3529,30 +3547,30 @@ TEST_CASE("generated AGENTS guidance is created once and preserved") {
     const auto preserved = read();
     CHECK(preserved.find("Old guidance.") != std::string::npos);
     CHECK(preserved.find("User note.") != std::string::npos);
-    CHECK(preserved.find("ICE generated guidance: begin") == std::string::npos);
+    CHECK(preserved.find("OpenVLSI generated guidance: begin") == std::string::npos);
     CHECK(preserved.find("simulation_measure") == std::string::npos);
     std::filesystem::remove_all(root);
 }
 
 TEST_CASE("project saves reject stale revisions") {
-    const auto root = std::filesystem::temp_directory_path() / "ice-revision-test";
+    const auto root = std::filesystem::temp_directory_path() / "openvlsi-revision-test";
     std::filesystem::remove_all(root);
-    ice::Project project;
+    openvlsi::Project project;
     project.identity = "revision-test";
     project.name = "revision-test";
     project.save(root);
 
-    auto first = ice::Project::load(root);
-    auto second = ice::Project::load(root);
+    auto first = openvlsi::Project::load(root);
+    auto second = openvlsi::Project::load(root);
     first.name = "first";
     first.save(root);
     second.name = "second";
-    CHECK_THROWS_AS(second.save(root), ice::ProjectError);
+    CHECK_THROWS_AS(second.save(root), openvlsi::ProjectError);
     std::filesystem::remove_all(root);
 }
 
 TEST_CASE("PDK discovery reports missing OSDI models and a usable lib line") {
-    const auto root = std::filesystem::temp_directory_path() / "ice-pdk-package-test";
+    const auto root = std::filesystem::temp_directory_path() / "openvlsi-pdk-package-test";
     std::filesystem::remove_all(root);
     const auto models = root / "simulation" / "ngspice" / "models";
     std::filesystem::create_directories(models);
@@ -3587,7 +3605,7 @@ vdd = 1.5
 vd = 0.75
 )";
 
-    const auto pdks = ice::discoverPdks({root});
+    const auto pdks = openvlsi::discoverPdks({root});
     CHECK(pdks.size() == 1);
     if (pdks.size() == 1) {
         CHECK(pdks.front().id == "ihp-sg13g2");
@@ -3610,17 +3628,17 @@ vd = 0.75
         CHECK(pdks.front().recommendedLibLine.find("mos_tt") != std::string::npos);
         CHECK(std::any_of(pdks.front().missing.begin(), pdks.front().missing.end(),
                           [](const std::string &value) { return value.find("OSDI") != std::string::npos; }));
-        const auto json = ice::pdkInfoJson(pdks.front(), false);
+        const auto json = openvlsi::pdkInfoJson(pdks.front(), false);
         CHECK(json.at("simulation_ready") == false);
-        CHECK(json.at("source") == "ice-package");
+        CHECK(json.at("source") == "openvlsi-package");
     }
     std::filesystem::remove_all(root);
 }
 
 TEST_CASE("simulation measurements count crossings and frequency") {
-    const ice::SimulationTrace trace{"out", {0.0, 1.0, 0.0, 1.0, 0.0}};
+    const openvlsi::SimulationTrace trace{"out", {0.0, 1.0, 0.0, 1.0, 0.0}};
     const std::vector<double> time{0.0, 1.0, 2.0, 3.0, 4.0};
-    const auto measurement = ice::measureSignal(trace, time, 0.5);
+    const auto measurement = openvlsi::measureSignal(trace, time, 0.5);
     CHECK(measurement.statistics.points == 5);
     CHECK(measurement.statistics.min == 0.0);
     CHECK(measurement.statistics.max == 1.0);
@@ -3635,49 +3653,49 @@ TEST_CASE("simulation measurements count crossings and frequency") {
 }
 
 TEST_CASE("layout polygons ports and instances use core operations") {
-    ice::Project project;
+    openvlsi::Project project;
     project.identity = "layout-ops";
     project.name = "layout-ops";
-    const auto layer = ice::addLayer(project, "Metal1", 8);
-    const auto parent = ice::createLayoutCell(project, "parent");
-    const auto child = ice::createLayoutCell(project, "child");
-    const auto polygon = ice::addPolygon(project, parent, layer, {{0, 0}, {1000, 0}, {500, 800}});
-    const auto port = ice::addPort(project, parent, "P1", layer, {0, 0, 100, 100});
-    const auto instance = ice::addLayoutInstance(project, parent, child, "child_1", 200, 300);
+    const auto layer = openvlsi::addLayer(project, "Metal1", 8);
+    const auto parent = openvlsi::createLayoutCell(project, "parent");
+    const auto child = openvlsi::createLayoutCell(project, "child");
+    const auto polygon = openvlsi::addPolygon(project, parent, layer, {{0, 0}, {1000, 0}, {500, 800}});
+    const auto port = openvlsi::addPort(project, parent, "P1", layer, {0, 0, 100, 100});
+    const auto instance = openvlsi::addLayoutInstance(project, parent, child, "child_1", 200, 300);
     CHECK(project.layoutCells.at(parent).shapes.contains(polygon));
     CHECK(project.layoutCells.at(parent).ports.contains(port));
     CHECK(project.layoutCells.at(parent).instances.contains(instance));
     CHECK(project.layoutCells.at(parent).shapes.at(polygon).polygon.size() == 3);
     CHECK(project.validate().empty());
     const auto serialized = project.serialize();
-    CHECK(ice::Project::deserialize(serialized).serialize() == serialized);
+    CHECK(openvlsi::Project::deserialize(serialized).serialize() == serialized);
 }
 
 TEST_CASE("layout spacing changes do not reject off-grid layout or schematic data") {
-    ice::Project project;
+    openvlsi::Project project;
     project.identity = "layout-spacing-test";
     project.name = "layout-spacing-test";
     project.grid = 10;
 
-    const auto layer = ice::addLayer(project, "Metal1", 8);
-    const auto layout = ice::createLayoutCell(project, "top");
-    ice::addPolygon(project, layout, layer, {{0, 0}, {13, 0}, {5, 17}});
+    const auto layer = openvlsi::addLayer(project, "Metal1", 8);
+    const auto layout = openvlsi::createLayoutCell(project, "top");
+    openvlsi::addPolygon(project, layout, layer, {{0, 0}, {13, 0}, {5, 17}});
 
-    const auto schematic = ice::createSchematicCell(project, "top", "example.pdk");
+    const auto schematic = openvlsi::createSchematicCell(project, "top", "example.pdk");
     const auto symbolId = project.nextId();
-    ice::Symbol symbol;
+    openvlsi::Symbol symbol;
     symbol.id = symbolId;
     symbol.name = "device";
     symbol.artwork = "device";
     project.schematicCells.at(schematic).symbols.emplace(symbolId, symbol);
     const auto instanceId = project.nextId();
-    project.schematicCells.at(schematic).instances.emplace(instanceId,
-                                                           ice::SchematicInstance{instanceId, symbolId, "X1", 10, 10});
+    project.schematicCells.at(schematic).instances.emplace(
+        instanceId, openvlsi::SchematicInstance{instanceId, symbolId, "X1", 10, 10});
 
-    ice::ProjectSession session(project);
+    openvlsi::ProjectSession session(project);
     bool changed = true;
     try {
-        session.execute("change layout spacing", [](ice::Project &value) { value.grid = 7; });
+        session.execute("change layout spacing", [](openvlsi::Project &value) { value.grid = 7; });
     } catch (...) {
         changed = false;
     }
@@ -3686,34 +3704,35 @@ TEST_CASE("layout spacing changes do not reject off-grid layout or schematic dat
 }
 
 TEST_CASE("planned devices are projected from a schematic") {
-    ice::Project project;
+    openvlsi::Project project;
     project.identity = "planned";
     project.name = "planned";
-    const auto schematicId = ice::createSchematicCell(project, "amp", "example.pdk");
+    const auto schematicId = openvlsi::createSchematicCell(project, "amp", "example.pdk");
 
-    const auto resistorId = ice::addSymbol(project, schematicId, "resistor");
+    const auto resistorId = openvlsi::addSymbol(project, schematicId, "resistor");
     auto &resistor = project.schematicCells.at(schematicId).symbols.at(resistorId);
     const auto resistorLeft = project.nextId();
     const auto resistorRight = project.nextId();
-    resistor.pins.push_back({resistorLeft, "A", -10, 0, ice::PinDirection::left});
-    resistor.pins.push_back({resistorRight, "B", 10, 0, ice::PinDirection::right});
+    resistor.pins.push_back({resistorLeft, "A", -10, 0, openvlsi::PinDirection::left});
+    resistor.pins.push_back({resistorRight, "B", 10, 0, openvlsi::PinDirection::right});
 
-    const auto capacitorId = ice::addSymbol(project, schematicId, "capacitor");
+    const auto capacitorId = openvlsi::addSymbol(project, schematicId, "capacitor");
     auto &capacitor = project.schematicCells.at(schematicId).symbols.at(capacitorId);
     const auto capacitorLeft = project.nextId();
     const auto capacitorRight = project.nextId();
-    capacitor.pins.push_back({capacitorLeft, "A", -10, 0, ice::PinDirection::left});
-    capacitor.pins.push_back({capacitorRight, "B", 10, 0, ice::PinDirection::right});
+    capacitor.pins.push_back({capacitorLeft, "A", -10, 0, openvlsi::PinDirection::left});
+    capacitor.pins.push_back({capacitorRight, "B", 10, 0, openvlsi::PinDirection::right});
 
-    ice::addSchematicInstance(project, schematicId, resistorId, "R1", 0, 0);
-    ice::addSchematicInstance(project, schematicId, capacitorId, "C1", 100, 0);
+    openvlsi::addSchematicInstance(project, schematicId, resistorId, "R1", 0, 0);
+    openvlsi::addSchematicInstance(project, schematicId, capacitorId, "C1", 100, 0);
     const auto netId = project.nextId();
-    project.schematicCells.at(schematicId).nets.emplace(netId, ice::Net{netId, "out", {resistorRight, capacitorLeft}});
+    project.schematicCells.at(schematicId)
+        .nets.emplace(netId, openvlsi::Net{netId, "out", {resistorRight, capacitorLeft}});
     project.schematicCells.at(schematicId).nets.at(netId).labelAnchor =
-        ice::NetLabelAnchor{resistorRight, capacitorLeft, 0.25, true};
+        openvlsi::NetLabelAnchor{resistorRight, capacitorLeft, 0.25, true};
     CHECK(project.validate().empty());
 
-    const auto layoutId = ice::createLayoutFromSchematic(project, schematicId);
+    const auto layoutId = openvlsi::createLayoutFromSchematic(project, schematicId);
     const auto &layout = project.layoutCells.at(layoutId);
     CHECK(layout.pdk == "example.pdk");
     CHECK(layout.name == "amp");
@@ -3724,8 +3743,8 @@ TEST_CASE("planned devices are projected from a schematic") {
     CHECK(layoutNet != layout.nets.end());
     CHECK(layoutNet->second.name == "out");
 
-    ice::ObjectId resistorDevice = 0;
-    ice::ObjectId capacitorDevice = 0;
+    openvlsi::ObjectId resistorDevice = 0;
+    openvlsi::ObjectId capacitorDevice = 0;
     for (const auto &[_, device] : layout.plannedDevices) {
         CHECK(device.width > 0);
         CHECK(device.height > 0);
@@ -3747,7 +3766,7 @@ TEST_CASE("planned devices are projected from a schematic") {
     CHECK(project.validate().empty());
 
     const auto serialized = project.serialize();
-    const auto roundTrip = ice::Project::deserialize(serialized);
+    const auto roundTrip = openvlsi::Project::deserialize(serialized);
     CHECK(roundTrip.serialize() == serialized);
     CHECK(roundTrip.layoutCells.at(layoutId).plannedDevices.size() == 2);
     CHECK(roundTrip.layoutCells.at(layoutId).plannedConnections.size() == 1);
@@ -3763,52 +3782,52 @@ TEST_CASE("planned devices are projected from a schematic") {
     CHECK(roundTripSchematicNet.labelAnchor->fraction == 0.25);
     CHECK(roundTripSchematicNet.labelAnchor->sideB);
 
-    const auto secondLayoutId = ice::createLayoutFromSchematic(project, schematicId);
+    const auto secondLayoutId = openvlsi::createLayoutFromSchematic(project, schematicId);
     CHECK(project.layoutCells.at(secondLayoutId).name != layout.name);
 }
 
 TEST_CASE("planned connections can target placed layout instance pins") {
-    ice::Project project;
+    openvlsi::Project project;
     project.identity = "planned-instance";
     project.name = "planned-instance";
-    const auto schematicId = ice::createSchematicCell(project, "amp", "example.pdk");
+    const auto schematicId = openvlsi::createSchematicCell(project, "amp", "example.pdk");
 
-    const auto symbolId = ice::addSymbol(project, schematicId, "NMOS");
+    const auto symbolId = openvlsi::addSymbol(project, schematicId, "NMOS");
     auto &symbol = project.schematicCells.at(schematicId).symbols.at(symbolId);
     const auto drain = project.nextId();
-    symbol.pins.push_back({drain, "D", 0, 0, ice::PinDirection::right});
-    const auto schematicInstance = ice::addSchematicInstance(project, schematicId, symbolId, "M1", 0, 0);
+    symbol.pins.push_back({drain, "D", 0, 0, openvlsi::PinDirection::right});
+    const auto schematicInstance = openvlsi::addSchematicInstance(project, schematicId, symbolId, "M1", 0, 0);
 
-    const auto layoutId = ice::createLayoutFromSchematic(project, schematicId);
+    const auto layoutId = openvlsi::createLayoutFromSchematic(project, schematicId);
     auto &layout = project.layoutCells.at(layoutId);
     CHECK(layout.plannedDevices.size() == 1);
     const auto plannedId = layout.plannedDevices.begin()->first;
 
-    const auto childId = ice::createLayoutCell(project, "child", "example.pdk");
-    const auto layerId = ice::addLayer(project, "Metal1", 8);
-    const auto portId = ice::addPort(project, childId, "D", layerId, ice::Rect{0, 0, 100, 200});
+    const auto childId = openvlsi::createLayoutCell(project, "child", "example.pdk");
+    const auto layerId = openvlsi::addLayer(project, "Metal1", 8);
+    const auto portId = openvlsi::addPort(project, childId, "D", layerId, openvlsi::Rect{0, 0, 100, 200});
     const auto instanceId = project.nextId();
-    ice::LayoutInstance instance{instanceId, childId, "X1", 100, 100, ice::Orientation::r0};
+    openvlsi::LayoutInstance instance{instanceId, childId, "X1", 100, 100, openvlsi::Orientation::r0};
     instance.schematicInstance = schematicInstance;
     layout.instances.emplace(instanceId, instance);
 
     const auto connectionId = project.nextId();
-    ice::PlannedConnection connection{connectionId, plannedId, instanceId, 0};
+    openvlsi::PlannedConnection connection{connectionId, plannedId, instanceId, 0};
     connection.fromPin = "D";
     connection.toPin = "D";
     connection.toPort = portId;
-    connection.fromSide = ice::PortSide::right;
-    connection.toSide = ice::PortSide::top;
+    connection.fromSide = openvlsi::PortSide::right;
+    connection.toSide = openvlsi::PortSide::top;
     connection.routed = true;
     layout.plannedConnections.emplace(connectionId, connection);
-    const auto topPortId = ice::addPort(project, layoutId, "OUT", layerId, ice::Rect{200, 200, 100, 100});
+    const auto topPortId = openvlsi::addPort(project, layoutId, "OUT", layerId, openvlsi::Rect{200, 200, 100, 100});
     layout.ports.at(topPortId).schematicInstance = schematicInstance;
     const auto topConnectionId = project.nextId();
-    ice::PlannedConnection topConnection{topConnectionId, plannedId, topPortId, 0};
+    openvlsi::PlannedConnection topConnection{topConnectionId, plannedId, topPortId, 0};
     topConnection.fromPin = "D";
     layout.plannedConnections.emplace(topConnectionId, topConnection);
     CHECK(project.validate().empty());
-    CHECK(ice::schematicForLayout(project, layoutId) == schematicId);
+    CHECK(openvlsi::schematicForLayout(project, layoutId) == schematicId);
 
     auto badConnection = connection;
     badConnection.id = project.nextId();
@@ -3818,7 +3837,7 @@ TEST_CASE("planned connections can target placed layout instance pins") {
     layout.plannedConnections.erase(badConnection.id);
 
     const auto serialized = project.serialize();
-    const auto roundTrip = ice::Project::deserialize(serialized);
+    const auto roundTrip = openvlsi::Project::deserialize(serialized);
     const auto &roundLayout = roundTrip.layoutCells.at(layoutId);
     CHECK(roundLayout.instances.contains(instanceId));
     CHECK(roundLayout.instances.at(instanceId).schematicInstance == schematicInstance);
@@ -3827,8 +3846,8 @@ TEST_CASE("planned connections can target placed layout instance pins") {
     CHECK(roundConnection.fromPin == "D");
     CHECK(roundConnection.toPin == "D");
     CHECK(roundConnection.toPort == portId);
-    CHECK(roundConnection.fromSide == ice::PortSide::right);
-    CHECK(roundConnection.toSide == ice::PortSide::top);
+    CHECK(roundConnection.fromSide == openvlsi::PortSide::right);
+    CHECK(roundConnection.toSide == openvlsi::PortSide::top);
     CHECK(roundConnection.routed);
     CHECK(roundLayout.plannedConnections.contains(topConnectionId));
     CHECK(roundLayout.plannedConnections.at(topConnectionId).to == topPortId);
@@ -3838,56 +3857,57 @@ TEST_CASE("planned connections can target placed layout instance pins") {
 }
 
 TEST_CASE("interchange, verification, and plugin lifecycle are explicit") {
-    ice::Project project;
+    openvlsi::Project project;
     project.identity = "design";
     project.name = "design";
     auto layer = project.nextId();
-    project.layers.emplace(layer, ice::Layer{layer, "metal1", 1});
+    project.layers.emplace(layer, openvlsi::Layer{layer, "metal1", 1});
     auto cell = project.nextId();
-    ice::LayoutCell layout{cell, "top"};
+    openvlsi::LayoutCell layout{cell, "top"};
     auto shape = project.nextId();
-    layout.shapes.emplace(shape, ice::Shape{shape, layer, std::nullopt, {0, 0, 10, 10}});
+    layout.shapes.emplace(shape, openvlsi::Shape{shape, layer, std::nullopt, {0, 0, 10, 10}});
     project.layoutCells.emplace(cell, layout);
-    auto path = std::filesystem::temp_directory_path() / "ice-layout.gds";
-    ice::LayoutInterchange::exportGds(project, cell, path);
-    auto imported = ice::LayoutInterchange::importGds(path);
+    auto path = std::filesystem::temp_directory_path() / "openvlsi-layout.gds";
+    openvlsi::LayoutInterchange::exportGds(project, cell, path);
+    auto imported = openvlsi::LayoutInterchange::importGds(path);
     CHECK(imported.layoutCells.size() == 1);
-    auto report = ice::LocalVerificationAdapter().run(project);
+    auto report = openvlsi::LocalVerificationAdapter().run(project);
     CHECK(report.drc.empty());
-    CHECK(ice::serializeVerificationReport(report).find("\"pex\"") != std::string::npos);
-    auto future = ice::VerificationScheduler().schedule(project, std::make_shared<ice::LocalVerificationAdapter>());
+    CHECK(openvlsi::serializeVerificationReport(report).find("\"pex\"") != std::string::npos);
+    auto future =
+        openvlsi::VerificationScheduler().schedule(project, std::make_shared<openvlsi::LocalVerificationAdapter>());
     CHECK(future.get().schemaVersion == 1);
     std::filesystem::remove(path);
 
-    auto pluginRoot = std::filesystem::temp_directory_path() / "ice-plugin";
+    auto pluginRoot = std::filesystem::temp_directory_path() / "openvlsi-plugin";
     std::filesystem::create_directories(pluginRoot);
     std::ofstream(pluginRoot / "plugin.toml")
-        << "[plugin]\nname=\"test-plugin\"\nversion=\"1.0.0\"\nice_target=\"0.1.0\"\n"
+        << "[plugin]\nname=\"test-plugin\"\nversion=\"1.0.0\"\nopenvlsi_target=\"0.1.0\"\n"
            "\n[permissions]\nread_project=true\nmutate_project=false\n";
-    ice::PluginManager plugins;
+    openvlsi::PluginManager plugins;
     plugins.discover(pluginRoot);
     plugins.initialize("test-plugin");
     plugins.enable("test-plugin");
-    CHECK(plugins.get("test-plugin").state == ice::PluginState::enabled);
+    CHECK(plugins.get("test-plugin").state == openvlsi::PluginState::enabled);
     plugins.disable("test-plugin");
-    CHECK(plugins.get("test-plugin").state == ice::PluginState::disabled);
+    CHECK(plugins.get("test-plugin").state == openvlsi::PluginState::disabled);
     // Disabled plugins can be re-enabled without re-initialization.
     plugins.enable("test-plugin");
-    CHECK(plugins.get("test-plugin").state == ice::PluginState::enabled);
+    CHECK(plugins.get("test-plugin").state == openvlsi::PluginState::enabled);
     plugins.disable("test-plugin");
     plugins.unload("test-plugin");
     std::filesystem::remove_all(pluginRoot);
 }
 
 TEST_CASE("project reports are project-level metadata") {
-    ice::Project project;
+    openvlsi::Project project;
     project.identity = "design";
     project.name = "design";
     const auto reportId = project.nextId();
-    project.reports.emplace(reportId, ice::ProjectReport{reportId, "rlc comparison", "scripts/rlc_comparison.py"});
+    project.reports.emplace(reportId, openvlsi::ProjectReport{reportId, "rlc comparison", "scripts/rlc_comparison.py"});
     CHECK(project.validate().empty());
     CHECK(project.nextId() == reportId + 1);
-    const auto roundTrip = ice::Project::deserialize(project.serialize());
+    const auto roundTrip = openvlsi::Project::deserialize(project.serialize());
     CHECK(roundTrip.reports.contains(reportId));
     CHECK(roundTrip.reports.at(reportId).name == "rlc comparison");
     CHECK(roundTrip.reports.at(reportId).path == "scripts/rlc_comparison.py");
@@ -3901,32 +3921,32 @@ TEST_CASE("project reports are project-level metadata") {
 }
 
 TEST_CASE("simulation runs are persisted under the project build directory") {
-    ice::Project project;
+    openvlsi::Project project;
     project.identity = "design";
     project.name = "design";
     const auto simulationId = project.nextId();
-    ice::SimulationItem simulation;
+    openvlsi::SimulationItem simulation;
     simulation.id = simulationId;
     simulation.name = "rlc_sim";
     project.simulations.emplace(simulationId, simulation);
 
-    ice::SimulationRequest request;
+    openvlsi::SimulationRequest request;
     request.analysis = "transient";
     request.stop = 0.01;
     request.step = 1e-5;
     request.netlist = {"V1 in 0 5", "R1 in n1 1k"};
     request.probeSignals = {"v(in)", "v(n1)"};
 
-    ice::SimulationResult result;
-    result.state = ice::JobState::succeeded;
+    openvlsi::SimulationResult result;
+    result.state = openvlsi::JobState::succeeded;
     result.analysis = "transient";
     result.simulator = "ngspice";
     result.simulator_version = "test";
     result.time = {0.0, 1e-6};
     result.traces = {{"v(in)", {5.0, 5.0}}, {"v(n1)", {0.0, 1.0}}};
 
-    ice::SimulationRunContext context;
-    context.projectRoot = std::filesystem::temp_directory_path() / "ice-simulation-store";
+    openvlsi::SimulationRunContext context;
+    context.projectRoot = std::filesystem::temp_directory_path() / "openvlsi-simulation-store";
     context.projectIdentity = project.identity;
     context.projectName = project.name;
     context.simulationId = simulationId;
@@ -3936,20 +3956,20 @@ TEST_CASE("simulation runs are persisted under the project build directory") {
     context.request = request;
     context.directives = "";
     context.netlistNotes = {"test note"};
-    ice::SimulationGraph graph;
+    openvlsi::SimulationGraph graph;
     graph.id = 1;
     graph.name = "RLC response";
     graph.ySignals = {"v(in)", "v(n1)"};
     context.graphs.push_back(graph);
 
     std::filesystem::remove_all(context.projectRoot);
-    const auto serialized = ice::serializeSimulationRun(context, result);
-    CHECK(serialized.find("\"format\": \"ice-simulation-result\"") != std::string::npos);
+    const auto serialized = openvlsi::serializeSimulationRun(context, result);
+    CHECK(serialized.find("\"format\": \"openvlsi-simulation-result\"") != std::string::npos);
     CHECK(serialized.find("\"simulationName\"") == std::string::npos);
     CHECK(serialized.find("\"name\": \"rlc_sim\"") != std::string::npos);
     CHECK(serialized.find("\"netlist_notes\"") != std::string::npos);
 
-    const auto artifact = ice::writeSimulationRun(context, result);
+    const auto artifact = openvlsi::writeSimulationRun(context, result);
     CHECK(std::filesystem::is_regular_file(artifact.path));
     CHECK(!std::filesystem::exists(artifact.path.string() + ".tmp"));
     CHECK(artifact.path.string().find("build/simulations/" + std::to_string(simulationId) + "-rlc_sim/runs/") !=
@@ -3957,30 +3977,30 @@ TEST_CASE("simulation runs are persisted under the project build directory") {
     CHECK(artifact.path.stem().string() == artifact.runId);
     std::ifstream input(artifact.path);
     const std::string content((std::istreambuf_iterator<char>(input)), {});
-    CHECK(content.find("\"format\": \"ice-simulation-result\"") != std::string::npos);
+    CHECK(content.find("\"format\": \"openvlsi-simulation-result\"") != std::string::npos);
     CHECK(content.find("\"state\": \"succeeded\"") != std::string::npos);
     CHECK(content.find("\"test note\"") != std::string::npos);
     CHECK(content.find("\"RLC response\"") != std::string::npos);
 
-    const auto stored = ice::readSimulationRun(artifact.path);
+    const auto stored = openvlsi::readSimulationRun(artifact.path);
     CHECK(stored.runId == artifact.runId);
     CHECK(stored.simulationId == simulationId);
     CHECK(stored.schematicId == 42);
     CHECK(stored.result.time.size() == 2);
     CHECK(stored.result.traces.size() == 2);
-    const auto latest = ice::latestSimulationRun(context.projectRoot, simulationId);
+    const auto latest = openvlsi::latestSimulationRun(context.projectRoot, simulationId);
     CHECK(latest.has_value());
     CHECK(latest->path == artifact.path);
-    const auto latestBySchematic = ice::latestSimulationRun(context.projectRoot, std::nullopt, 42);
+    const auto latestBySchematic = openvlsi::latestSimulationRun(context.projectRoot, std::nullopt, 42);
     CHECK(latestBySchematic.has_value());
     CHECK(latestBySchematic->runId == artifact.runId);
 
     auto failed = result;
-    failed.state = ice::JobState::failed;
+    failed.state = openvlsi::JobState::failed;
     failed.error = "simulated failure";
     failed.time.clear();
     failed.traces.clear();
-    const auto failedArtifact = ice::writeSimulationRun(context, failed);
+    const auto failedArtifact = openvlsi::writeSimulationRun(context, failed);
     std::ifstream failedInput(failedArtifact.path);
     const std::string failedContent((std::istreambuf_iterator<char>(failedInput)), {});
     CHECK(failedContent.find("\"state\": \"failed\"") != std::string::npos);
@@ -3988,46 +4008,47 @@ TEST_CASE("simulation runs are persisted under the project build directory") {
 
     auto traversal = context;
     traversal.simulationName = "../../escape";
-    const auto directory = ice::simulationRunDirectory(context.projectRoot, traversal);
+    const auto directory = openvlsi::simulationRunDirectory(context.projectRoot, traversal);
     CHECK(directory.string().find("..") == std::string::npos);
     CHECK(directory.string().find("-escape") != std::string::npos);
     std::filesystem::remove_all(context.projectRoot);
 }
 
 TEST_CASE("project reports can be created and edited through core helpers") {
-    const auto root = std::filesystem::temp_directory_path() / "ice-report-core-test";
+    const auto root = std::filesystem::temp_directory_path() / "openvlsi-report-core-test";
     std::filesystem::remove_all(root);
 
-    ice::Project project;
+    openvlsi::Project project;
     project.identity = "report-test";
     project.name = "report-test";
-    const auto reportId = ice::createProjectReport(project, root, "Comparison Report",
-                                                   "# custom report\ndef build_script(ctx):\n    return \"# ok\"\n");
+    const auto reportId = openvlsi::createProjectReport(
+        project, root, "Comparison Report", "# custom report\ndef build_script(ctx):\n    return \"# ok\"\n");
     CHECK(project.reports.contains(reportId));
     const auto &report = project.reports.at(reportId);
     CHECK(report.name == "Comparison Report");
     CHECK(report.path == "scripts/comparison-report.py");
     CHECK(std::filesystem::is_regular_file(root / report.path));
-    CHECK(ice::readProjectReportSource(root, report).find("# custom report") != std::string::npos);
+    CHECK(openvlsi::readProjectReportSource(root, report).find("# custom report") != std::string::npos);
 
-    ice::writeProjectReportSource(root, report, "# updated\n");
-    CHECK(ice::readProjectReportSource(root, report) == "# updated\n");
+    openvlsi::writeProjectReportSource(root, report, "# updated\n");
+    CHECK(openvlsi::readProjectReportSource(root, report) == "# updated\n");
     CHECK(project.validate().empty());
-    const auto graphPath = ice::projectSimulationScriptGraphPath(root, report);
+    const auto graphPath = openvlsi::projectSimulationScriptGraphPath(root, report);
     CHECK(graphPath.filename() == "graphs.json");
     CHECK(graphPath.string().find("build/simulation-scripts") != std::string::npos);
-    CHECK(ice::sanitizedReportSlug("../../Comp/are") == "comp-are");
-    CHECK_THROWS_AS(ice::createProjectReport(project, root, "Comparison Report", "# duplicate\n"), ice::ProjectError);
+    CHECK(openvlsi::sanitizedReportSlug("../../Comp/are") == "comp-are");
+    CHECK_THROWS_AS(openvlsi::createProjectReport(project, root, "Comparison Report", "# duplicate\n"),
+                    openvlsi::ProjectError);
 
-    const auto templateReportId = ice::createProjectReport(project, root, "Template Report");
-    CHECK(ice::readProjectReportSource(root, project.reports.at(templateReportId)).find("# ICE simulation script") !=
-          std::string::npos);
+    const auto templateReportId = openvlsi::createProjectReport(project, root, "Template Report");
+    CHECK(openvlsi::readProjectReportSource(root, project.reports.at(templateReportId))
+              .find("# OpenVLSI simulation script") != std::string::npos);
     std::filesystem::remove_all(root);
 }
 
 TEST_CASE("simulation script graph payloads are parsed for the GUI") {
     const std::string payload = R"JSON({
-  "format": "ice-simulation-script-graphs",
+  "format": "openvlsi-simulation-script-graphs",
   "version": 1,
   "graphs": [
     {
@@ -4045,7 +4066,7 @@ TEST_CASE("simulation script graph payloads are parsed for the GUI") {
     }
   ]
 })JSON";
-    const auto graphs = ice::parseSimulationScriptGraphs(payload);
+    const auto graphs = openvlsi::parseSimulationScriptGraphs(payload);
     CHECK(graphs.size() == 1);
     CHECK(graphs[0].name == "RLC response");
     CHECK(graphs[0].x.size() == 3);
@@ -4053,66 +4074,66 @@ TEST_CASE("simulation script graph payloads are parsed for the GUI") {
     CHECK(graphs[0].series[1].name == "n2");
     CHECK(graphs[0].xMin.has_value());
     CHECK(!graphs[0].yMin.has_value());
-    CHECK_THROWS_AS(ice::parseSimulationScriptGraphs("{\"format\":\"ice-simulation-script-graphs\","
-                                                     "\"graphs\":[{\"name\":\"bad\",\"x\":[0,1],"
-                                                     "\"series\":[{\"name\":\"s\",\"values\":[0]}]}]}"),
-                    ice::ProjectError);
+    CHECK_THROWS_AS(openvlsi::parseSimulationScriptGraphs("{\"format\":\"openvlsi-simulation-script-graphs\","
+                                                          "\"graphs\":[{\"name\":\"bad\",\"x\":[0,1],"
+                                                          "\"series\":[{\"name\":\"s\",\"values\":[0]}]}]}"),
+                    openvlsi::ProjectError);
 }
 
 TEST_CASE("project items can be removed with reference checks") {
-    ice::Project project;
+    openvlsi::Project project;
     project.identity = "remove-test";
     project.name = "remove-test";
 
-    const auto usedSchematic = ice::createSchematicCell(project, "used");
-    const auto unusedSchematic = ice::createSchematicCell(project, "unused");
-    ice::SimulationItem simulation;
+    const auto usedSchematic = openvlsi::createSchematicCell(project, "used");
+    const auto unusedSchematic = openvlsi::createSchematicCell(project, "unused");
+    openvlsi::SimulationItem simulation;
     simulation.id = project.nextId();
     simulation.name = "sim";
     simulation.schematic = usedSchematic;
     project.simulations.emplace(simulation.id, simulation);
-    CHECK_THROWS_AS(ice::removeSchematicCell(project, usedSchematic), ice::ProjectError);
-    ice::removeSimulationItem(project, simulation.id);
+    CHECK_THROWS_AS(openvlsi::removeSchematicCell(project, usedSchematic), openvlsi::ProjectError);
+    openvlsi::removeSimulationItem(project, simulation.id);
     CHECK(!project.simulations.contains(simulation.id));
-    ice::removeSchematicCell(project, usedSchematic);
-    ice::removeSchematicCell(project, unusedSchematic);
+    openvlsi::removeSchematicCell(project, usedSchematic);
+    openvlsi::removeSchematicCell(project, unusedSchematic);
     CHECK(project.schematicCells.empty());
 
-    const auto parentSchematic = ice::createSchematicCell(project, "parent");
-    const auto childSchematic = ice::createSchematicCell(project, "child");
-    ice::addSymbol(project, parentSchematic, "child_block", {}, childSchematic);
-    CHECK_THROWS_AS(ice::removeSchematicCell(project, childSchematic), ice::ProjectError);
+    const auto parentSchematic = openvlsi::createSchematicCell(project, "parent");
+    const auto childSchematic = openvlsi::createSchematicCell(project, "child");
+    openvlsi::addSymbol(project, parentSchematic, "child_block", {}, childSchematic);
+    CHECK_THROWS_AS(openvlsi::removeSchematicCell(project, childSchematic), openvlsi::ProjectError);
 
-    const auto parentLayout = ice::createLayoutCell(project, "parent_layout");
-    const auto childLayout = ice::createLayoutCell(project, "child_layout");
-    ice::addLayoutInstance(project, parentLayout, childLayout, "I1", 0, 0);
-    CHECK_THROWS_AS(ice::removeLayoutItem(project, childLayout), ice::ProjectError);
-    ice::removeLayoutItem(project, parentLayout);
-    ice::removeLayoutItem(project, childLayout);
+    const auto parentLayout = openvlsi::createLayoutCell(project, "parent_layout");
+    const auto childLayout = openvlsi::createLayoutCell(project, "child_layout");
+    openvlsi::addLayoutInstance(project, parentLayout, childLayout, "I1", 0, 0);
+    CHECK_THROWS_AS(openvlsi::removeLayoutItem(project, childLayout), openvlsi::ProjectError);
+    openvlsi::removeLayoutItem(project, parentLayout);
+    openvlsi::removeLayoutItem(project, childLayout);
     CHECK(project.layoutCells.empty());
 
-    const auto libraryLayout = ice::createLayoutCell(project, "library_layout");
+    const auto libraryLayout = openvlsi::createLayoutCell(project, "library_layout");
     project.layoutCells.at(libraryLayout).library = true;
-    CHECK_THROWS_AS(ice::removeLayoutItem(project, libraryLayout), ice::ProjectError);
+    CHECK_THROWS_AS(openvlsi::removeLayoutItem(project, libraryLayout), openvlsi::ProjectError);
 
-    const auto proceduralId = ice::createProceduralLayout(project, "generated");
+    const auto proceduralId = openvlsi::createProceduralLayout(project, "generated");
     const auto generatedId = project.proceduralLayouts.at(proceduralId).generatedCell;
-    CHECK_THROWS_AS(ice::removeLayoutItem(project, generatedId), ice::ProjectError);
-    ice::removeLayoutItem(project, proceduralId);
+    CHECK_THROWS_AS(openvlsi::removeLayoutItem(project, generatedId), openvlsi::ProjectError);
+    openvlsi::removeLayoutItem(project, proceduralId);
     CHECK(!project.proceduralLayouts.contains(proceduralId));
     CHECK(!project.layoutCells.contains(generatedId));
 }
 
 TEST_CASE("layout paths persist and move as one shape") {
-    ice::Project project;
+    openvlsi::Project project;
     project.identity = "path-test";
     project.name = "path-test";
-    const auto layer = ice::addLayer(project, "Metal1", 1);
-    const auto secondLayer = ice::addLayer(project, "Metal2", 2);
-    const auto viaLayer = ice::addLayer(project, "Via1", 3);
-    const auto cell = ice::createLayoutCell(project, "top");
+    const auto layer = openvlsi::addLayer(project, "Metal1", 1);
+    const auto secondLayer = openvlsi::addLayer(project, "Metal2", 2);
+    const auto viaLayer = openvlsi::addLayer(project, "Via1", 3);
+    const auto cell = openvlsi::createLayoutCell(project, "top");
     const auto pathId = project.nextId();
-    ice::Shape path{pathId, layer, std::nullopt, {0, -200, 1200, 400}, {}};
+    openvlsi::Shape path{pathId, layer, std::nullopt, {0, -200, 1200, 400}, {}};
     path.centerline = {{0, 0}, {1000, 0}, {1000, 200}};
     path.segmentLayers = {layer, secondLayer};
     path.pointVias = {{}, {viaLayer}, {}};
@@ -4122,7 +4143,7 @@ TEST_CASE("layout paths persist and move as one shape") {
     project.layoutCells.at(cell).shapes.emplace(pathId, path);
     CHECK(project.validate().empty());
 
-    auto roundTrip = ice::Project::deserialize(project.serialize());
+    auto roundTrip = openvlsi::Project::deserialize(project.serialize());
     const auto &loaded = roundTrip.layoutCells.at(cell).shapes.at(pathId);
     CHECK(loaded.isPath());
     CHECK(loaded.width == 300);
@@ -4136,17 +4157,17 @@ TEST_CASE("layout paths persist and move as one shape") {
     CHECK(loaded.pointVias[1].size() == 1);
     CHECK(loaded.pointVias[1].front() == viaLayer);
 
-    ice::moveRectangle(roundTrip, cell, pathId, 50, 25);
+    openvlsi::moveRectangle(roundTrip, cell, pathId, 50, 25);
     const auto &moved = roundTrip.layoutCells.at(cell).shapes.at(pathId);
     CHECK(moved.centerline.front().x == 50);
     CHECK(moved.centerline.front().y == 25);
     CHECK(moved.polygon.front().x == -50);
     CHECK(moved.polygon.front().y == -75);
 
-    const auto gds = std::filesystem::temp_directory_path() / "ice-layout-path-test.gds";
-    ice::LayoutInterchange::exportGds(project, cell, gds);
+    const auto gds = std::filesystem::temp_directory_path() / "openvlsi-layout-path-test.gds";
+    openvlsi::LayoutInterchange::exportGds(project, cell, gds);
     CHECK(std::filesystem::is_regular_file(gds));
-    const auto imported = ice::LayoutInterchange::importGds(gds);
+    const auto imported = openvlsi::LayoutInterchange::importGds(gds);
     const auto &importedCell = imported.layoutCells.begin()->second;
     bool metal1ReachesVia = false;
     bool metal2ReachesVia = false;
@@ -4169,16 +4190,16 @@ TEST_CASE("layout paths persist and move as one shape") {
 }
 
 TEST_CASE("layout paths flatten to polygons on every used layer") {
-    ice::Project project;
+    openvlsi::Project project;
     project.identity = "flatten-path-test";
     project.name = "flatten-path-test";
-    const auto metal1 = ice::addLayer(project, "Metal1", 1);
-    const auto metal2 = ice::addLayer(project, "Metal2", 2);
-    const auto via1 = ice::addLayer(project, "Via1", 3);
-    const auto cell = ice::createLayoutCell(project, "top");
+    const auto metal1 = openvlsi::addLayer(project, "Metal1", 1);
+    const auto metal2 = openvlsi::addLayer(project, "Metal2", 2);
+    const auto via1 = openvlsi::addLayer(project, "Via1", 3);
+    const auto cell = openvlsi::createLayoutCell(project, "top");
 
     const auto pathId = project.nextId();
-    ice::Shape path{pathId, metal1, std::nullopt, {0, -200, 1200, 400}, {}};
+    openvlsi::Shape path{pathId, metal1, std::nullopt, {0, -200, 1200, 400}, {}};
     path.centerline = {{0, 0}, {1000, 0}, {1000, 1000}};
     path.segmentLayers = {metal1, metal2};
     path.pointVias = {{}, {via1}, {}};
@@ -4187,13 +4208,13 @@ TEST_CASE("layout paths flatten to polygons on every used layer") {
     project.layoutCells.at(cell).shapes.emplace(pathId, path);
     REQUIRE(project.validate().empty());
 
-    const auto resultIds = ice::flattenLayoutPath(project, cell, pathId);
+    const auto resultIds = openvlsi::flattenLayoutPath(project, cell, pathId);
     REQUIRE(resultIds.size() == 3);
     const auto &flatCell = project.layoutCells.at(cell);
     CHECK(flatCell.shapes.find(pathId) == flatCell.shapes.end());
     CHECK(project.validate().empty());
 
-    std::map<ice::ObjectId, ice::Rect> boundsByLayer;
+    std::map<openvlsi::ObjectId, openvlsi::Rect> boundsByLayer;
     for (const auto resultId : resultIds) {
         const auto &shape = flatCell.shapes.at(resultId);
         CHECK(!shape.isPath());
@@ -4221,12 +4242,12 @@ TEST_CASE("layout paths flatten to polygons on every used layer") {
     // A single-layer path becomes one polygon, and its outside corner extends
     // by half the path width like the mitered canvas outline.
     const auto elbowId = project.nextId();
-    ice::Shape elbow{elbowId, metal1, std::nullopt, {0, 1900, 1200, 1100}, {}};
+    openvlsi::Shape elbow{elbowId, metal1, std::nullopt, {0, 1900, 1200, 1100}, {}};
     elbow.centerline = {{0, 2000}, {1000, 2000}, {1000, 3000}};
     elbow.width = 200;
     project.layoutCells.at(cell).shapes.emplace(elbowId, elbow);
     REQUIRE(project.validate().empty());
-    const auto elbowResults = ice::flattenLayoutPath(project, cell, elbowId);
+    const auto elbowResults = openvlsi::flattenLayoutPath(project, cell, elbowId);
     REQUIRE(elbowResults.size() == 1);
     const auto &elbowPolygon = project.layoutCells.at(cell).shapes.at(elbowResults.front());
     CHECK(elbowPolygon.layer == metal1);
@@ -4238,22 +4259,22 @@ TEST_CASE("layout paths flatten to polygons on every used layer") {
 }
 
 TEST_CASE("layout shape duplicate array and arrange operations are canonical") {
-    ice::Project project;
+    openvlsi::Project project;
     project.identity = "layout-arrange-test";
     project.name = "layout-arrange-test";
     project.grid = 10;
-    const auto layer = ice::addLayer(project, "Metal1", 1);
-    const auto cell = ice::createLayoutCell(project, "top");
+    const auto layer = openvlsi::addLayer(project, "Metal1", 1);
+    const auto cell = openvlsi::createLayoutCell(project, "top");
 
-    const auto rectangle = ice::addRectangle(project, cell, layer, ice::Rect{0, 0, 100, 100});
-    const auto duplicate = ice::duplicateLayoutShapes(project, cell, {rectangle}, 200, 0);
+    const auto rectangle = openvlsi::addRectangle(project, cell, layer, openvlsi::Rect{0, 0, 100, 100});
+    const auto duplicate = openvlsi::duplicateLayoutShapes(project, cell, {rectangle}, 200, 0);
     REQUIRE(duplicate.size() == 1);
     CHECK(project.layoutCells.at(cell).shapes.at(duplicate.front()).rectangle.x == 200);
-    const auto defaultDuplicate = ice::duplicateLayoutShapes(project, cell, {rectangle});
+    const auto defaultDuplicate = openvlsi::duplicateLayoutShapes(project, cell, {rectangle});
     REQUIRE(defaultDuplicate.size() == 1);
     CHECK(project.layoutCells.at(cell).shapes.at(defaultDuplicate.front()).rectangle.x == 110);
 
-    const auto array = ice::arrayLayoutShapes(project, cell, {rectangle}, 2, 2, 300, 200);
+    const auto array = openvlsi::arrayLayoutShapes(project, cell, {rectangle}, 2, 2, 300, 200);
     REQUIRE(array.size() == 3);
     bool foundRight = false;
     bool foundUp = false;
@@ -4269,49 +4290,49 @@ TEST_CASE("layout shape duplicate array and arrange operations are canonical") {
     CHECK(foundCorner);
 
     const auto pathId = project.nextId();
-    ice::Shape path{pathId, layer, std::nullopt, {0, 500, 200, 200}, {}};
+    openvlsi::Shape path{pathId, layer, std::nullopt, {0, 500, 200, 200}, {}};
     path.centerline = {{0, 500}, {100, 600}};
     path.width = 20;
     path.segmentWidths = {20};
     path.segmentLayers = {layer};
     project.layoutCells.at(cell).shapes.emplace(pathId, path);
-    const auto pathDuplicate = ice::duplicateLayoutShapes(project, cell, {pathId}, 50, 25);
+    const auto pathDuplicate = openvlsi::duplicateLayoutShapes(project, cell, {pathId}, 50, 25);
     REQUIRE(pathDuplicate.size() == 1);
     const auto &copiedPath = project.layoutCells.at(cell).shapes.at(pathDuplicate.front());
     CHECK(copiedPath.isPath());
     CHECK(copiedPath.centerline.size() == 2);
     CHECK(copiedPath.centerline.front().x == 50);
     CHECK(copiedPath.centerline.front().y == 525);
-    CHECK((copiedPath.segmentWidths == std::vector<ice::Coordinate>{20}));
-    CHECK((copiedPath.segmentLayers == std::vector<ice::ObjectId>{layer}));
+    CHECK((copiedPath.segmentWidths == std::vector<openvlsi::Coordinate>{20}));
+    CHECK((copiedPath.segmentLayers == std::vector<openvlsi::ObjectId>{layer}));
 
-    const auto left = ice::addRectangle(project, cell, layer, ice::Rect{0, 1000, 100, 100});
-    const auto right = ice::addRectangle(project, cell, layer, ice::Rect{400, 1100, 50, 100});
-    ice::arrangeLayoutShapes(project, cell, {left, right}, ice::LayoutArrange::left);
+    const auto left = openvlsi::addRectangle(project, cell, layer, openvlsi::Rect{0, 1000, 100, 100});
+    const auto right = openvlsi::addRectangle(project, cell, layer, openvlsi::Rect{400, 1100, 50, 100});
+    openvlsi::arrangeLayoutShapes(project, cell, {left, right}, openvlsi::LayoutArrange::left);
     CHECK(project.layoutCells.at(cell).shapes.at(left).rectangle.x == 0);
     CHECK(project.layoutCells.at(cell).shapes.at(right).rectangle.x == 0);
-    ice::arrangeLayoutShapes(project, cell, {left, right}, ice::LayoutArrange::bottom);
+    openvlsi::arrangeLayoutShapes(project, cell, {left, right}, openvlsi::LayoutArrange::bottom);
     CHECK(project.layoutCells.at(cell).shapes.at(left).rectangle.y == 1000);
     CHECK(project.layoutCells.at(cell).shapes.at(right).rectangle.y == 1000);
 }
 
 TEST_CASE("wrapping schematic instances preserves internal and boundary nets") {
-    ice::Project project;
+    openvlsi::Project project;
     project.identity = "wrap-schematic-test";
     project.name = "wrap-schematic-test";
-    const auto parent = ice::createSchematicCell(project, "top");
+    const auto parent = openvlsi::createSchematicCell(project, "top");
     auto &cell = project.schematicCells.at(parent);
 
     const auto addSymbol = [&](const std::string &name) {
-        ice::Symbol symbol;
+        openvlsi::Symbol symbol;
         symbol.id = project.nextId();
         symbol.name = name;
         for (int index = 0; index < 2; ++index) {
-            ice::Pin pin;
+            openvlsi::Pin pin;
             pin.id = project.nextId();
             pin.name = std::string(1, static_cast<char>('A' + index));
             pin.x = index == 0 ? -20 : 20;
-            pin.direction = index == 0 ? ice::PinDirection::left : ice::PinDirection::right;
+            pin.direction = index == 0 ? openvlsi::PinDirection::left : openvlsi::PinDirection::right;
             symbol.pins.push_back(pin);
         }
         const auto id = symbol.id;
@@ -4321,15 +4342,17 @@ TEST_CASE("wrapping schematic instances preserves internal and boundary nets") {
     const auto firstSymbol = addSymbol("first");
     const auto secondSymbol = addSymbol("second");
     const auto outsideSymbol = addSymbol("outside");
-    const auto place = [&](ice::ObjectId symbol, const std::string &name, ice::Coordinate x) {
+    const auto place = [&](openvlsi::ObjectId symbol, const std::string &name, openvlsi::Coordinate x) {
         const auto id = project.nextId();
-        cell.instances.emplace(id, ice::SchematicInstance{id, symbol, name, x, 0});
+        cell.instances.emplace(id, openvlsi::SchematicInstance{id, symbol, name, x, 0});
         return id;
     };
     const auto first = place(firstSymbol, "R1", 0);
     const auto second = place(secondSymbol, "R2", 300);
     const auto outside = place(outsideSymbol, "R3", 600);
-    const auto pin = [&](ice::ObjectId symbol, std::size_t index) { return cell.symbols.at(symbol).pins.at(index).id; };
+    const auto pin = [&](openvlsi::ObjectId symbol, std::size_t index) {
+        return cell.symbols.at(symbol).pins.at(index).id;
+    };
     const auto firstInputPin = pin(firstSymbol, 0);
     const auto firstOutputPin = pin(firstSymbol, 1);
     const auto secondInputPin = pin(secondSymbol, 0);
@@ -4337,12 +4360,12 @@ TEST_CASE("wrapping schematic instances preserves internal and boundary nets") {
     const auto outsideInputPin = pin(outsideSymbol, 0);
     const auto outsideOutputPin = pin(outsideSymbol, 1);
 
-    const auto inputNet = ice::addNet(project, parent, "IN", {firstInputPin, outsideInputPin});
-    const auto internalNet = ice::addNet(project, parent, "MID", {firstOutputPin, secondInputPin});
-    const auto outputNet = ice::addNet(project, parent, "OUT", {secondOutputPin, outsideOutputPin});
+    const auto inputNet = openvlsi::addNet(project, parent, "IN", {firstInputPin, outsideInputPin});
+    const auto internalNet = openvlsi::addNet(project, parent, "MID", {firstOutputPin, secondInputPin});
+    const auto outputNet = openvlsi::addNet(project, parent, "OUT", {secondOutputPin, outsideOutputPin});
     REQUIRE(project.validate().empty());
 
-    const auto result = ice::wrapSchematicInstances(project, parent, {first, second}, "wrapped");
+    const auto result = openvlsi::wrapSchematicInstances(project, parent, {first, second}, "wrapped");
     CHECK(result.cell != 0);
     CHECK(result.instance != 0);
     CHECK(result.ports.size() == 2);
@@ -4367,7 +4390,7 @@ TEST_CASE("wrapping schematic instances preserves internal and boundary nets") {
     CHECK(child.instances.size() == 4);
     CHECK(child.nets.size() == 3);
     REQUIRE(child.nets.contains(internalNet));
-    CHECK((child.nets.at(internalNet).pins == std::vector<ice::ObjectId>{firstOutputPin, secondInputPin}));
+    CHECK((child.nets.at(internalNet).pins == std::vector<openvlsi::ObjectId>{firstOutputPin, secondInputPin}));
     bool foundInputPort = false;
     bool foundOutputPort = false;
     for (const auto &[_, net] : child.nets) {
@@ -4386,34 +4409,35 @@ TEST_CASE("wrapping schematic instances preserves internal and boundary nets") {
     const auto &blockSymbol = wrappedParent.symbols.at(blockInstance.symbol);
     CHECK(blockSymbol.sourceCell == result.cell);
     CHECK(blockSymbol.pins.size() == 2);
-    std::set<ice::ObjectId> blockPinIds;
+    std::set<openvlsi::ObjectId> blockPinIds;
     for (const auto &pin : blockSymbol.pins)
         blockPinIds.insert(pin.id);
-    const auto hasBlockPin = [&](ice::ObjectId netId) {
+    const auto hasBlockPin = [&](openvlsi::ObjectId netId) {
         const auto &pins = wrappedParent.nets.at(netId).pins;
-        return std::any_of(pins.begin(), pins.end(), [&](ice::ObjectId pinId) { return blockPinIds.contains(pinId); });
+        return std::any_of(pins.begin(), pins.end(),
+                           [&](openvlsi::ObjectId pinId) { return blockPinIds.contains(pinId); });
     };
     CHECK(hasBlockPin(inputNet));
     CHECK(hasBlockPin(outputNet));
 }
 
 TEST_CASE("flattened GDS export preserves child geometry") {
-    ice::Project project;
+    openvlsi::Project project;
     project.identity = "flatten-export-test";
     project.name = "flatten-export-test";
-    const auto layer = ice::addLayer(project, "Metal1", 34);
-    const auto child = ice::createLayoutCell(project, "child");
-    ice::addRectangle(project, child, layer, ice::Rect{0, 0, 100, 100});
-    ice::addRectangle(project, child, layer, ice::Rect{200, 0, 100, 100});
-    ice::addRectangle(project, child, layer, ice::Rect{400, 0, 100, 100});
-    const auto parent = ice::createLayoutCell(project, "parent");
+    const auto layer = openvlsi::addLayer(project, "Metal1", 34);
+    const auto child = openvlsi::createLayoutCell(project, "child");
+    openvlsi::addRectangle(project, child, layer, openvlsi::Rect{0, 0, 100, 100});
+    openvlsi::addRectangle(project, child, layer, openvlsi::Rect{200, 0, 100, 100});
+    openvlsi::addRectangle(project, child, layer, openvlsi::Rect{400, 0, 100, 100});
+    const auto parent = openvlsi::createLayoutCell(project, "parent");
     const auto instanceId = project.nextId();
     project.layoutCells.at(parent).instances.emplace(
-        instanceId, ice::LayoutInstance{instanceId, child, "child_1", 5000, 0, ice::Orientation::r0});
+        instanceId, openvlsi::LayoutInstance{instanceId, child, "child_1", 5000, 0, openvlsi::Orientation::r0});
 
-    const auto gds = std::filesystem::temp_directory_path() / "ice-flatten-export-test.gds";
-    ice::LayoutInterchange::exportFlattenedGds(project, parent, gds);
-    const auto imported = ice::LayoutInterchange::importGds(gds);
+    const auto gds = std::filesystem::temp_directory_path() / "openvlsi-flatten-export-test.gds";
+    openvlsi::LayoutInterchange::exportFlattenedGds(project, parent, gds);
+    const auto imported = openvlsi::LayoutInterchange::importGds(gds);
     CHECK(imported.layoutCells.size() == 1);
     CHECK(imported.layoutCells.begin()->second.shapes.size() == 3);
     bool shifted = false;
@@ -4426,16 +4450,16 @@ TEST_CASE("flattened GDS export preserves child geometry") {
 
     // Flattening must retain the top cell's logical pins, not only child
     // geometry.
-    const auto portId = ice::addPort(project, parent, "OUT", layer, ice::Rect{0, 0, 100, 100},
-                                     ice::PortDirection::output, ice::PortSide::left, 0, "OUT");
+    const auto portId = openvlsi::addPort(project, parent, "OUT", layer, openvlsi::Rect{0, 0, 100, 100},
+                                          openvlsi::PortDirection::output, openvlsi::PortSide::left, 0, "OUT");
     CHECK(portId != 0);
-    const auto portedGds = std::filesystem::temp_directory_path() / "ice-ported-export-test.gds";
-    ice::LayoutInterchange::exportFlattenedGds(project, parent, portedGds);
-    ice::LayoutImportOptions options;
+    const auto portedGds = std::filesystem::temp_directory_path() / "openvlsi-ported-export-test.gds";
+    openvlsi::LayoutInterchange::exportFlattenedGds(project, parent, portedGds);
+    openvlsi::LayoutImportOptions options;
     options.portLabelLayer = 34;
     options.portWidth = 100;
     options.portHeight = 100;
-    const auto ported = ice::LayoutInterchange::importGds(portedGds, options);
+    const auto ported = openvlsi::LayoutInterchange::importGds(portedGds, options);
     REQUIRE(ported.layoutCells.size() == 1);
     const auto &portedCell = ported.layoutCells.begin()->second;
     CHECK(portedCell.ports.size() == 1);
@@ -4451,26 +4475,27 @@ TEST_CASE("flattened GDS export preserves child geometry") {
 }
 
 TEST_CASE("hierarchical GDS export preserves cells, instances, transforms, and ports") {
-    ice::Project project;
+    openvlsi::Project project;
     project.identity = "hierarchical-gds";
     project.name = "hierarchical-gds";
-    const auto layer = ice::addLayer(project, "Metal1", 34);
-    const auto leaf = ice::createLayoutCell(project, "leaf");
-    ice::addRectangle(project, leaf, layer, ice::Rect{0, 0, 100, 100});
-    ice::addPort(project, leaf, "IN", layer, {0, 0, 10, 10}, ice::PortDirection::input, ice::PortSide::left, 0, "IN");
+    const auto layer = openvlsi::addLayer(project, "Metal1", 34);
+    const auto leaf = openvlsi::createLayoutCell(project, "leaf");
+    openvlsi::addRectangle(project, leaf, layer, openvlsi::Rect{0, 0, 100, 100});
+    openvlsi::addPort(project, leaf, "IN", layer, {0, 0, 10, 10}, openvlsi::PortDirection::input,
+                      openvlsi::PortSide::left, 0, "IN");
 
-    const auto middle = ice::createLayoutCell(project, "middle");
-    ice::addLayoutInstance(project, middle, leaf, "M1", 250, 30, ice::Orientation::r90);
+    const auto middle = openvlsi::createLayoutCell(project, "middle");
+    openvlsi::addLayoutInstance(project, middle, leaf, "M1", 250, 30, openvlsi::Orientation::r90);
 
-    const auto parent = ice::createLayoutCell(project, "parent");
-    ice::addLayoutInstance(project, parent, middle, "U1", 1000, 2000, ice::Orientation::r0);
-    ice::addLayoutInstance(project, parent, leaf, "U2", 4000, 0, ice::Orientation::m45);
+    const auto parent = openvlsi::createLayoutCell(project, "parent");
+    openvlsi::addLayoutInstance(project, parent, middle, "U1", 1000, 2000, openvlsi::Orientation::r0);
+    openvlsi::addLayoutInstance(project, parent, leaf, "U2", 4000, 0, openvlsi::Orientation::m45);
 
-    const auto gds = std::filesystem::temp_directory_path() / "ice-hierarchical-export-test.gds";
-    ice::LayoutInterchange::exportGds(project, parent, gds);
-    ice::LayoutImportOptions options;
+    const auto gds = std::filesystem::temp_directory_path() / "openvlsi-hierarchical-export-test.gds";
+    openvlsi::LayoutInterchange::exportGds(project, parent, gds);
+    openvlsi::LayoutImportOptions options;
     options.portLabelLayer = 34;
-    const auto imported = ice::LayoutInterchange::importGds(gds, options);
+    const auto imported = openvlsi::LayoutInterchange::importGds(gds, options);
     std::filesystem::remove(gds);
 
     REQUIRE(imported.layoutCells.size() == 3);
@@ -4478,7 +4503,7 @@ TEST_CASE("hierarchical GDS export preserves cells, instances, transforms, and p
     const auto &top = imported.layoutCells.begin()->second;
     REQUIRE(top.instances.size() == 2);
 
-    const auto findByName = [&](const std::string &name) -> const ice::LayoutCell * {
+    const auto findByName = [&](const std::string &name) -> const openvlsi::LayoutCell * {
         for (const auto &[_, cell] : imported.layoutCells)
             if (cell.name == name)
                 return &cell;
@@ -4502,31 +4527,31 @@ TEST_CASE("hierarchical GDS export preserves cells, instances, transforms, and p
     CHECK(importedMiddle->instances.begin()->second.cell == importedLeaf->id);
     CHECK(importedMiddle->instances.begin()->second.x == 250);
     CHECK(importedMiddle->instances.begin()->second.y == 30);
-    CHECK(importedMiddle->instances.begin()->second.orientation == ice::Orientation::r90);
+    CHECK(importedMiddle->instances.begin()->second.orientation == openvlsi::Orientation::r90);
 
     for (const auto &[_, instance] : top.instances) {
         if (instance.name == "U1") {
             CHECK(instance.cell == importedMiddle->id);
             CHECK(instance.x == 1000);
             CHECK(instance.y == 2000);
-            CHECK(instance.orientation == ice::Orientation::r0);
+            CHECK(instance.orientation == openvlsi::Orientation::r0);
         } else if (instance.name == "U2") {
             CHECK(instance.cell == importedLeaf->id);
             CHECK(instance.x == 4000);
             CHECK(instance.y == 0);
-            CHECK(instance.orientation == ice::Orientation::m45);
+            CHECK(instance.orientation == openvlsi::Orientation::m45);
         }
     }
     CHECK(imported.validate().empty());
 }
 
 TEST_CASE("layout text persists and exports as GDS text") {
-    ice::Project project;
+    openvlsi::Project project;
     project.identity = "text-test";
     project.name = "text-test";
-    const auto layer = ice::addLayer(project, "Metal1", 1);
-    const auto cell = ice::createLayoutCell(project, "top");
-    const auto textId = ice::addText(project, cell, layer, 1000, 2000, "VDD", 500);
+    const auto layer = openvlsi::addLayer(project, "Metal1", 1);
+    const auto cell = openvlsi::createLayoutCell(project, "top");
+    const auto textId = openvlsi::addText(project, cell, layer, 1000, 2000, "VDD", 500);
     const auto &text = project.layoutCells.at(cell).shapes.at(textId);
     CHECK(text.isText());
     CHECK(text.name == "Text 1");
@@ -4535,18 +4560,18 @@ TEST_CASE("layout text persists and exports as GDS text") {
     CHECK(text.rectangle.y == 2000);
     CHECK(text.rectangle.height == 500);
     CHECK(project.validate().empty());
-    CHECK_THROWS_AS(ice::addText(project, cell, layer, 0, 0, "", 500), ice::ProjectError);
+    CHECK_THROWS_AS(openvlsi::addText(project, cell, layer, 0, 0, "", 500), openvlsi::ProjectError);
 
-    auto roundTrip = ice::Project::deserialize(project.serialize());
+    auto roundTrip = openvlsi::Project::deserialize(project.serialize());
     const auto &loaded = roundTrip.layoutCells.at(cell).shapes.at(textId);
     CHECK(loaded.isText());
     CHECK(loaded.name == "Text 1");
     CHECK(loaded.text == "VDD");
 
-    const auto gds = std::filesystem::temp_directory_path() / "ice-layout-text-test.gds";
-    ice::LayoutInterchange::exportGds(project, cell, gds);
+    const auto gds = std::filesystem::temp_directory_path() / "openvlsi-layout-text-test.gds";
+    openvlsi::LayoutInterchange::exportGds(project, cell, gds);
     CHECK(std::filesystem::is_regular_file(gds));
-    const auto imported = ice::LayoutInterchange::importGds(gds);
+    const auto imported = openvlsi::LayoutInterchange::importGds(gds);
     bool foundText = false;
     for (const auto &[_, shape] : imported.layoutCells.begin()->second.shapes) {
         if (shape.isText() && shape.text == "VDD") {
@@ -4559,13 +4584,13 @@ TEST_CASE("layout text persists and exports as GDS text") {
 }
 
 TEST_CASE("layout polygon points can be moved") {
-    ice::Project project;
+    openvlsi::Project project;
     project.identity = "polygon-edit-test";
     project.name = "polygon-edit-test";
-    const auto layer = ice::addLayer(project, "Metal1", 1);
-    const auto cell = ice::createLayoutCell(project, "top");
-    const auto polygonId = ice::addPolygon(project, cell, layer, {{0, 0}, {1000, 0}, {500, 800}});
-    ice::movePolygonPoint(project, cell, polygonId, 2, {600, 900});
+    const auto layer = openvlsi::addLayer(project, "Metal1", 1);
+    const auto cell = openvlsi::createLayoutCell(project, "top");
+    const auto polygonId = openvlsi::addPolygon(project, cell, layer, {{0, 0}, {1000, 0}, {500, 800}});
+    openvlsi::movePolygonPoint(project, cell, polygonId, 2, {600, 900});
     const auto &shape = project.layoutCells.at(cell).shapes.at(polygonId);
     CHECK(shape.name == "Polygon 1");
     CHECK(shape.polygon.at(2).x == 600);
@@ -4574,23 +4599,23 @@ TEST_CASE("layout polygon points can be moved") {
     CHECK(shape.rectangle.y == 0);
     CHECK(shape.rectangle.width == 1000);
     CHECK(shape.rectangle.height == 900);
-    CHECK_THROWS_AS(ice::movePolygonPoint(project, cell, polygonId, 3, {0, 0}), ice::ProjectError);
+    CHECK_THROWS_AS(openvlsi::movePolygonPoint(project, cell, polygonId, 3, {0, 0}), openvlsi::ProjectError);
 }
 
 TEST_CASE("simulation graph metadata is editable through core helpers") {
-    ice::Project project;
+    openvlsi::Project project;
     project.identity = "graph-test";
     project.name = "graph-test";
-    ice::SimulationItem simulation;
+    openvlsi::SimulationItem simulation;
     simulation.id = project.nextId();
     simulation.name = "tran1";
     project.simulations.emplace(simulation.id, simulation);
 
-    ice::SimulationGraph graph;
+    openvlsi::SimulationGraph graph;
     graph.name = "RLC response";
     graph.xAxis = "time";
     graph.ySignals = {"v(n1)", "v(n2)"};
-    const auto graphId = ice::addSimulationGraph(project, simulation.id, graph);
+    const auto graphId = openvlsi::addSimulationGraph(project, simulation.id, graph);
     CHECK(project.simulations.at(simulation.id).graphs.size() == 1);
     CHECK(project.simulations.at(simulation.id).graphs.front().id == graphId);
     CHECK(graphId > simulation.id);
@@ -4602,7 +4627,7 @@ TEST_CASE("simulation graph metadata is editable through core helpers") {
     updated.xMin = 0.0;
     updated.xMax = 1e-3;
     updated.yMax = 6.0;
-    CHECK(ice::updateSimulationGraph(project, simulation.id, graphId, updated));
+    CHECK(openvlsi::updateSimulationGraph(project, simulation.id, graphId, updated));
     const auto &stored = project.simulations.at(simulation.id).graphs.front();
     CHECK(stored.name == "Outputs");
     CHECK(stored.xAxis == "v(n1)");
@@ -4612,21 +4637,21 @@ TEST_CASE("simulation graph metadata is editable through core helpers") {
     CHECK(!stored.yMin.has_value());
     CHECK(stored.yMax.has_value());
 
-    CHECK(ice::removeSimulationGraph(project, simulation.id, graphId));
+    CHECK(openvlsi::removeSimulationGraph(project, simulation.id, graphId));
     CHECK(project.simulations.at(simulation.id).graphs.empty());
-    CHECK(!ice::removeSimulationGraph(project, simulation.id, graphId));
-    CHECK_THROWS_AS(ice::addSimulationGraph(project, 9999, graph), ice::ProjectError);
+    CHECK(!openvlsi::removeSimulationGraph(project, simulation.id, graphId));
+    CHECK_THROWS_AS(openvlsi::addSimulationGraph(project, 9999, graph), openvlsi::ProjectError);
 }
 
 TEST_CASE("schematic comments survive serialization") {
-    ice::Project project;
+    openvlsi::Project project;
     project.identity = "comment-test";
     project.name = "comment-test";
-    const auto cellId = ice::createSchematicCell(project, "top");
-    const auto commentId = ice::addSchematicComment(project, cellId, "Test schematic note", 120, -80);
+    const auto cellId = openvlsi::createSchematicCell(project, "top");
+    const auto commentId = openvlsi::addSchematicComment(project, cellId, "Test schematic note", 120, -80);
 
     const auto json = project.serialize();
-    const auto loaded = ice::Project::deserialize(json);
+    const auto loaded = openvlsi::Project::deserialize(json);
     const auto &cell = loaded.schematicCells.at(cellId);
     CHECK(cell.comments.size() == 1);
     const auto it = cell.comments.find(commentId);
@@ -4637,75 +4662,75 @@ TEST_CASE("schematic comments survive serialization") {
         CHECK(it->second.y == -80);
     }
 
-    ice::removeSchematicComment(project, cellId, commentId);
+    openvlsi::removeSchematicComment(project, cellId, commentId);
     CHECK(project.schematicCells.at(cellId).comments.empty());
 }
 
 TEST_CASE("project session keeps saving after undo and redo") {
-    const auto root = std::filesystem::temp_directory_path() / "ice-session-undo-test";
+    const auto root = std::filesystem::temp_directory_path() / "openvlsi-session-undo-test";
     std::filesystem::remove_all(root);
-    ice::Project seed;
+    openvlsi::Project seed;
     seed.identity = "session-undo";
     seed.name = "session-undo";
     seed.save(root);
-    const auto path = root / "project.icepro";
+    const auto path = root / "project.ovpro";
 
-    ice::ProjectSession session(ice::Project::load(path));
-    session.execute("first", [](ice::Project &project) { ice::createSchematicCell(project, "a"); });
+    openvlsi::ProjectSession session(openvlsi::Project::load(path));
+    session.execute("first", [](openvlsi::Project &project) { openvlsi::createSchematicCell(project, "a"); });
     session.save(path);
-    session.execute("second", [](ice::Project &project) { ice::createSchematicCell(project, "b"); });
+    session.execute("second", [](openvlsi::Project &project) { openvlsi::createSchematicCell(project, "b"); });
     session.save(path);
 
     REQUIRE(session.undo());
     session.save(path);
     REQUIRE(session.undo());
     session.save(path);
-    session.execute("third", [](ice::Project &project) { ice::createSchematicCell(project, "c"); });
+    session.execute("third", [](openvlsi::Project &project) { openvlsi::createSchematicCell(project, "c"); });
     session.save(path);
 
-    const auto reloaded = ice::Project::load(path);
+    const auto reloaded = openvlsi::Project::load(path);
     CHECK(reloaded.schematicCells.size() == 1);
 }
 
 TEST_CASE("netlist length conversion honours the PDK geometry scale") {
     // SKY130 declares `.option scale=1u`, so device geometry must be written as
     // a bare micrometer number instead of "14u" (which would scale twice).
-    CHECK(ice::netlistLengthText("14u", 1e-6) == "14");
-    CHECK(ice::netlistLengthText("1", 1e-6) == "1");
-    CHECK(ice::netlistLengthText("0.5u", 1e-6) == "0.5");
+    CHECK(openvlsi::netlistLengthText("14u", 1e-6) == "14");
+    CHECK(openvlsi::netlistLengthText("1", 1e-6) == "1");
+    CHECK(openvlsi::netlistLengthText("0.5u", 1e-6) == "0.5");
     // No declared scale: keep the SPICE suffix.
-    CHECK(ice::netlistLengthText("14u", 1.0) == "14u");
-    CHECK(ice::netlistLengthText("not-a-length", 1e-6) == "not-a-length");
-    const auto value = ice::netlistLengthNumber("500n", 1e-6);
+    CHECK(openvlsi::netlistLengthText("14u", 1.0) == "14u");
+    CHECK(openvlsi::netlistLengthText("not-a-length", 1e-6) == "not-a-length");
+    const auto value = openvlsi::netlistLengthNumber("500n", 1e-6);
     REQUIRE(value.has_value());
     CHECK(*value > 0.499999);
     CHECK(*value < 0.500001);
 }
 
 TEST_CASE("project root resolves bare file names to the current directory") {
-    // `ice-cli ... project.icepro` has an empty parent_path; the root must
+    // `openvlsi-cli ... project.ovpro` has an empty parent_path; the root must
     // still be a real directory so saves and run artifacts do not fail.
-    CHECK(ice::projectRootDirectory("project.icepro") == std::filesystem::path("."));
-    CHECK(ice::projectRootDirectory("design.icepro") == std::filesystem::path("."));
-    CHECK(ice::projectRootDirectory("/tmp/design/project.icepro") == std::filesystem::path("/tmp/design"));
-    CHECK_THROWS_AS(ice::projectRootDirectory(""), ice::ProjectError);
+    CHECK(openvlsi::projectRootDirectory("project.ovpro") == std::filesystem::path("."));
+    CHECK(openvlsi::projectRootDirectory("design.ovpro") == std::filesystem::path("."));
+    CHECK(openvlsi::projectRootDirectory("/tmp/design/project.ovpro") == std::filesystem::path("/tmp/design"));
+    CHECK_THROWS_AS(openvlsi::projectRootDirectory(""), openvlsi::ProjectError);
 }
 
 TEST_CASE("replacing a session from disk leaves it clean") {
-    const auto root = std::filesystem::temp_directory_path() / "ice-session-replace-test";
+    const auto root = std::filesystem::temp_directory_path() / "openvlsi-session-replace-test";
     std::filesystem::remove_all(root);
-    ice::Project seed;
+    openvlsi::Project seed;
     seed.identity = "session-replace";
     seed.name = "session-replace";
     seed.save(root);
-    const auto path = root / "project.icepro";
-    ice::createSchematicCell(seed, "draft");
+    const auto path = root / "project.ovpro";
+    openvlsi::createSchematicCell(seed, "draft");
     seed.save(path);
 
-    ice::ProjectSession session(ice::Project::load(path));
-    session.execute("dirty", [](ice::Project &project) { ice::createSchematicCell(project, "local"); });
+    openvlsi::ProjectSession session(openvlsi::Project::load(path));
+    session.execute("dirty", [](openvlsi::Project &project) { openvlsi::createSchematicCell(project, "local"); });
     CHECK(session.dirty());
 
-    session.replaceProject(ice::Project::load(path), false);
+    session.replaceProject(openvlsi::Project::load(path), false);
     CHECK(!session.dirty());
 }

@@ -4,19 +4,19 @@
 - **Catalogue**: circuits.txt
 - **Model**: openai/gpt-4o-mini
 - **Started**: 2026-11-04 19:33:45 -03
-- **Run directory**: /home/gan/repos/ice/Training-data/runs/20261104-193345_common-source-amplifier
+- **Run directory**: /home/gan/repos/openvlsi/Training-data/runs/20261104-193345_common-source-amplifier
 
 This file is appended while the agent works, so an interrupted run keeps its reasoning on disk.
 
 ## Task
 
-Design **Common-source amplifier** as an ICE text-SPICE schematic, simulate it, and meet the proposed specifications. The harness builds the schematic, runs the simulation, measures every specification from the waveforms, and gives the agent the results.
+Design **Common-source amplifier** as an OpenVLSI text-SPICE schematic, simulate it, and meet the proposed specifications. The harness builds the schematic, runs the simulation, measures every specification from the waveforms, and gives the agent the results.
 
 ### System prompt
 
 ```
 You are an analogue and mixed-signal circuit design agent.
-ICE (an open-source schematic/layout/simulation tool) will store your netlist as
+OpenVLSI (an open-source schematic/layout/simulation tool) will store your netlist as
 a text-SPICE schematic and simulate it with ngspice.
 
 Design constraints:
@@ -27,7 +27,7 @@ Design constraints:
    behavioural blocks.
 3. Node 0 is ground. Every node needs a DC path to ground and a parallel
    capacitance when that is needed for convergence.
-4. Do not include .tran, .ac, .dc, .op, .end, .control or .meas cards: ICE
+4. Do not include .tran, .ac, .dc, .op, .end, .control or .meas cards: OpenVLSI
    supplies the transient analysis and computes measurements from the
    waveforms.
 5. Stimuli must be transient-friendly: SIN, PULSE, PWL or EXP. Oscillators need

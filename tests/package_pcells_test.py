@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """Validate package-local PCell libraries and regeneration.
 
-Run from the ICE repository root with the build directory and python/ on
+Run from the OpenVLSI repository root with the build directory and python/ on
 PYTHONPATH:
 
     PYTHONPATH=build/linux/x86_64/release:python \
         python3 tests/package_pcells_test.py
 
-Package repositories are discovered next to the ICE checkout. Set
-ICE_PACKAGE_REPOSITORIES to a colon-separated list to override the search path.
+Package repositories are discovered next to the OpenVLSI checkout. Set
+OPENVLSI_PACKAGE_REPOSITORIES to a colon-separated list to override the search path.
 """
 
 from __future__ import annotations
@@ -22,24 +22,24 @@ import sys
 import tempfile
 import tomllib
 
-import icepy
+import openvlsipy
 
 
 REPOSITORY = Path(__file__).resolve().parent.parent
 PACKAGES = {
-    "ice-pkg-ihp-sg13g2": {
+    "openvlsi-pkg-ihp-sg13g2": {
         "cells": 100,
         "device": "nmos",
         "module": "nmos_code",
         "class": "nmos",
     },
-    "ice-pkg-sky130": {
+    "openvlsi-pkg-sky130": {
         "cells": 10,
         "device": "nfet",
         "module": "pcells",
         "class": "nfet",
     },
-    "ice-pkg-gf180mcu": {
+    "openvlsi-pkg-gf180mcu": {
         "cells": 20,
         "device": "nmos",
         "module": "pcells",
@@ -182,7 +182,7 @@ def absolute_pythonpath() -> str:
 
 
 def package_roots() -> dict[str, Path]:
-    configured = os.environ.get("ICE_PACKAGE_REPOSITORIES")
+    configured = os.environ.get("OPENVLSI_PACKAGE_REPOSITORIES")
     bases = (
         [Path(item) for item in configured.split(os.pathsep) if item]
         if configured
@@ -202,7 +202,7 @@ def package_roots() -> dict[str, Path]:
 def check_library(name: str, root: Path) -> None:
     expected = PACKAGES[name]
     library = json.loads((root / "layout" / "devices" / "index.json").read_text())
-    assert library["format"] == "ice-layout-device-library"
+    assert library["format"] == "openvlsi-layout-device-library"
     assert library["schema_version"] == 2
     assert library["pdk"]
     assert library["cell_prefix"]
@@ -228,7 +228,7 @@ def check_library(name: str, root: Path) -> None:
                 f"{name}: {cell['name']} has neither layout nor generator"
             )
 
-    if name != "ice-pkg-ihp-sg13g2":
+    if name != "openvlsi-pkg-ihp-sg13g2":
         connectivity = json.loads(
             (root / "technology" / "connectivity.json").read_text()
         )
@@ -236,7 +236,7 @@ def check_library(name: str, root: Path) -> None:
             generator = cell.get("generator")
             if not generator:
                 continue
-            geometry = icepy.pcells.generate_package_geometry(
+            geometry = openvlsipy.pcells.generate_package_geometry(
                 root,
                 generator["module"],
                 generator["class"],
@@ -251,18 +251,18 @@ def check_library(name: str, root: Path) -> None:
         (layer["number"], layer["datatype"]): layer["name"]
         for layer in library["layers"]
     }
-    if name == "ice-pkg-ihp-sg13g2":
+    if name == "openvlsi-pkg-ihp-sg13g2":
         assert layer_names[(5, 2)] == "GatPoly.pin"
         assert layer_names[(8, 2)] == "Metal1.pin"
         assert layer_names[(51, 0)] == "HeatTrans"
-    elif name == "ice-pkg-sky130":
+    elif name == "openvlsi-pkg-sky130":
         assert layer_names[(68, 20)] == "met1.drawing"
         assert layer_names[(68, 16)] == "met1.pin"
         assert layer_names[(65, 13)] == "diff.res"
         assert layer_names[(66, 13)] == "poly.res"
         assert layer_names[(89, 44)] == "capm.drawing"
 
-        mim = icepy.pcells.generate_package_geometry(
+        mim = openvlsipy.pcells.generate_package_geometry(
             root, "pcells", "mim_cap", {"l": "10u", "h": "10u"}
         )
         mim_shapes = {(shape["layer"], shape["datatype"]) for shape in mim["shapes"]}
@@ -271,19 +271,19 @@ def check_library(name: str, root: Path) -> None:
         assert (89, 44) in mim_shapes
         assert mim_ports == {(70, 20), (71, 20)}
 
-        resistor = icepy.pcells.generate_package_geometry(
+        resistor = openvlsipy.pcells.generate_package_geometry(
             root, "pcells", "res_poly", {"w": "0.5u", "l": "10u"}
         )
         resistor_shapes = {
             (shape["layer"], shape["datatype"]) for shape in resistor["shapes"]
         }
         assert (66, 13) in resistor_shapes
-    elif name == "ice-pkg-gf180mcu":
+    elif name == "openvlsi-pkg-gf180mcu":
         assert layer_names[(34, 0)] == "metal1"
         assert layer_names[(34, 4)] == "metal1.dummy"
         assert layer_names[(34, 10)] == "metal1.label"
 
-    if name == "ice-pkg-ihp-sg13g2":
+    if name == "openvlsi-pkg-ihp-sg13g2":
         expected = {
             "nmos.toml": {
                 "model": "sg13_lv_nmos",
@@ -314,7 +314,7 @@ def check_library(name: str, root: Path) -> None:
             }
             assert actual == defaults, f"{name}: {filename} parameters {actual}"
 
-    if name == "ice-pkg-ihp-sg13g2":
+    if name == "openvlsi-pkg-ihp-sg13g2":
         # The IHP package routes through its vendored upstream PyCell runtime.
         with tempfile.TemporaryDirectory() as directory:
             params = Path(directory) / "params.json"
@@ -348,7 +348,7 @@ def check_library(name: str, root: Path) -> None:
             )
             generated = json.loads(output.read_text())
     else:
-        generated = icepy.pcells.generate_package_geometry(
+        generated = openvlsipy.pcells.generate_package_geometry(
             root,
             device["generator"]["module"],
             device["generator"]["class"],
@@ -374,7 +374,7 @@ def check_library(name: str, root: Path) -> None:
             f"{port['layer']}/{port['datatype']}"
         )
 
-    if name != "ice-pkg-ihp-sg13g2":
+    if name != "openvlsi-pkg-ihp-sg13g2":
         # SPICE-style length suffixes must reach the geometry, not silently fall
         # back to defaults.
         overrides = {
@@ -384,16 +384,16 @@ def check_library(name: str, root: Path) -> None:
             overrides["w"] = "2u"
         if "l" in overrides:
             overrides["l"] = "0.2u"
-        resized = icepy.pcells.generate_package_geometry(
+        resized = openvlsipy.pcells.generate_package_geometry(
             root, device["generator"]["module"], device["generator"]["class"], overrides
         )
         assert resized["shapes"], f"{name}: resized generator produced no shapes"
-        # Every declared generator must be runnable through the ICE layout API.
+        # Every declared generator must be runnable through the OpenVLSI layout API.
         for cell in library["cells"]:
             generator = cell.get("generator")
             if not generator:
                 continue
-            geometry = icepy.pcells.generate_package_geometry(
+            geometry = openvlsipy.pcells.generate_package_geometry(
                 root,
                 generator["module"],
                 generator["class"],
@@ -411,7 +411,7 @@ def check_library(name: str, root: Path) -> None:
 
 def check_mos_geometry(name: str, root: Path) -> None:
     """Check the package MOS PCell has real cuts, taps, and separate fingers."""
-    if name == "ice-pkg-sky130":
+    if name == "openvlsi-pkg-sky130":
         device, diff, gate, required = (
             "nfet",
             (65, 20),
@@ -428,7 +428,7 @@ def check_mos_geometry(name: str, root: Path) -> None:
             },
         )
         pmos_required = {(64, 20)}
-    elif name == "ice-pkg-gf180mcu":
+    elif name == "openvlsi-pkg-gf180mcu":
         device, diff, gate, required = (
             "nmos",
             (22, 0),
@@ -446,7 +446,7 @@ def check_mos_geometry(name: str, root: Path) -> None:
     else:
         return
 
-    geometry = icepy.pcells.generate_package_geometry(
+    geometry = openvlsipy.pcells.generate_package_geometry(
         root, "pcells", device, {"w": "4u", "l": "1u", "nf": "2", "m": "1"}
     )
     streams = {(shape["layer"], shape["datatype"]) for shape in geometry["shapes"]}
@@ -495,7 +495,7 @@ def check_mos_geometry(name: str, root: Path) -> None:
         assert separated, f"{name}: multifinger diff islands overlap: {left} {right}"
 
     if device == "nfet" and pmos_required:
-        pgeometry = icepy.pcells.generate_package_geometry(
+        pgeometry = openvlsipy.pcells.generate_package_geometry(
             root, "pcells", "pfet", {"w": "4u", "l": "1u", "nf": "2", "m": "1"}
         )
         pstreams = {

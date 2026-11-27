@@ -1,14 +1,14 @@
 # Procedural Layout API: Constraint-Aware Generators and Composition
 
 **Status:** Implemented for phases 1–3 plus package generator loading; ALIGN
-adapter and a general solver remain future work  
-**Audience:** `icelib`, `icepy`, GUI, CLI, MCP, and package-generator contributors  
-**Scope:** the Python procedural-layout builder and the native ICE layout cells it
+adapter and a general solver remain future work
+**Audience:** `openvlsilib`, `openvlsipy`, GUI, CLI, MCP, and package-generator contributors
+**Scope:** the Python procedural-layout builder and the native OpenVLSI layout cells it
 produces
 
 ## 1. Summary
 
-ICE procedural layouts are currently built from low-level calls:
+OpenVLSI procedural layouts are currently built from low-level calls:
 `layout.rectangle`, `layout.polygon`, `layout.device`, `layout.route`, and so
 on. This is flexible, but every device pitch, alignment, mirroring, shared rail,
 and routing corridor must be calculated by the script author. Reusable layout
@@ -46,7 +46,7 @@ runtime will be added by this proposal.
   - route-aware placement;
   - bounded compaction within rows and columns.
 - Make layout intent inspectable and testable before geometry is emitted.
-- Keep generated results as ordinary native ICE layout cells so DRC, LVS, PEX,
+- Keep generated results as ordinary native OpenVLSI layout cells so DRC, LVS, PEX,
   GDS export, hierarchy, and simulation continue to work unchanged.
 - Keep existing procedural scripts source-compatible.
 
@@ -72,7 +72,7 @@ The existing procedural runner already provides:
 - device placement from PDK PCells;
 - point and pin routing with vias;
 - parameter declarations and hashed regeneration;
-- generated static cells that are readable by the rest of ICE.
+- generated static cells that are readable by the rest of OpenVLSI.
 
 The missing layer is **composition and intent**. Today, a script that wants a
 matched pair, a resistor bank, or a common rail must manually:
@@ -327,7 +327,7 @@ Generator properties:
 
 Proposed resolution order:
 
-1. Built-in ICE generators under `assets/layout/generators/`.
+1. Built-in OpenVLSI generators under `assets/layout/generators/`.
 2. Project generators under `generators/` (new optional project folder).
 3. PDK-package generators under `<pdk>/layout/generators/`.
 4. Inline generators declared in the current script with
@@ -652,11 +652,11 @@ This proposal does **not**:
 
 - import ALIGN code or schemas;
 - run the ALIGN compiler or placer;
-- expose ALIGN types in ICE core;
+- expose ALIGN types in OpenVLSI core;
 - make ALIGN a build or runtime dependency;
 - attempt to reproduce ALIGN's solver.
 
-A future ALIGN adapter can translate the same ICE handles and constraints into
+A future ALIGN adapter can translate the same OpenVLSI handles and constraints into
 its own input format behind the existing architecture boundary. The native
 procedural API remains complete and useful without it.
 

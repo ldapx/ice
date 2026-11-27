@@ -1,7 +1,7 @@
 # Building and Testing
 
-This page is for developers building ICE from source. If you only want to use
-ICE, start with the {doc}`/user/getting-started` guide instead.
+This page is for developers building OpenVLSI from source. If you only want to use
+OpenVLSI, start with the {doc}`/user/getting-started` guide instead.
 
 Product intent is in {doc}`/project/vision`; technical contracts are in
 {doc}`architecture`. The workspace layout and contribution workflow are in
@@ -11,12 +11,12 @@ Product intent is in {doc}`/project/vision`; technical contracts are in
 
 | Target | Description |
 | --- | --- |
-| `icelib` | Shared C++ core library (domain model, operations, adapters). |
-| `ice` | Main Qt 6 desktop EDA application (schematic, layout, simulation, analysis). |
-| `ice-cli` | Headless automation CLI over the same `icelib` operations. |
-| `ice-pkg` | Package and PDK installation, resolution, verification, and lockfile management. |
-| `ice-mcp` | MCP server exposing approved `icelib` operations to external agents. |
-| `icepy` | Optional Python bindings (`nanobind`) for project automation, layout building, and PDK PCell generation. |
+| `openvlsilib` | Shared C++ core library (domain model, operations, adapters). |
+| `openvlsi` | Main Qt 6 desktop EDA application (schematic, layout, simulation, analysis). |
+| `openvlsi-cli` | Headless automation CLI over the same `openvlsilib` operations. |
+| `openvlsi-pkg` | Package and PDK installation, resolution, verification, and lockfile management. |
+| `openvlsi-mcp` | MCP server exposing approved `openvlsilib` operations to external agents. |
+| `openvlsipy` | Optional Python bindings (`nanobind`) for project automation, layout building, and PDK PCell generation. |
 
 Key integrations (behind adapter boundaries): Qt 6, Clipper2 geometry,
 ngspice (`libngspice`), ALIGN, GDSII/OASIS interchange, TOML packages,
@@ -24,7 +24,7 @@ Python scientific stack.
 
 ## Prerequisites
 
-ICE builds on Linux, macOS, and Windows. All C/C++ dependencies are resolved
+OpenVLSI builds on Linux, macOS, and Windows. All C/C++ dependencies are resolved
 through `pkg-config`, so the same `xmake.lua` works on every platform. Linux
 and macOS use their native package managers; Windows uses the MSYS2 UCRT64
 environment.
@@ -34,12 +34,12 @@ Common prerequisites:
 - C++20 compiler
 - [xmake](https://xmake.io/) 3.1+ (build system, see `xmake.lua`)
 - `pkg-config` (or `pkgconf`)
-- Qt 6 (Widgets, Gui, Core, Svg, SvgWidgets) for the `ice` target
+- Qt 6 (Widgets, Gui, Core, Svg, SvgWidgets) for the `openvlsi` target
 - `libngspice`, `toml++`, `spdlog`, `nlohmann_json`, OpenSSL, zlib
 - `clang-format` for `xmake format`
 - The bundled `agentsdk-cpp` submodule. Clone with `--recursive`, or run
   `git submodule update --init --recursive` after cloning. The SDK is linked
-  statically into the ICE executables.
+  statically into the OpenVLSI executables.
 
 `clipper2` is installed by xmake from source, so a broken distribution-provided
 Clipper2 archive cannot break the link.
@@ -61,8 +61,8 @@ export PKG_CONFIG_PATH="$(brew --prefix qtbase)/lib/pkgconfig:$(brew --prefix qt
 ```
 
 The official Qt macOS SDK is a framework build without `.pc` files. Set
-`ICE_QT_PREFIX` to that SDK (for example
-`$HOME/Qt/6.8.3/macos` from `aqtinstall`) and ICE will link the Qt frameworks
+`OPENVLSI_QT_PREFIX` to that SDK (for example
+`$HOME/Qt/6.8.3/macos` from `aqtinstall`) and OpenVLSI will link the Qt frameworks
 directly.
 
 ### Windows (MSYS2 UCRT64)
@@ -90,50 +90,50 @@ xmake f -p mingw -a x86_64 --mingw="$(cygpath -w "$MINGW_PREFIX")" -m release
 
 ### OpenROAD
 
-OpenROAD's C++ helper is built with Bazel and Bash, so `ice-openroad` is
-Linux-only by default. Disable it on other platforms (the rest of ICE builds
+OpenROAD's C++ helper is built with Bazel and Bash, so `openvlsi-openroad` is
+Linux-only by default. Disable it on other platforms (the rest of OpenVLSI builds
 normally):
 
 ```sh
-ICE_ENABLE_OPENROAD=0 xmake build ice ice-cli ice-pkg ice-mcp
+OPENVLSI_ENABLE_OPENROAD=0 xmake build openvlsi openvlsi-cli openvlsi-pkg openvlsi-mcp
 ```
 
-Force it on an unsupported host with `ICE_ENABLE_OPENROAD=1` only when you
-have provided a compatible `ice-openroad` helper yourself.
+Force it on an unsupported host with `OPENVLSI_ENABLE_OPENROAD=1` only when you
+have provided a compatible `openvlsi-openroad` helper yourself.
 
-Optional targets can be disabled with `ICE_BUILD_GUI=0` and
-`ICE_BUILD_PYTHON=0`. Python bindings additionally accept
-`ICE_PYTHON_VERSION`, `ICE_PYTHON_INCLUDE`, `ICE_PYTHON_LIBDIR`,
-`ICE_PYTHON_LIB`, and `NANOBIND_ROOT`.
+Optional targets can be disabled with `OPENVLSI_BUILD_GUI=0` and
+`OPENVLSI_BUILD_PYTHON=0`. Python bindings additionally accept
+`OPENVLSI_PYTHON_VERSION`, `OPENVLSI_PYTHON_INCLUDE`, `OPENVLSI_PYTHON_LIBDIR`,
+`OPENVLSI_PYTHON_LIB`, and `NANOBIND_ROOT`.
 
 ## Build
 
 ```sh
-xmake build doctest ice-cli ice-pkg ice-mcp
+xmake build doctest openvlsi-cli openvlsi-pkg openvlsi-mcp
 ```
 
 For a reproducible build fingerprint, configure with the git revision and an
 explicit timestamp:
 
 ```sh
-ICE_BUILD_COMMIT="$(git rev-parse --short HEAD)" \
-ICE_BUILD_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+OPENVLSI_BUILD_COMMIT="$(git rev-parse --short HEAD)" \
+OPENVLSI_BUILD_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
 xmake f -m release -y
 ```
 
-After installing a new build, restart any long-lived `ice-mcp` process. The
-server keeps the code it loaded at process start. `ice-cli --version` and the
-MCP `ice_version` tool print the commit, build time, executable path, and
+After installing a new build, restart any long-lived `openvlsi-mcp` process. The
+server keeps the code it loaded at process start. `openvlsi-cli --version` and the
+MCP `openvlsi_version` tool print the commit, build time, executable path, and
 feature flags.
 
-On Linux, building `ice`, `ice-cli`, or `ice-mcp` also builds the required
-`ice-openroad` helper when it is missing. To build it on its own:
+On Linux, building `openvlsi`, `openvlsi-cli`, or `openvlsi-mcp` also builds the required
+`openvlsi-openroad` helper when it is missing. To build it on its own:
 
 ```sh
-xmake build ice-openroad
+xmake build openvlsi-openroad
 ```
 
-Force a helper rebuild with `xmake build -r ice-openroad`.
+Force a helper rebuild with `xmake build -r openvlsi-openroad`.
 
 ## Package
 
@@ -153,7 +153,7 @@ xmake pack -f nsis,zip
 
 The Windows packaging step runs `windeployqt`, copies the MinGW/MSYS2 runtime
 DLLs and ngspice code models, and writes an NSIS installer. The macOS step
-creates `ICE.app` and deploys Qt frameworks; install `dylibbundler` to bundle
+creates `OpenVLSI.app` and deploys Qt frameworks; install `dylibbundler` to bundle
 non-Qt libraries as well.
 
 The `.github/workflows/release.yml` workflow builds Linux x86_64, macOS
@@ -164,31 +164,31 @@ x86_64 package also runs on Apple Silicon through Rosetta 2.
 Build the desktop app (requires Qt 6):
 
 ```sh
-xmake build ice
+xmake build openvlsi
 ```
 
 Build the optional Python bindings:
 
 ```sh
-xmake build icepy
+xmake build openvlsipy
 export PYTHONPATH="$PWD/build/linux/x86_64/release:$PWD/python"
-python3 -c "import icepy; print(icepy.new_project('demo').name)"
+python3 -c "import openvlsipy; print(openvlsipy.new_project('demo').name)"
 ```
 
-See {doc}`/user/icepy` for the layout builder and PDK PCell runtime.
+See {doc}`/user/openvlsipy` for the layout builder and PDK PCell runtime.
 
-Simulation PDKs are provided by ICE packages under `~/.ice/packages` (or
-`ICE_PACKAGE_ROOT`); Volare, CIEL, `PDK_ROOT`, and `PDK` are not used.
+Simulation PDKs are provided by OpenVLSI packages under `~/.openvlsi/packages` (or
+`OPENVLSI_PACKAGE_ROOT`); Volare, CIEL, `PDK_ROOT`, and `PDK` are not used.
 OSDI-based packages need a one-time local build:
 
 ```sh
-ice-cli pdk-build ihp-sg13g2
+openvlsi-cli pdk-build ihp-sg13g2
 ```
 
 Verify the package before simulating with:
 
 ```sh
-ice-cli pdk-info ihp-sg13g2 --probe
+openvlsi-cli pdk-info ihp-sg13g2 --probe
 ```
 
 See {doc}`/user/packages` for installing and selecting packages, and
@@ -215,8 +215,8 @@ xmake format
 Pure-Python test suites:
 
 ```sh
-PYTHONPATH=python python3 tests/icepy_sim_tests.py
-python3 tests/icepy_report_runner_tests.py
+PYTHONPATH=python python3 tests/openvlsipy_sim_tests.py
+python3 tests/openvlsipy_report_runner_tests.py
 python3 tests/procedural_router_test.py
 ```
 

@@ -22,13 +22,13 @@ jobs:
             ngspice iverilog
       - name: Build
         env:
-          ICE_ENABLE_OPENROAD: "0"
-        run: xmake build -y doctest ice ice-cli ice-pkg ice-mcp
+          OPENVLSI_ENABLE_OPENROAD: "0"
+        run: xmake build -y doctest openvlsi openvlsi-cli openvlsi-pkg openvlsi-mcp
       - run: xmake run doctest
       - run: python3 tests/mcp_tools_smoke.py
       - name: Package smoke test
         env:
-          ICE_ENABLE_OPENROAD: "0"
+          OPENVLSI_ENABLE_OPENROAD: "0"
         run: xmake pack -f targz --autobuild=n -o dist
       - run: python3 -m pip install -r docs/requirements.txt
       - run: sphinx-build -b html docs docs/_build -W --keep-going

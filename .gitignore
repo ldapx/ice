@@ -5,8 +5,8 @@ build/
 docs/_build/
 
 # Generated package-manager artifacts
-ice.lock
-.ice/
+openvlsi.lock
+.openvlsi/
 
 # Python artifacts
 __pycache__/

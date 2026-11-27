@@ -5,7 +5,7 @@ the repository: one `<name>.toml` sidecar plus its sibling `<name>.svg`
 artwork file per symbol. Most SVG artwork is extracted from the
 [SchematicSymbolsSVG](https://github.com/sjgallagher2/SchematicSymbolsSVG)
 collection (MIT, (c) 2023 Sam Gallagher); the waveform source, current source,
-and inductor symbols are original ICE artwork. See `symbols/ATTRIBUTION.md` for
+and inductor symbols are original OpenVLSI artwork. See `symbols/ATTRIBUTION.md` for
 sources and modifications. No symbol artwork is hardcoded in the application.
 
 Use **Project → Place Device** or press `P` in the editor. The device browser
@@ -20,18 +20,18 @@ placement, movement, deletion, and connections survive project save/reload.
 | --- | --- | --- |
 | Resistor | `orr_resistor_zigzag` | 1, 2 |
 | Capacitor | `orr_cap_nonp` | 1, 2 |
-| Inductor | original ICE artwork | 1, 2 |
+| Inductor | original OpenVLSI artwork | 1, 2 |
 | Diode | `orr_diode2` | A, K |
 | Voltage Source | `orr_battery` | +, - |
-| Pulse Voltage Source | original ICE artwork | +, - |
-| Sine Voltage Source | original ICE artwork | +, - |
-| Current Source | original ICE artwork | +, - |
+| Pulse Voltage Source | original OpenVLSI artwork | +, - |
+| Sine Voltage Source | original OpenVLSI artwork | +, - |
+| Current Source | original OpenVLSI artwork | +, - |
 | Ground | `orr_gnd` | GND |
 | Op Amp | `orr_opamp2` | +, -, OUT |
 | NMOS | `orr_nmos` | G, D, S, B |
-| Input | original ICE artwork | IN |
-| Output | original ICE artwork | OUT |
-| Pin | original ICE artwork | PIN |
+| Input | original OpenVLSI artwork | IN |
+| Output | original OpenVLSI artwork | OUT |
+| Pin | original OpenVLSI artwork | PIN |
 
 Pin coordinates are integers in symbol units with the origin at the artwork
 center, so the GUI can center artwork of any size on the symbol origin and
@@ -43,7 +43,7 @@ wires attach exactly at the artwork terminals.
 [symbol]
 name = "resistor"
 artwork = "resistor.svg"
-# Or reference ICE's shared artwork from a package sidecar:
+# Or reference OpenVLSI's shared artwork from a package sidecar:
 # artwork = "generic:resistor.svg"
 category = "Passive"
 label_x = 0
@@ -61,7 +61,7 @@ value = "1k"
 ```
 
 `artwork` normally names a sibling SVG file. Package sidecars may instead use
-`artwork = "generic:<file>.svg"` to reference ICE's built-in symbol artwork
+`artwork = "generic:<file>.svg"` to reference OpenVLSI's built-in symbol artwork
 directory. Only a plain SVG filename is accepted after `generic:`; absolute
 paths and parent-directory traversal are rejected.
 
@@ -71,7 +71,7 @@ convention as pins. Both fields are optional but must be provided together;
 symbols without them keep the legacy bottom-left label placement.
 
 `direction` accepts `input`, `output`, or `inout`; the physical pin side is
-derived from the pin position. The loader (`ice::SymbolLibrary::load`) rejects
+derived from the pin position. The loader (`openvlsi::SymbolLibrary::load`) rejects
 a sidecar whose artwork file is missing or unsafe (not an SVG document,
 embedded scripts, external references), whose pin names are empty or
 duplicated, whose coordinates are not integers, or whose symbol name
@@ -87,11 +87,11 @@ loads that package's own `symbols/` directory, so the combined browser shows
 generic symbols and PDK-specific symbols together. The IHP SG13G2, Sky130, and
 GF180MCU packages provide NMOS/PMOS, bipolar, passive, and diode definitions and
 merge them into the generic transistor, passive, and semiconductor categories.
-Their sidecars reference ICE's shared artwork with `generic:` values, so the
+Their sidecars reference OpenVLSI's shared artwork with `generic:` values, so the
 packages do not duplicate SVG files. PDK transistor and passive sidecars also
 declare default `model`/size parameters, so newly placed instances start with
 editable values such as `model`, `w`, `l`, and `m`. There are no built-in IHP,
-Sky130, or GF180MCU symbol definitions in ICE.
+Sky130, or GF180MCU symbol definitions in OpenVLSI.
 
 ## Semiconductor symbols
 
@@ -99,7 +99,7 @@ Drawn transistor, diode, and subcircuit symbols participate in netlisting:
 
 - **NMOS/PMOS** — `M<name> <drain> <gate> <source> <bulk> <model> [W=.. L=.. M=..]`
   on the Generic PDK. When the schematic uses a package PDK and the instance
-  has a `model` parameter, ICE emits an `X` subcircuit call instead because
+  has a `model` parameter, OpenVLSI emits an `X` subcircuit call instead because
   IHP, Sky130, and GF180MCU provide MOS devices as SPICE subcircuits.
 - **NPN/PNP/BJT** — `Q<name> <collector> <base> <emitter> [<substrate>] <model>
   [M=..]`. Package-PDK BJTs use `X` subcircuit calls; a missing substrate pin
@@ -109,7 +109,7 @@ Drawn transistor, diode, and subcircuit symbols participate in netlisting:
 
 Device pin order is read from the pin names (`D/G/S/B`, `C/B/E`, `A/K`,
 `+/-/OUT`) rather than the symbol's visual pin order. If a model parameter is
-missing, ICE emits a commented note and a sensible fallback model name
+missing, OpenVLSI emits a commented note and a sensible fallback model name
 (`NMOS`, `PMOS`, `NPN`, `PNP`, `Dmodel`, or `OPAMP`).
 
 ## Source symbols
@@ -140,6 +140,6 @@ verbatim as a raw SPICE source expression and overrides the structured fields.
 
 At startup the GUI searches `symbols/` next to the executable, the
 compile-time source directory (so development builds work from any working
-directory), the current working directory, and `/usr/share/ice/symbols`.
+directory), the current working directory, and `/usr/share/openvlsi/symbols`.
 Placing a symbol without a resolvable library is an explicit error, not a
 silent fallback.

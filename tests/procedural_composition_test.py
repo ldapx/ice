@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Smoke-test procedural layout composition, constraints, and generators.
 
-Run from the ICE repository root:
+Run from the OpenVLSI repository root:
 
     python3 tests/procedural_composition_test.py
 """
@@ -22,7 +22,7 @@ RUNNER = ROOT / "assets" / "layout" / "procedural_runner.py"
 
 def load_runner():
     spec = importlib.util.spec_from_file_location(
-        "ice_procedural_runner_compose", RUNNER
+        "openvlsi_procedural_runner_compose", RUNNER
     )
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -666,7 +666,7 @@ def test_layout_api_manifest_and_filters():
     assert class_view["total"] > 5, class_view
     assert len(class_view["methods"]) == 5, class_view
 
-    with tempfile.TemporaryDirectory(prefix="ice-layout-api-") as directory:
+    with tempfile.TemporaryDirectory(prefix="openvlsi-layout-api-") as directory:
         pdk_root = Path(directory) / "fake-pdk"
         devices = pdk_root / "layout" / "devices"
         devices.mkdir(parents=True)
@@ -806,7 +806,7 @@ def test_output_metadata_and_determinism():
     second = build()
     assert first == second
     assert first["builder_version"] >= 2
-    assert first["format"] == "ice-procedural-layout"
+    assert first["format"] == "openvlsi-procedural-layout"
     assert "constraints" in first
 
 

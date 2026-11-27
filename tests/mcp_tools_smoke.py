@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Smoke-test the ice-mcp schematic, simulation, and diagnostics tools.
+"""Smoke-test the openvlsi-mcp schematic, simulation, and diagnostics tools.
 
-Run after building ice-mcp and ice-cli:
+Run after building openvlsi-mcp and openvlsi-cli:
     python3 tests/mcp_tools_smoke.py
 """
 
@@ -13,13 +13,13 @@ import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-ICE_MCP = ROOT / "build/linux/x86_64/release/ice-mcp"
-ICE_CLI = ROOT / "build/linux/x86_64/release/ice-cli"
+OPENVLSI_MCP = ROOT / "build/linux/x86_64/release/openvlsi-mcp"
+OPENVLSI_CLI = ROOT / "build/linux/x86_64/release/openvlsi-cli"
 
 
 class MCP:
     def __init__(self, project: Path | None = None, cwd: Path | None = None):
-        command = [str(ICE_MCP)]
+        command = [str(OPENVLSI_MCP)]
         if project is not None:
             command += ["--project", str(project)]
         self.process = subprocess.Popen(
@@ -54,7 +54,7 @@ class MCP:
             line = self.process.stdout.readline()
             if not line:
                 raise RuntimeError(
-                    "ice-mcp closed unexpectedly:\n" + self.process.stderr.read()
+                    "openvlsi-mcp closed unexpectedly:\n" + self.process.stderr.read()
                 )
             try:
                 message = json.loads(line)
@@ -96,18 +96,18 @@ class MCP:
 
 
 def main() -> int:
-    if not ICE_MCP.is_file() or not ICE_CLI.is_file():
-        raise SystemExit("Build ice-mcp and ice-cli before running this smoke test.")
+    if not OPENVLSI_MCP.is_file() or not OPENVLSI_CLI.is_file():
+        raise SystemExit("Build openvlsi-mcp and openvlsi-cli before running this smoke test.")
 
-    cli_version = json.loads(subprocess.check_output([str(ICE_CLI), "--version"]))
+    cli_version = json.loads(subprocess.check_output([str(OPENVLSI_CLI), "--version"]))
     assert cli_version.get("commit"), cli_version
     assert cli_version.get("build_time"), cli_version
     assert "project_repair" in cli_version.get("features", []), cli_version
 
-    with tempfile.TemporaryDirectory(prefix="ice-mcp-smoke-") as temporary:
+    with tempfile.TemporaryDirectory(prefix="openvlsi-mcp-smoke-") as temporary:
         project = Path(temporary) / "project"
         subprocess.run(
-            [str(ICE_CLI), "project-create", str(project), "MCP Smoke"],
+            [str(OPENVLSI_CLI), "project-create", str(project), "MCP Smoke"],
             check=True,
             capture_output=True,
         )
@@ -116,7 +116,7 @@ def main() -> int:
         try:
             tools = {tool["name"] for tool in mcp.call("tools/list", {})["tools"]}
             for required in {
-                "ice_doctor",
+                "openvlsi_doctor",
                 "schematic_list",
                 "schematic_info",
                 "schematic_add_symbol",
@@ -148,7 +148,7 @@ def main() -> int:
                 "simulation_trace",
                 "simulation_runs",
                 "simulation_waveform",
-                "ice_help",
+                "openvlsi_help",
                 "layout_add_instance",
                 "layout_add_port",
                 "layout_duplicate",
@@ -199,7 +199,7 @@ def main() -> int:
                 if required not in tools:
                     raise RuntimeError(f"Missing MCP tool: {required}")
 
-            version = mcp.tool("ice_version")
+            version = mcp.tool("openvlsi_version")
             assert version.get("commit"), version
             assert version.get("build_time"), version
             assert "project_repair" in version.get("features", []), version
@@ -667,10 +667,10 @@ def main() -> int:
             sv_stored = mcp.tool("simulation_result", simulation="sv_sim")
             assert sv_stored["state"] == "succeeded", sv_stored
             assert sv_stored["time_points"] > 1, sv_stored
-            help_result = mcp.tool("ice_help", topic="mixed-signal")
+            help_result = mcp.tool("openvlsi_help", topic="mixed-signal")
             assert "help" in help_result, help_result
             for topic in ("digital", "implementation", "verification"):
-                topic_help = mcp.tool("ice_help", topic=topic)
+                topic_help = mcp.tool("openvlsi_help", topic=topic)
                 assert "help" in topic_help, topic_help
             toolchain = mcp.tool("implementation_toolchain")
             assert (
@@ -1060,7 +1060,7 @@ def main() -> int:
             pdk = mcp.tool("pdk_info")
             assert "pdks" in pdk, pdk
 
-            doctor = mcp.tool("ice_doctor")
+            doctor = mcp.tool("openvlsi_doctor")
             assert "pdk_roots" in doctor
             assert "pdks" in doctor
             assert "simulation_model_libraries" in doctor
@@ -1070,14 +1070,14 @@ def main() -> int:
 
             # Recovery: a malformed sidecar file is quarantined instead of
             # preventing the project from opening.
-            (project / "sch" / "broken.icesch").write_text(
+            (project / "sch" / "broken.ovsch").write_text(
                 '{"type":"text","pdk":"generic","text":"* broken"}'
             )
             reopened = mcp.tool("project_open", path=str(project), recover=True)
             assert reopened.get("quarantined_files"), reopened
-            assert not (project / "sch" / "broken.icesch").exists()
+            assert not (project / "sch" / "broken.ovsch").exists()
 
-            (project / "sch" / "broken2.icesch").write_text(
+            (project / "sch" / "broken2.ovsch").write_text(
                 '{"type":"text","pdk":"generic","text":"* broken again"}'
             )
             repaired = mcp.tool("project_repair")
@@ -1088,11 +1088,11 @@ def main() -> int:
             mcp.tool(
                 "schematic_create_text",
                 name="bad_model",
-                text='* bad model\n.include "/tmp/ice-does-not-exist-model.lib"\n'
+                text='* bad model\n.include "/tmp/openvlsi-does-not-exist-model.lib"\n'
                 "V1 in 0 1\nR1 in out 1k\nC1 out 0 1p\n.end\n",
             )
             mcp.tool("simulation_create", name="bad_sim", schematic="bad_model")
-            bad_doctor = mcp.tool("ice_doctor", simulation="bad_sim")
+            bad_doctor = mcp.tool("openvlsi_doctor", simulation="bad_sim")
             assert bad_doctor["model_paths_ok"] is False, bad_doctor
             assert any(not check["exists"] for check in bad_doctor["model_checks"])
 
@@ -1193,13 +1193,13 @@ def main() -> int:
                 paged_summary
             )
             chunk = mcp.call(
-                "resources/read", {"uri": "ice://project/json?offset=0&limit=64"}
+                "resources/read", {"uri": "openvlsi://project/json?offset=0&limit=64"}
             )
             chunk_data = json.loads(chunk["contents"][0]["text"])
             assert chunk_data["total_bytes"] > 0, chunk_data
             assert len(chunk_data["data"]) <= 64, chunk_data
 
-            with tempfile.TemporaryDirectory(prefix="ice-mcp-overwrite-") as tmp:
+            with tempfile.TemporaryDirectory(prefix="openvlsi-mcp-overwrite-") as tmp:
                 overwrite_root = Path(tmp) / "guard"
                 guard = MCP(cwd=Path(tmp))
                 try:
@@ -1220,7 +1220,7 @@ def main() -> int:
                 finally:
                     guard.close()
 
-            print("ice-mcp tool smoke tests passed")
+            print("openvlsi-mcp tool smoke tests passed")
             return 0
         finally:
             mcp.close()
@@ -1230,5 +1230,5 @@ if __name__ == "__main__":
     try:
         sys.exit(main())
     except Exception as error:
-        print(f"ice-mcp tool smoke tests failed: {error}", file=sys.stderr)
+        print(f"openvlsi-mcp tool smoke tests failed: {error}", file=sys.stderr)
         sys.exit(1)

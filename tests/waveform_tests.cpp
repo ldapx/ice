@@ -1,6 +1,6 @@
-#include "icelib/operations.hpp"
-#include "icelib/simulation_store.hpp"
-#include "icelib/waveform.hpp"
+#include "openvlsilib/operations.hpp"
+#include "openvlsilib/simulation_store.hpp"
+#include "openvlsilib/waveform.hpp"
 
 #include <doctest/doctest.h>
 
@@ -13,8 +13,8 @@
 
 namespace {
 
-ice::SimulationResult rcResult() {
-    ice::SimulationResult result;
+openvlsi::SimulationResult rcResult() {
+    openvlsi::SimulationResult result;
     result.analysis = "transient";
     result.xAxis = "time";
     result.xUnit = "s";
@@ -34,48 +34,48 @@ bool close(double actual, double expected, double tolerance) { return std::abs(a
 
 TEST_CASE("waveform expressions evaluate arithmetic, functions, and derivatives") {
     const auto result = rcResult();
-    ice::SimulationTrace trace;
+    openvlsi::SimulationTrace trace;
     std::string error;
 
-    REQUIRE(ice::evaluateDerivedTrace("difference", "out - in", result, trace, &error));
+    REQUIRE(openvlsi::evaluateDerivedTrace("difference", "out - in", result, trace, &error));
     REQUIRE(trace.values.size() == result.time.size());
     CHECK(close(trace.values[1], 0.5, 1e-12));
     CHECK(close(trace.values[3], 7.5, 1e-12));
 
-    REQUIRE(ice::evaluateDerivedTrace("power", "i(v1) * v(out)", result, trace, &error));
+    REQUIRE(openvlsi::evaluateDerivedTrace("power", "i(v1) * v(out)", result, trace, &error));
     CHECK(close(trace.values[2], -0.012, 1e-12));
 
-    REQUIRE(ice::evaluateDerivedTrace("db", "db(out)", result, trace, &error));
+    REQUIRE(openvlsi::evaluateDerivedTrace("db", "db(out)", result, trace, &error));
     CHECK(close(trace.values[1], 0.0, 1e-12));
     CHECK(close(trace.values[2], 12.041199826559248, 1e-9));
 
-    REQUIRE(ice::evaluateDerivedTrace("phase", "phase(out)", result, trace, &error));
+    REQUIRE(openvlsi::evaluateDerivedTrace("phase", "phase(out)", result, trace, &error));
     CHECK(close(trace.values[2], 60.0, 1e-12));
 
-    REQUIRE(ice::evaluateDerivedTrace("slope", "derivative(out)", result, trace, &error));
+    REQUIRE(openvlsi::evaluateDerivedTrace("slope", "derivative(out)", result, trace, &error));
     // out[i] = i^2 in microseconds: the analytic slope is (2i) * 1e6.
     CHECK(close(trace.values[1], 2e6, 1.0));
     CHECK(close(trace.values[2], 4e6, 1.0));
 
-    REQUIRE(ice::evaluateDerivedTrace("area", "integral(out)", result, trace, &error));
+    REQUIRE(openvlsi::evaluateDerivedTrace("area", "integral(out)", result, trace, &error));
     CHECK(close(trace.values[1], 0.5e-6, 1e-12));
 
-    REQUIRE(ice::evaluateDerivedTrace("minmax", "max(abs(out), 2)", result, trace, &error));
+    REQUIRE(openvlsi::evaluateDerivedTrace("minmax", "max(abs(out), 2)", result, trace, &error));
     CHECK(close(trace.values[0], 2.0, 1e-12));
     CHECK(close(trace.values[2], 4.0, 1e-12));
 
-    REQUIRE(ice::evaluateDerivedTrace("scaled", "out * 1e-3 + 5e-1", result, trace, &error));
+    REQUIRE(openvlsi::evaluateDerivedTrace("scaled", "out * 1e-3 + 5e-1", result, trace, &error));
     CHECK(close(trace.values[2], 0.504, 1e-12));
 
-    CHECK(!ice::evaluateDerivedTrace("bad", "missing + 1", result, trace, &error));
+    CHECK(!openvlsi::evaluateDerivedTrace("bad", "missing + 1", result, trace, &error));
     CHECK(error.find("unknown signal") != std::string::npos);
 
-    CHECK(!ice::evaluateDerivedTrace("bad", "out +", result, trace, &error));
+    CHECK(!openvlsi::evaluateDerivedTrace("bad", "out +", result, trace, &error));
     CHECK(!error.empty());
 
     // Division by zero produces NaN rather than infinity so plots break the
     // line instead of drawing a vertical spike.
-    REQUIRE(ice::evaluateDerivedTrace("divzero", "out / (out - out)", result, trace, &error));
+    REQUIRE(openvlsi::evaluateDerivedTrace("divzero", "out / (out - out)", result, trace, &error));
     CHECK(std::isnan(trace.values[1]));
 }
 
@@ -86,16 +86,16 @@ TEST_CASE("FFT finds the tone frequency, amplitude, and phase") {
     // amplitude or phase assertions.
     constexpr double frequency = sampleRate * 10.0 / static_cast<double>(count);
     std::vector<double> x(count);
-    ice::SimulationTrace sine;
+    openvlsi::SimulationTrace sine;
     sine.name = "v(out)";
     sine.values.resize(count);
     for (std::size_t index = 0; index < count; ++index) {
         x[index] = static_cast<double>(index) / sampleRate;
         sine.values[index] = std::sin(2.0 * std::numbers::pi * frequency * x[index] + 0.5);
     }
-    ice::WaveformFftOptions options;
+    openvlsi::WaveformFftOptions options;
     options.window = "hann";
-    const auto spectrum = ice::computeSpectrum(x, {sine}, options);
+    const auto spectrum = openvlsi::computeSpectrum(x, {sine}, options);
     REQUIRE(spectrum.frequency.size() > 10);
     REQUIRE(spectrum.magnitude.size() == 1);
     REQUIRE(spectrum.phase.size() == 1);
@@ -114,14 +114,14 @@ TEST_CASE("FFT finds the tone frequency, amplitude, and phase") {
     auto jittered = x;
     for (std::size_t index = 1; index < jittered.size(); ++index)
         jittered[index] += (index % 3) * 1e-7;
-    const auto resampled = ice::computeSpectrum(jittered, {sine}, options);
+    const auto resampled = openvlsi::computeSpectrum(jittered, {sine}, options);
     REQUIRE(!resampled.magnitude.empty());
     CHECK(!resampled.warnings.empty());
 
     // An explicitly smaller FFT truncates instead of writing past the buffer.
     auto truncatedOptions = options;
     truncatedOptions.points = 128;
-    const auto truncated = ice::computeSpectrum(x, {sine}, truncatedOptions);
+    const auto truncated = openvlsi::computeSpectrum(x, {sine}, truncatedOptions);
     REQUIRE(truncated.frequency.size() == 65);
     REQUIRE(truncated.magnitude.size() == 1);
     CHECK(truncated.magnitude.front().values.size() == 65);
@@ -129,29 +129,29 @@ TEST_CASE("FFT finds the tone frequency, amplitude, and phase") {
 
 TEST_CASE("waveform views and series builders apply dB, phase, FFT, and derived traces") {
     auto result = rcResult();
-    const std::vector<ice::SimulationDerivedTrace> derived = {{"diff", "out - in"}};
+    const std::vector<openvlsi::SimulationDerivedTrace> derived = {{"diff", "out - in"}};
     std::vector<std::string> warnings;
 
     const auto linear =
-        ice::buildWaveformSeries(result, {"out", "in"}, derived, ice::WaveformView::linear, false, {}, &warnings);
+        openvlsi::buildWaveformSeries(result, {"out", "in"}, derived, openvlsi::WaveformView::linear, false, {}, &warnings);
     REQUIRE(linear.size() == 3);
     CHECK(linear.back().name == "diff");
     CHECK(linear.back().y.size() == 4);
     CHECK(linear.front().xUnit == "s");
 
     const auto decibels =
-        ice::buildWaveformSeries(result, {"out"}, {}, ice::WaveformView::decibel, false, {}, &warnings);
+        openvlsi::buildWaveformSeries(result, {"out"}, {}, openvlsi::WaveformView::decibel, false, {}, &warnings);
     REQUIRE(decibels.size() == 1);
     CHECK(decibels.front().yUnit == "dB");
     CHECK(close(decibels.front().y[1], 0.0, 1e-12));
 
-    const auto phase = ice::buildWaveformSeries(result, {"out"}, {}, ice::WaveformView::phase, false, {}, &warnings);
+    const auto phase = openvlsi::buildWaveformSeries(result, {"out"}, {}, openvlsi::WaveformView::phase, false, {}, &warnings);
     REQUIRE(phase.size() == 1);
     CHECK(phase.front().yUnit == "deg");
     CHECK(close(phase.front().y[2], 60.0, 1e-12));
 
     warnings.clear();
-    const auto noPhase = ice::buildWaveformSeries(result, {"in"}, {}, ice::WaveformView::phase, false, {}, &warnings);
+    const auto noPhase = openvlsi::buildWaveformSeries(result, {"in"}, {}, openvlsi::WaveformView::phase, false, {}, &warnings);
     CHECK(noPhase.empty());
     CHECK(!warnings.empty());
 
@@ -159,7 +159,7 @@ TEST_CASE("waveform views and series builders apply dB, phase, FFT, and derived 
     auto tone = result;
     tone.time.resize(512);
     tone.traces.clear();
-    ice::SimulationTrace sine;
+    openvlsi::SimulationTrace sine;
     sine.name = "v(out)";
     sine.values.resize(512);
     for (std::size_t index = 0; index < 512; ++index) {
@@ -167,9 +167,9 @@ TEST_CASE("waveform views and series builders apply dB, phase, FFT, and derived 
         sine.values[index] = std::sin(2.0 * std::numbers::pi * 1000.0 * tone.time[index]);
     }
     tone.traces.push_back(sine);
-    ice::WaveformFftOptions options;
+    openvlsi::WaveformFftOptions options;
     const auto spectrum =
-        ice::buildWaveformSeries(tone, {"out"}, {}, ice::WaveformView::linear, true, options, &warnings);
+        openvlsi::buildWaveformSeries(tone, {"out"}, {}, openvlsi::WaveformView::linear, true, options, &warnings);
     REQUIRE(spectrum.size() == 1);
     CHECK(spectrum.front().xUnit == "Hz");
     CHECK(spectrum.front().name == "v(out) FFT");
@@ -177,16 +177,16 @@ TEST_CASE("waveform views and series builders apply dB, phase, FFT, and derived 
 }
 
 TEST_CASE("graph waveform settings round-trip and stored runs are discoverable") {
-    ice::Project project;
+    openvlsi::Project project;
     project.identity = "waveform-settings";
     project.name = "waveform-settings";
-    const auto cell = ice::createTextSchematicCell(project, "rc", "generic", "* RC\nV1 in 0 DC 1\nR1 in out 1k\n");
-    ice::SimulationItem simulation;
+    const auto cell = openvlsi::createTextSchematicCell(project, "rc", "generic", "* RC\nV1 in 0 DC 1\nR1 in out 1k\n");
+    openvlsi::SimulationItem simulation;
     simulation.id = project.nextId();
     simulation.name = "ac";
     simulation.schematic = cell;
     simulation.analysis = "ac";
-    ice::SimulationGraph graph;
+    openvlsi::SimulationGraph graph;
     graph.id = project.nextId();
     graph.name = "Bode";
     graph.xAxis = "time";
@@ -204,12 +204,12 @@ TEST_CASE("graph waveform settings round-trip and stored runs are discoverable")
 
     // updateSimulationGraph must carry every presentation field, including the
     // waveform-analysis additions.
-    ice::SimulationGraph updated = graph;
+    openvlsi::SimulationGraph updated = graph;
     updated.view = "phase";
     updated.fft = false;
     updated.showMeasurements = true;
     updated.markers.front().label = "M2";
-    REQUIRE(ice::updateSimulationGraph(project, simulation.id, graph.id, updated));
+    REQUIRE(openvlsi::updateSimulationGraph(project, simulation.id, graph.id, updated));
     const auto &storedGraph = project.simulations.at(simulation.id).graphs.front();
     CHECK(storedGraph.view == "phase");
     CHECK(!storedGraph.fft);
@@ -218,7 +218,7 @@ TEST_CASE("graph waveform settings round-trip and stored runs are discoverable")
     CHECK(storedGraph.markers.front().label == "M2");
     CHECK(storedGraph.overlays.size() == 1);
 
-    const auto restored = ice::Project::deserialize(project.serialize());
+    const auto restored = openvlsi::Project::deserialize(project.serialize());
     const auto &loaded = restored.simulations.at(simulation.id).graphs.front();
     CHECK(loaded.view == "phase");
     CHECK(!loaded.fft);
@@ -232,9 +232,9 @@ TEST_CASE("graph waveform settings round-trip and stored runs are discoverable")
     REQUIRE(loaded.markers.size() == 1);
     CHECK(loaded.markers.front().hasY);
 
-    const auto root = std::filesystem::temp_directory_path() / "ice-waveform-store-test";
+    const auto root = std::filesystem::temp_directory_path() / "openvlsi-waveform-store-test";
     std::filesystem::remove_all(root);
-    ice::SimulationRunContext context;
+    openvlsi::SimulationRunContext context;
     context.projectRoot = root;
     context.projectIdentity = project.identity;
     context.projectName = project.name;
@@ -243,16 +243,16 @@ TEST_CASE("graph waveform settings round-trip and stored runs are discoverable")
     context.variant = "ff";
     context.schematicId = cell;
     context.schematicName = "rc";
-    ice::SimulationResult storedResult;
-    storedResult.state = ice::JobState::succeeded;
+    openvlsi::SimulationResult storedResult;
+    storedResult.state = openvlsi::JobState::succeeded;
     storedResult.analysis = "ac";
     storedResult.time = {1.0, 10.0};
     storedResult.traces = {{"v(out)", {1.0, 0.5}}};
-    const auto artifact = ice::writeSimulationRun(context, storedResult);
-    const auto found = ice::findSimulationRun(root, artifact.runId);
+    const auto artifact = openvlsi::writeSimulationRun(context, storedResult);
+    const auto found = openvlsi::findSimulationRun(root, artifact.runId);
     REQUIRE(found.has_value());
     CHECK(found->variant == "ff");
-    const auto summaries = ice::listSimulationRunSummaries(root, simulation.id);
+    const auto summaries = openvlsi::listSimulationRunSummaries(root, simulation.id);
     REQUIRE(summaries.size() == 1);
     CHECK(summaries.front().runId == artifact.runId);
     CHECK(summaries.front().simulationName == simulation.name);
