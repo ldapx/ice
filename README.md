@@ -1,14 +1,27 @@
+<h1 align="center">
+<img alt="banner" src=".github/banner.png"/>
+</h1>
 
-# <img src=".github/logo.png" width="64"> <sup>**OpenVLSI**</sup>
-<sup><sub>
-**OpenVLSI** - programmable integrated-circuit design environment
-</sub></sup>
-
-![screenshot](.github/screenshot_1.png)
+<p align="center">
+  <a href="https://openvlsi.org/docs/">
+    <img alt="Documentation" src="https://img.shields.io/website?down_message=offline&label=docs&up_color=4d4d4d&up_message=online&url=https%3A%2F%2Fopenvlsi.org%2Fdocs"
+  ></a>
+  <a href="https://openvlsi.org/">
+    <img alt="OpenVLSI website" src="https://img.shields.io/website?down_message=offline&label=openvlsi.org&up_color=ff002b&up_message=online&url=https%3A%2F%2Fopenvlsi.org"
+  ></a>
+  <a href="https://discord.gg/hvVThBAFQ3">
+    <img alt="Discord Server" src="https://img.shields.io/discord/1575746428540682372"
+  ></a>
+  <a href="https://github.com/openvlsi/openvlsi/blob/main/LICENSE">
+    <img alt="MIT License" src="https://img.shields.io/badge/license-MIT-brightgreen"
+  ></a>
+</p>
 
 OpenVLSI is an open-source, extensible integrated-circuit design environment for
 schematic capture, IC layout, analog simulation, analysis, automated layout,
 and programmable design workflows.
+
+![screenshot](.github/screenshot_1.png)
 
 One canonical design model and one set of core operations live in `openvlsilib`.
 The executables and bindings below are interfaces to that core, not separate
