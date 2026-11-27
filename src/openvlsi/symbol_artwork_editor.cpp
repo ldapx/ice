@@ -1,11 +1,12 @@
 #include "symbol_artwork_editor.hpp"
 
+#include "ui_colors.hpp"
 #include "ui_helpers.hpp"
 
-#include <QButtonGroup>
+#include <QAction>
+#include <QActionGroup>
 #include <QCheckBox>
 #include <QColorDialog>
-#include <QDialogButtonBox>
 #include <QDoubleSpinBox>
 #include <QFile>
 #include <QFileDialog>
@@ -13,6 +14,8 @@
 #include <QGraphicsPathItem>
 #include <QGraphicsScene>
 #include <QGraphicsSceneMouseEvent>
+#include <QGridLayout>
+#include <QGroupBox>
 #include <QHBoxLayout>
 #include <QKeyEvent>
 #include <QLabel>
@@ -28,7 +31,7 @@
 #include <QSignalBlocker>
 #include <QStringList>
 #include <QStyleOptionGraphicsItem>
-#include <QToolButton>
+#include <QToolBar>
 #include <QTransform>
 #include <QVBoxLayout>
 #include <QWheelEvent>
@@ -1344,77 +1347,78 @@ void SymbolArtworkCanvas::updateResize(const QPointF &scenePosition) {
     viewport()->update();
 }
 
-SymbolArtworkDialog::SymbolArtworkDialog(const QString &symbolName, const QString &currentSvg, QWidget *parent)
-    : QDialog(parent) {
-    setWindowTitle(QStringLiteral("Schematic Icon — %1").arg(symbolName));
-    setModal(true);
-    resize(880, 680);
+SymbolArtworkEditor::SymbolArtworkEditor(QWidget *parent) : QWidget(parent) {
+    auto *layout = new QHBoxLayout(this);
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->setSpacing(4);
 
-    auto *layout = new QVBoxLayout(this);
-    auto *header = new QLabel(QStringLiteral("Icon for schematic %1").arg(symbolName));
-    header->setStyleSheet(QStringLiteral("font-weight: bold;"));
-    layout->addWidget(header);
+    toolbar_ = new QToolBar(QStringLiteral("Icon tools"));
+    toolbar_->setOrientation(Qt::Vertical);
+    toolbar_->setMovable(false);
+    toolbar_->setIconSize(QSize(18, 18));
+    toolbar_->setToolButtonStyle(Qt::ToolButtonIconOnly);
+    toolbar_->setAccessibleName(QStringLiteral("Icon editor toolbar"));
+    tools_ = new QActionGroup(this);
+    tools_->setExclusive(true);
 
-    auto *toolRow = new QHBoxLayout;
-    tools_ = new QButtonGroup(this);
-    const auto addTool = [&](const QString &icon, const QString &tip, int id) {
-        auto *button = new QToolButton;
-        button->setCheckable(true);
-        button->setToolTip(tip);
-        button->setAccessibleName(tip);
-        setLucideIcon(button, icon, 16);
-        tools_->addButton(button, id);
-        toolRow->addWidget(button);
-        return button;
+    const auto addTool = [this](const QString &icon, const QString &tip, SymbolArtworkCanvas::Tool tool) {
+        auto *action = toolbar_->addAction(tip);
+        setLucideIcon(action, icon);
+        action->setToolTip(tip);
+        action->setCheckable(true);
+        tools_->addAction(action);
+        connect(action, &QAction::triggered, this, [this, tool] { canvas_->setTool(tool); });
+        return action;
     };
-    addTool(QStringLiteral("mouse-pointer-2"), QStringLiteral("Select and move shapes"),
-            static_cast<int>(SymbolArtworkCanvas::Tool::select))
-        ->setChecked(true);
-    addTool(QStringLiteral("square"), QStringLiteral("Draw rectangle"),
-            static_cast<int>(SymbolArtworkCanvas::Tool::rectangle));
-    addTool(QStringLiteral("circle-dot"), QStringLiteral("Draw ellipse"),
-            static_cast<int>(SymbolArtworkCanvas::Tool::ellipse));
-    addTool(QStringLiteral("minus"), QStringLiteral("Draw line"), static_cast<int>(SymbolArtworkCanvas::Tool::line));
-    addTool(QStringLiteral("pencil"), QStringLiteral("Draw freehand"),
-            static_cast<int>(SymbolArtworkCanvas::Tool::pencil));
-    toolRow->addSpacing(10);
+    selectAction_ = addTool(QStringLiteral("mouse-pointer-2"), QStringLiteral("Select and move shapes"),
+                            SymbolArtworkCanvas::Tool::select);
+    selectAction_->setChecked(true);
+    addTool(QStringLiteral("square"), QStringLiteral("Draw rectangle"), SymbolArtworkCanvas::Tool::rectangle);
+    addTool(QStringLiteral("circle-dot"), QStringLiteral("Draw ellipse"), SymbolArtworkCanvas::Tool::ellipse);
+    addTool(QStringLiteral("minus"), QStringLiteral("Draw line"), SymbolArtworkCanvas::Tool::line);
+    addTool(QStringLiteral("pencil"), QStringLiteral("Draw freehand"), SymbolArtworkCanvas::Tool::pencil);
+    toolbar_->addSeparator();
 
-    undoButton_ = new QToolButton;
-    undoButton_->setToolTip(QStringLiteral("Undo"));
-    undoButton_->setAccessibleName(QStringLiteral("Undo"));
-    setLucideIcon(undoButton_, QStringLiteral("rotate-ccw"), 16);
-    redoButton_ = new QToolButton;
-    redoButton_->setToolTip(QStringLiteral("Redo"));
-    redoButton_->setAccessibleName(QStringLiteral("Redo"));
-    setLucideIcon(redoButton_, QStringLiteral("rotate-cw"), 16);
-    auto *deleteButton = new QToolButton;
-    deleteButton->setToolTip(QStringLiteral("Delete selected shapes"));
-    deleteButton->setAccessibleName(QStringLiteral("Delete selected shapes"));
-    setLucideIcon(deleteButton, QStringLiteral("trash"), 16);
-    auto *fitButton = new QToolButton;
-    fitButton->setToolTip(QStringLiteral("Fit the icon in the view"));
-    fitButton->setAccessibleName(QStringLiteral("Fit the icon in the view"));
-    setLucideIcon(fitButton, QStringLiteral("scan"), 16);
-    toolRow->addWidget(undoButton_);
-    toolRow->addWidget(redoButton_);
-    toolRow->addWidget(deleteButton);
-    toolRow->addWidget(fitButton);
-    toolRow->addStretch();
-
-    auto *loadButton = new QPushButton(QStringLiteral("Load SVG…"));
-    auto *saveButton = new QPushButton(QStringLiteral("Save SVG…"));
-    toolRow->addWidget(loadButton);
-    toolRow->addWidget(saveButton);
-    layout->addLayout(toolRow);
+    undoAction_ = toolbar_->addAction(QStringLiteral("Undo"));
+    undoAction_->setToolTip(QStringLiteral("Undo"));
+    setLucideIcon(undoAction_, QStringLiteral("rotate-ccw"));
+    redoAction_ = toolbar_->addAction(QStringLiteral("Redo"));
+    redoAction_->setToolTip(QStringLiteral("Redo"));
+    setLucideIcon(redoAction_, QStringLiteral("rotate-cw"));
+    auto *deleteAction = toolbar_->addAction(QStringLiteral("Delete selected shapes"));
+    deleteAction->setToolTip(QStringLiteral("Delete selected shapes"));
+    setLucideIcon(deleteAction, QStringLiteral("trash"));
+    auto *fitAction = toolbar_->addAction(QStringLiteral("Fit the icon in the view"));
+    fitAction->setToolTip(QStringLiteral("Fit the icon in the view"));
+    setLucideIcon(fitAction, QStringLiteral("scan"));
+    // Match the schematic editor's vertical tool columns: the tools sit
+    // centered in their column instead of stretching the full height.
+    auto *toolColumn = new QWidget;
+    auto *toolColumnLayout = new QVBoxLayout(toolColumn);
+    toolColumnLayout->setContentsMargins(0, 0, 0, 0);
+    toolColumnLayout->addStretch(1);
+    toolColumnLayout->addWidget(toolbar_, 0, Qt::AlignHCenter);
+    toolColumnLayout->addStretch(1);
+    layout->addWidget(toolColumn, 0);
 
     canvas_ = new SymbolArtworkCanvas;
     layout->addWidget(canvas_, 1);
 
-    auto *styleRow = new QHBoxLayout;
+    auto *side = new QWidget;
+    side->setMinimumWidth(220);
+    side->setMaximumWidth(320);
+    auto *sideLayout = new QVBoxLayout(side);
+    sideLayout->setContentsMargins(8, 8, 8, 8);
+    sideLayout->setSpacing(8);
+    title_ = heading(QStringLiteral("Icon"));
+    sideLayout->addWidget(title_);
+
+    auto *styleGroup = new QGroupBox(QStringLiteral("Style"));
+    auto *styleLayout = new QGridLayout(styleGroup);
     strokeCheck_ = new QCheckBox(QStringLiteral("Stroke"));
     strokeCheck_->setChecked(true);
     strokeButton_ = new QPushButton;
-    strokeButton_->setFixedSize(32, 20);
+    strokeButton_->setFixedSize(48, 20);
     strokeButton_->setToolTip(QStringLiteral("Stroke color"));
     strokeButton_->setAccessibleName(QStringLiteral("Stroke color"));
     widthSpin_ = new QDoubleSpinBox;
@@ -1425,42 +1429,57 @@ SymbolArtworkDialog::SymbolArtworkDialog(const QString &symbolName, const QStrin
     widthSpin_->setKeyboardTracking(false);
     fillCheck_ = new QCheckBox(QStringLiteral("Fill"));
     fillButton_ = new QPushButton;
-    fillButton_->setFixedSize(32, 20);
+    fillButton_->setFixedSize(48, 20);
     fillButton_->setToolTip(QStringLiteral("Fill color"));
     fillButton_->setAccessibleName(QStringLiteral("Fill color"));
-    styleRow->addWidget(strokeCheck_);
-    styleRow->addWidget(strokeButton_);
-    styleRow->addWidget(new QLabel(QStringLiteral("Width")));
-    styleRow->addWidget(widthSpin_);
-    styleRow->addSpacing(16);
-    styleRow->addWidget(fillCheck_);
-    styleRow->addWidget(fillButton_);
-    styleRow->addStretch();
-    layout->addLayout(styleRow);
+    styleLayout->addWidget(strokeCheck_, 0, 0);
+    styleLayout->addWidget(strokeButton_, 0, 1);
+    styleLayout->addWidget(new QLabel(QStringLiteral("Width")), 1, 0);
+    styleLayout->addWidget(widthSpin_, 1, 1);
+    styleLayout->addWidget(fillCheck_, 2, 0);
+    styleLayout->addWidget(fillButton_, 2, 1);
+    sideLayout->addWidget(styleGroup);
 
-    status_ = new QLabel(
-        QStringLiteral("Drag to draw. Select a shape to move it, or drag a corner to resize. Wheel zooms, middle "
-                       "button or space+drag pans."));
+    auto *fileGroup = new QGroupBox(QStringLiteral("Icon file"));
+    auto *fileLayout = new QVBoxLayout(fileGroup);
+    auto *loadButton = new QPushButton(QStringLiteral("Load SVG…"));
+    auto *saveButton = new QPushButton(QStringLiteral("Save SVG…"));
+    fileLayout->addWidget(loadButton);
+    fileLayout->addWidget(saveButton);
+    sideLayout->addWidget(fileGroup);
+
+    status_ = new QLabel;
     status_->setWordWrap(true);
-    layout->addWidget(status_);
+    status_->setStyleSheet(QStringLiteral("color: %1;").arg(openvlsi::uiColor(openvlsi::UiColor::Text2).name()));
+    sideLayout->addWidget(status_);
+    sideLayout->addStretch(1);
 
-    buttons_ = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
-    if (auto *ok = buttons_->button(QDialogButtonBox::Ok))
-        ok->setText(QStringLiteral("Apply"));
-    layout->addWidget(buttons_);
+    auto *buttonRow = new QHBoxLayout;
+    auto *cancelButton = new QPushButton(QStringLiteral("Cancel"));
+    applyButton_ = new QPushButton(QStringLiteral("Apply"));
+    applyButton_->setDefault(true);
+    applyButton_->setEnabled(false);
+    buttonRow->addWidget(cancelButton);
+    buttonRow->addWidget(applyButton_, 1);
+    sideLayout->addLayout(buttonRow);
+    layout->addWidget(side, 0);
 
     canvas_->setOnSelectionChanged([this] { refreshStyleFromSelection(); });
     canvas_->setOnHistoryChanged([this] { refreshHistoryButtons(); });
-    connect(tools_, &QButtonGroup::idClicked, this,
-            [this](int id) { canvas_->setTool(static_cast<SymbolArtworkCanvas::Tool>(id)); });
-    connect(undoButton_, &QToolButton::clicked, this, [this] { canvas_->undo(); });
-    connect(redoButton_, &QToolButton::clicked, this, [this] { canvas_->redo(); });
-    connect(deleteButton, &QToolButton::clicked, this, [this] { canvas_->deleteSelection(); });
-    connect(fitButton, &QToolButton::clicked, this, [this] { canvas_->fitDocument(); });
+    connect(undoAction_, &QAction::triggered, this, [this] { canvas_->undo(); });
+    connect(redoAction_, &QAction::triggered, this, [this] { canvas_->redo(); });
+    connect(deleteAction, &QAction::triggered, this, [this] { canvas_->deleteSelection(); });
+    connect(fitAction, &QAction::triggered, this, [this] { canvas_->fitDocument(); });
     connect(loadButton, &QPushButton::clicked, this, [this] { loadFromFile(); });
     connect(saveButton, &QPushButton::clicked, this, [this] { saveToFile(); });
-    connect(buttons_, &QDialogButtonBox::accepted, this, &QDialog::accept);
-    connect(buttons_, &QDialogButtonBox::rejected, this, &QDialog::reject);
+    connect(applyButton_, &QPushButton::clicked, this, [this] {
+        if (onApply_)
+            onApply_();
+    });
+    connect(cancelButton, &QPushButton::clicked, this, [this] {
+        if (onCancel_)
+            onCancel_();
+    });
     connect(strokeCheck_, &QCheckBox::toggled, this, [this] { applyStyleControls(); });
     connect(fillCheck_, &QCheckBox::toggled, this, [this] { applyStyleControls(); });
     connect(widthSpin_, qOverload<double>(&QDoubleSpinBox::valueChanged), this,
@@ -1484,22 +1503,46 @@ SymbolArtworkDialog::SymbolArtworkDialog(const QString &symbolName, const QStrin
         applyStyleControls();
     });
 
-    originalSvg_ = currentSvg;
     updateSwatches();
     refreshHistoryButtons();
-    if (!currentSvg.trimmed().isEmpty()) {
-        if (!canvas_->loadSvg(currentSvg))
-            status_->setText(
-                QStringLiteral("The current icon could not be read as SVG; starting from a blank canvas."));
-        else if (canvas_->documentEmpty())
-            status_->setText(QStringLiteral("The current icon has no editable shapes. Load another SVG or draw a new "
-                                            "one before applying."));
-    }
 }
 
-QString SymbolArtworkDialog::artwork() const { return canvas_->dirty() ? canvas_->toSvg() : originalSvg_; }
+void SymbolArtworkEditor::load(const QString &symbolName, const QString &currentSvg) {
+    symbolName_ = symbolName;
+    originalSvg_ = currentSvg;
+    baselineSvg_ = currentSvg;
+    title_->setText(QStringLiteral("Icon — %1").arg(symbolName));
+    status_->setText(QStringLiteral(
+        "Drag to draw. Select a shape to move it, or drag a corner to resize. Wheel zooms, middle button or "
+        "space+drag pans."));
+    canvas_->setTool(SymbolArtworkCanvas::Tool::select);
+    if (selectAction_)
+        selectAction_->setChecked(true);
+    // Reset first so a shared editor never keeps shapes from a previous icon.
+    canvas_->loadSvg(QString());
+    if (!currentSvg.trimmed().isEmpty() && !canvas_->loadSvg(currentSvg)) {
+        status_->setText(QStringLiteral("The current icon could not be read as SVG; starting from a blank canvas."));
+    } else if (!currentSvg.trimmed().isEmpty() && canvas_->documentEmpty()) {
+        status_->setText(QStringLiteral(
+            "The current icon has no editable shapes. Load another SVG or draw a new one before applying."));
+    }
+    refreshHistoryButtons();
+    refreshStyleFromSelection();
+}
 
-void SymbolArtworkDialog::loadFromFile() {
+QString SymbolArtworkEditor::artwork() const { return canvas_->dirty() ? canvas_->toSvg() : baselineSvg_; }
+
+bool SymbolArtworkEditor::documentEmpty() const { return canvas_->documentEmpty(); }
+
+// Loading an SVG file makes the editor dirty relative to the project icon even
+// though the canvas itself has no edits yet.
+bool SymbolArtworkEditor::dirty() const { return canvas_->dirty() || baselineSvg_ != originalSvg_; }
+
+void SymbolArtworkEditor::setOnApply(std::function<void()> callback) { onApply_ = std::move(callback); }
+
+void SymbolArtworkEditor::setOnCancel(std::function<void()> callback) { onCancel_ = std::move(callback); }
+
+void SymbolArtworkEditor::loadFromFile() {
     const auto path = QFileDialog::getOpenFileName(this, QStringLiteral("Choose SVG Icon"), QString(),
                                                    QStringLiteral("SVG images (*.svg);;All files (*)"));
     if (path.isEmpty())
@@ -1514,11 +1557,12 @@ void SymbolArtworkDialog::loadFromFile() {
                              QStringLiteral("%1 is not a readable SVG document.").arg(path));
         return;
     }
-    originalSvg_ = canvas_->toSvg();
+    baselineSvg_ = canvas_->toSvg();
     status_->setText(QStringLiteral("Loaded %1.").arg(QFileInfo(path).fileName()));
+    refreshHistoryButtons();
 }
 
-void SymbolArtworkDialog::saveToFile() {
+void SymbolArtworkEditor::saveToFile() {
     auto path = QFileDialog::getSaveFileName(this, QStringLiteral("Save SVG Icon"), QStringLiteral("icon.svg"),
                                              QStringLiteral("SVG images (*.svg)"));
     if (path.isEmpty())
@@ -1534,14 +1578,14 @@ void SymbolArtworkDialog::saveToFile() {
     status_->setText(QStringLiteral("Saved %1.").arg(QFileInfo(path).fileName()));
 }
 
-void SymbolArtworkDialog::applyStyleControls() {
+void SymbolArtworkEditor::applyStyleControls() {
     if (updatingStyle_ || !canvas_)
         return;
     canvas_->applyStyleToSelection(strokeCheck_->isChecked() ? strokeColor_ : QColor(),
                                    fillCheck_->isChecked() ? fillColor_ : QColor(), widthSpin_->value());
 }
 
-void SymbolArtworkDialog::refreshStyleFromSelection() {
+void SymbolArtworkEditor::refreshStyleFromSelection() {
     const auto shape = canvas_->selectionShape();
     if (!shape)
         return;
@@ -1560,16 +1604,16 @@ void SymbolArtworkDialog::refreshStyleFromSelection() {
     updatingStyle_ = false;
 }
 
-void SymbolArtworkDialog::refreshHistoryButtons() {
+void SymbolArtworkEditor::refreshHistoryButtons() {
     if (!canvas_)
         return;
-    undoButton_->setEnabled(canvas_->canUndo());
-    redoButton_->setEnabled(canvas_->canRedo());
-    if (auto *apply = buttons_->button(QDialogButtonBox::Ok))
-        apply->setEnabled(!canvas_->documentEmpty());
+    undoAction_->setEnabled(canvas_->canUndo());
+    redoAction_->setEnabled(canvas_->canRedo());
+    if (applyButton_)
+        applyButton_->setEnabled(!canvas_->documentEmpty());
 }
 
-void SymbolArtworkDialog::updateSwatches() {
+void SymbolArtworkEditor::updateSwatches() {
     const auto style = [](QPushButton *button, const QColor &color) {
         if (!color.isValid()) {
             button->setStyleSheet(QStringLiteral("background: transparent; border: 1px dashed #888;"));

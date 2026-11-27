@@ -1,7 +1,6 @@
 #pragma once
 
 #include <QColor>
-#include <QDialog>
 #include <QGraphicsItem>
 #include <QGraphicsView>
 #include <QPainterPath>
@@ -15,15 +14,15 @@
 #include <utility>
 #include <vector>
 
-class QButtonGroup;
+class QAction;
+class QActionGroup;
 class QCheckBox;
-class QDialogButtonBox;
 class QDoubleSpinBox;
 class QGraphicsPathItem;
 class QLabel;
 class QPushButton;
 class QShowEvent;
-class QToolButton;
+class QToolBar;
 
 // One vector shape of a device icon. Geometry lives directly in viewBox
 // coordinates: the editor never stores item transforms, so the exported SVG
@@ -166,14 +165,23 @@ class SymbolArtworkCanvas : public QGraphicsView {
     QPointF resizeAnchor_;
 };
 
-// Interactive icon editor for one user-created schematic block. The dialog
-// owns no project state: it returns the edited SVG markup for the caller to
-// apply to the current schematic.
-class SymbolArtworkDialog : public QDialog {
+// Embeddable icon editor used as an editor tab. It bundles the icon tool
+// column, the vector canvas, and the style/file options panel so the host can
+// show it in place of its normal editor. It owns no project state: the host
+// asks for the edited SVG with artwork() and decides when to commit it.
+class SymbolArtworkEditor : public QWidget {
   public:
-    SymbolArtworkDialog(const QString &symbolName, const QString &currentSvg, QWidget *parent = nullptr);
+    explicit SymbolArtworkEditor(QWidget *parent = nullptr);
 
+    // Loads the SVG markup to edit. An empty string starts a blank icon.
+    void load(const QString &symbolName, const QString &currentSvg);
     QString artwork() const;
+    bool documentEmpty() const;
+    bool dirty() const;
+    QString symbolName() const { return symbolName_; }
+
+    void setOnApply(std::function<void()> callback);
+    void setOnCancel(std::function<void()> callback);
 
   private:
     void loadFromFile();
@@ -183,19 +191,30 @@ class SymbolArtworkDialog : public QDialog {
     void refreshHistoryButtons();
     void updateSwatches();
 
+    QToolBar *toolbar_ = nullptr;
     SymbolArtworkCanvas *canvas_ = nullptr;
-    QButtonGroup *tools_ = nullptr;
-    QToolButton *undoButton_ = nullptr;
-    QToolButton *redoButton_ = nullptr;
+    QActionGroup *tools_ = nullptr;
+    QAction *selectAction_ = nullptr;
+    QAction *undoAction_ = nullptr;
+    QAction *redoAction_ = nullptr;
     QCheckBox *strokeCheck_ = nullptr;
     QCheckBox *fillCheck_ = nullptr;
     QPushButton *strokeButton_ = nullptr;
     QPushButton *fillButton_ = nullptr;
     QDoubleSpinBox *widthSpin_ = nullptr;
+    QLabel *title_ = nullptr;
     QLabel *status_ = nullptr;
-    QDialogButtonBox *buttons_ = nullptr;
+    QPushButton *applyButton_ = nullptr;
     QColor strokeColor_ = QColor(Qt::black);
     QColor fillColor_ = QColor(230, 230, 230);
+    QString symbolName_;
+    // SVG of the icon as the host handed it to load(). Kept verbatim so an
+    // untouched editor reproduces it exactly.
     QString originalSvg_;
+    // SVG the canvas content was last loaded from (the project icon or an SVG
+    // file). Dirtiness is measured against originalSvg_.
+    QString baselineSvg_;
     bool updatingStyle_ = false;
+    std::function<void()> onApply_;
+    std::function<void()> onCancel_;
 };

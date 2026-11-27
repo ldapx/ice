@@ -1365,6 +1365,7 @@ class DocumentWindow : public QMainWindow {
             schematicViewStack_->setCurrentWidget(schematicCanvasPage_);
         if (layoutViewStack_ && layoutCanvasPage_)
             layoutViewStack_->setCurrentWidget(layoutCanvasPage_);
+        resetSchematicIconEditorState();
         openSchematicTabs_.clear();
         openLayoutTabs_.clear();
         knownSchematicCells_.clear();
@@ -2507,6 +2508,7 @@ class DocumentWindow : public QMainWindow {
         clearLayoutDeviceSelection();
         if (layoutDevicesPanel_)
             layoutDevicesPanel_->resetDevices();
+        resetSchematicIconEditorState();
         openSchematicTabs_.clear();
         openLayoutTabs_.clear();
         knownSchematicCells_.clear();
@@ -3381,6 +3383,14 @@ class DocumentWindow : public QMainWindow {
         if (!schematicCellTabs_ || index < 0 || !project_)
             return;
         const auto id = static_cast<openvlsi::ObjectId>(schematicCellTabs_->tabBar()->tabData(index).toULongLong());
+        // Icon editor tabs carry no project cell id.
+        if (id == 0) {
+            showSchematicIconEditorTab();
+            return;
+        }
+        showingIconEditor_ = false;
+        if (schematicPropertiesTabs_)
+            schematicPropertiesTabs_->setVisible(true);
         const auto it = project_->project().schematicCells.find(id);
         if (it == project_->project().schematicCells.end())
             return;
@@ -3613,8 +3623,12 @@ class DocumentWindow : public QMainWindow {
         if (!schematicCellTabs_ || !project_ || index < 0)
             return;
         const auto id = static_cast<openvlsi::ObjectId>(schematicCellTabs_->tabBar()->tabData(index).toULongLong());
-        if (id == 0)
+        if (id == 0) {
+            if (!confirmDiscardIconEdits())
+                return;
+            closeSchematicIconEditor();
             return;
+        }
         openvlsi::ObjectId nextId = 0;
         if (activeSchematicId_ == id) {
             if (index + 1 < schematicCellTabs_->count())
@@ -8151,11 +8165,12 @@ class DocumentWindow : public QMainWindow {
             schematicNetlistPanel_->setCell(project_->project(), &cell->second);
     }
 
-    // Opens the icon editor for an instance of a user-created schematic block.
-    // The icon is copied onto every instance of that block in this schematic;
-    // the source schematic cell and other schematics are left unchanged.
+    // Opens the icon editor for an instance of a user-created schematic block
+    // as a tab beside the open schematic files. The icon is copied onto every
+    // instance of that block in this schematic; the source schematic cell and
+    // other schematics are left unchanged.
     void editSchematicSymbolArtwork(openvlsi::ObjectId instanceId) {
-        if (!project_)
+        if (!project_ || !schematicIconEditor_ || !schematicCellTabs_)
             return;
         openvlsi::ObjectId cellId = 0;
         openvlsi::ObjectId symbolId = 0;
@@ -8179,23 +8194,100 @@ class DocumentWindow : public QMainWindow {
         }
         if (cellId == 0)
             return;
-        SymbolArtworkDialog dialog(QString::fromStdString(symbolName), QString::fromStdString(artwork), this);
-        if (dialog.exec() != QDialog::Accepted)
+        if (iconEditorOpen_ && !confirmDiscardIconEdits())
             return;
-        const auto edited = dialog.artwork().toStdString();
-        if (edited == artwork)
+        iconEditorOpen_ = true;
+        iconEditorCellId_ = cellId;
+        iconEditorSymbolId_ = symbolId;
+        iconEditorSymbolName_ = symbolName;
+        iconEditorOriginalArtwork_ = artwork;
+        schematicIconEditor_->load(QString::fromStdString(symbolName), QString::fromStdString(artwork));
+        showingIconEditor_ = true;
+        refreshEmbeddedPanels();
+        if (documents_ && schematicPage_)
+            documents_->setCurrentWidget(schematicPage_);
+    }
+
+    void applySchematicIconArtwork() {
+        if (!project_ || !iconEditorOpen_ || !schematicIconEditor_)
             return;
-        try {
-            project_->execute("change schematic icon", [&](openvlsi::Project &project) {
-                openvlsi::setSchematicSymbolArtwork(project, cellId, symbolId, edited);
-            });
-        } catch (const openvlsi::ProjectError &error) {
-            QMessageBox::critical(this, QStringLiteral("Change Schematic Icon"), QString::fromStdString(error.what()));
+        if (schematicIconEditor_->documentEmpty()) {
+            QMessageBox::information(this, QStringLiteral("Change Schematic Icon"),
+                                     QStringLiteral("Draw or load at least one shape before applying the icon."));
             return;
         }
+        const auto edited = schematicIconEditor_->artwork().toStdString();
+        const auto cellId = iconEditorCellId_;
+        const auto symbolId = iconEditorSymbolId_;
+        const auto symbolName = iconEditorSymbolName_;
+        const bool changed = edited != iconEditorOriginalArtwork_;
+        if (changed) {
+            try {
+                project_->execute("change schematic icon", [&](openvlsi::Project &project) {
+                    openvlsi::setSchematicSymbolArtwork(project, cellId, symbolId, edited);
+                });
+            } catch (const openvlsi::ProjectError &error) {
+                QMessageBox::critical(this, QStringLiteral("Change Schematic Icon"),
+                                      QString::fromStdString(error.what()));
+                return;
+            }
+        }
+        closeSchematicIconEditor();
+        if (!changed)
+            return;
         refreshSchematic();
+        updateSelectionStatus();
         statusBar()->showMessage(
             QStringLiteral("Updated the %1 icon in this schematic").arg(QString::fromStdString(symbolName)));
+    }
+
+    // True when the icon editor has no unsaved drawing, or the user agreed to
+    // throw it away. Used before the icon tab is closed or retargeted.
+    bool confirmDiscardIconEdits() {
+        if (!iconEditorOpen_ || !schematicIconEditor_ || !schematicIconEditor_->dirty())
+            return true;
+        return QMessageBox::question(this, QStringLiteral("Discard Icon Changes"),
+                                     QStringLiteral("Discard the unsaved changes to the %1 icon?")
+                                         .arg(QString::fromStdString(iconEditorSymbolName_)),
+                                     QMessageBox::Discard | QMessageBox::Cancel,
+                                     QMessageBox::Cancel) == QMessageBox::Discard;
+    }
+
+    // Clears the icon-editor tab session without touching the tab strip; the
+    // caller refreshes panels afterwards.
+    void resetSchematicIconEditorState() {
+        iconEditorOpen_ = false;
+        showingIconEditor_ = false;
+        iconEditorCellId_ = 0;
+        iconEditorSymbolId_ = 0;
+        iconEditorSymbolName_.clear();
+        iconEditorOriginalArtwork_.clear();
+    }
+
+    void closeSchematicIconEditor() {
+        if (!iconEditorOpen_)
+            return;
+        const auto cellId = iconEditorCellId_;
+        resetSchematicIconEditorState();
+        refreshEmbeddedPanels();
+        if (cellId != 0)
+            selectSchematicTab(cellId);
+        if (documents_ && schematicPage_)
+            documents_->setCurrentWidget(schematicPage_);
+    }
+
+    void showSchematicIconEditorTab() {
+        if (!schematicIconEditor_)
+            return;
+        showingIconEditor_ = true;
+        if (schematicViewStack_)
+            schematicViewStack_->setCurrentWidget(schematicIconEditor_);
+        if (schematicToolbarColumn_)
+            schematicToolbarColumn_->setVisible(false);
+        if (schematicPropertiesTabs_)
+            schematicPropertiesTabs_->setVisible(false);
+        if (documents_ && schematicPage_)
+            documents_->setCurrentWidget(schematicPage_);
     }
 
     void updateInstanceParameter(openvlsi::ObjectId instanceId, openvlsi::ObjectId parameterId, const std::string &name,
@@ -12256,6 +12348,10 @@ class DocumentWindow : public QMainWindow {
             layersPanel_->setProject(project, activeLayoutId_);
         if (schematicCellTabs_) {
             const auto selected = activeSchematicId_;
+            // Capture the request before rebuilding: adding the first tab makes
+            // Qt emit currentChanged, which activates that tab and clears the
+            // icon-editor flag.
+            const bool preferIconEditor = iconEditorOpen_ && showingIconEditor_;
             schematicCellTabs_->clear();
             for (const auto &[id, cell] : project.schematicCells) {
                 if (!openSchematicTabs_.contains(id) || cell.systemVerilogSchematic)
@@ -12274,8 +12370,24 @@ class DocumentWindow : public QMainWindow {
                                               : QStringLiteral("PDK: %1").arg(pdk));
                 schematicCellTabs_->setTabToolTip(tab, tooltip);
             }
+            int iconTab = -1;
+            if (iconEditorOpen_) {
+                iconTab = schematicCellTabs_->count();
+                schematicCellTabs_->addTab(new QWidget,
+                                           QStringLiteral("Icon — %1").arg(QString::fromStdString(iconEditorSymbolName_)));
+                schematicCellTabs_->tabBar()->setTabData(iconTab, QVariant::fromValue<qulonglong>(0));
+                schematicCellTabs_->setTabIcon(iconTab, openvlsi::lucideIcon(QStringLiteral("image"), 16));
+                schematicCellTabs_->setTabToolTip(iconTab, QStringLiteral("Edit the icon of this schematic block"));
+            }
             bool selectedTab = false;
-            for (int index = 0; index < schematicCellTabs_->count(); ++index) {
+            if (preferIconEditor && iconTab >= 0) {
+                if (schematicCellTabs_->currentIndex() == iconTab)
+                    activateSchematicTab(iconTab);
+                else
+                    schematicCellTabs_->setCurrentIndex(iconTab);
+                selectedTab = true;
+            }
+            for (int index = 0; !selectedTab && index < schematicCellTabs_->count(); ++index) {
                 if (schematicCellTabs_->tabBar()->tabData(index).toULongLong() != selected)
                     continue;
                 if (schematicCellTabs_->currentIndex() == index)
@@ -13550,8 +13662,14 @@ class DocumentWindow : public QMainWindow {
         // Settings entry; some styles otherwise keep it open on top of the
         // entries below it.  A null action means no entry is highlighted
         // (moving into the submenu itself), so the submenu stays usable.
+        // Hovering an action inside the submenu also re-emits hovered() on
+        // this parent menu, so those actions must be ignored or the submenu
+        // would hide as soon as the cursor reaches a theme entry.
         connect(settingsMenu, &QMenu::hovered, settingsMenu, [appearanceMenu](QAction *action) {
-            if (action && action != appearanceMenu->menuAction() && appearanceMenu->isVisible())
+            if (!action || action == appearanceMenu->menuAction() ||
+                appearanceMenu->actions().contains(action))
+                return;
+            if (appearanceMenu->isVisible())
                 appearanceMenu->hide();
         });
         settingsMenu->addSeparator();
@@ -13838,7 +13956,7 @@ class DocumentWindow : public QMainWindow {
     }
 
     void updateEmptyWorkspaceState() {
-        const bool hasOpenSchematics = project_ && !openSchematicTabs_.empty();
+        const bool hasOpenSchematics = project_ && (!openSchematicTabs_.empty() || iconEditorOpen_);
         const bool hasOpenLayouts = project_ && !openLayoutTabs_.empty();
         bool showingCanvasSchematic = false;
         if (project_ && hasOpenSchematics) {
@@ -13874,7 +13992,9 @@ class DocumentWindow : public QMainWindow {
             }
         }
         if (schematicToolbarColumn_)
-            schematicToolbarColumn_->setVisible(showingCanvasSchematic);
+            schematicToolbarColumn_->setVisible(showingCanvasSchematic && !showingIconEditor_);
+        if (schematicPropertiesTabs_)
+            schematicPropertiesTabs_->setVisible(!showingIconEditor_);
         if (layoutToolbarColumn_)
             layoutToolbarColumn_->setVisible(showingCanvasLayout);
         if (layoutOptionsColumn_)
@@ -14014,6 +14134,10 @@ class DocumentWindow : public QMainWindow {
         schematicViewStack_ = new QStackedWidget;
         schematicViewStack_->addWidget(schematicCanvasPage_);
         schematicViewStack_->addWidget(textSchematicEditorPage_);
+        schematicIconEditor_ = new SymbolArtworkEditor;
+        schematicIconEditor_->setOnApply([this] { applySchematicIconArtwork(); });
+        schematicIconEditor_->setOnCancel([this] { closeSchematicIconEditor(); });
+        schematicViewStack_->addWidget(schematicIconEditor_);
         schematicEditorLayout->addWidget(schematicViewStack_, 1);
         schematicEmptyPanel_ = new EmptySchematicPanel;
         schematicEmptyPanel_->setOnCreate(
@@ -14035,7 +14159,8 @@ class DocumentWindow : public QMainWindow {
         schematicEditorStack_->addWidget(schematicEmptyPanel_);
         schematicEditorStack_->addWidget(schematicEditorPage_);
         schematicWorkspaceLayout->addWidget(schematicEditorStack_, 1);
-        auto *schematicProperties = new QTabWidget;
+        schematicPropertiesTabs_ = new QTabWidget;
+        auto *schematicProperties = schematicPropertiesTabs_;
         schematicPropertiesPanel_ = new PropertiesPanel(false);
         schematicPropertiesPanel_->setEditButtonVisible(true);
         schematicPropertiesPanel_->setOnParameterChanged(
@@ -14633,13 +14758,15 @@ class DocumentWindow : public QMainWindow {
         emptyLayout->addWidget(emptyDescription);
         auto *createRow = new QHBoxLayout;
         auto *createTestbenchButton = new QPushButton(QStringLiteral("SystemVerilog Testbench"));
-        createTestbenchButton->setMinimumHeight(72);
-        createTestbenchButton->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
-        setLucideIcon(createTestbenchButton, QStringLiteral("notebook-text"), 20);
+        // Match the compact choice cards used by the Schematic and Layout
+        // creation forms instead of stretching over the whole empty page.
+        createTestbenchButton->setFixedHeight(64);
+        createTestbenchButton->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+        setLucideIcon(createTestbenchButton, QStringLiteral("notebook-text"), 18);
         createTestbenchButton->setToolTip(QStringLiteral("Create a new SystemVerilog testbench"));
         connect(createTestbenchButton, &QPushButton::clicked, this, [this] { addSystemVerilogTestbench(); });
         createRow->addWidget(createTestbenchButton, 1);
-        emptyLayout->addLayout(createRow, 2);
+        emptyLayout->addLayout(createRow, 0);
         emptyLayout->addStretch(1);
         digitalTestbenchEditorTabs_ = new QTabWidget;
         digitalTestbenchEditorTabs_->setDocumentMode(true);
@@ -16361,8 +16488,18 @@ class DocumentWindow : public QMainWindow {
     QWidget *schematicCanvasPage_ = nullptr;
     QWidget *textSchematicEditorPage_ = nullptr;
     TextDocumentEditor *textSchematicEditor_ = nullptr;
+    SymbolArtworkEditor *schematicIconEditor_ = nullptr;
+    QTabWidget *schematicPropertiesTabs_ = nullptr;
     EmptySchematicPanel *schematicEmptyPanel_ = nullptr;
     QWidget *schematicToolbarColumn_ = nullptr;
+    // Icon editor tab session. The tab itself is rebuilt with the schematic
+    // tab strip, so the target cell and symbol are kept here instead.
+    bool iconEditorOpen_ = false;
+    bool showingIconEditor_ = false;
+    openvlsi::ObjectId iconEditorCellId_ = 0;
+    openvlsi::ObjectId iconEditorSymbolId_ = 0;
+    std::string iconEditorSymbolName_;
+    std::string iconEditorOriginalArtwork_;
     QStackedWidget *layoutEditorStack_ = nullptr;
     QWidget *layoutEditorPage_ = nullptr;
     QStackedWidget *layoutViewStack_ = nullptr;
